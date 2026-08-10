@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, type MouseEvent } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
-import { ArrowLeft, Download, Loader2 } from 'lucide-react';
+import { Download, Loader2 } from 'lucide-react';
 import { vfs } from '@/lib/persistence/vfs';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { themePreference, vfsOpenPreferenceV1 } from '@/lib/persistence/storage';
@@ -20,22 +20,7 @@ import { DirView } from './ui/DirView';
 import { FileView } from './ui/FileView';
 import type { FileMedia, ViewState } from './types';
 
-export function VfsExplorer({
-  /**
-   * Optional host-aware exit handler. When provided, a back button is
-   * rendered at the start of the header so users can leave the file
-   * browser without reaching for the sidepanel's browser back.
-   *
-   * Standalone `vfs.html` (no Router ancestor) leaves this undefined and
-   * skips the button — the host page already has its own close affordance.
-   * The sidepanel mount passes `() => navigate(-1)` so the back action
-   * returns to whichever route preceded `/vfs` in MemoryRouter history
-   * (typically `/chat/<sessionId>` or `/chat/new`).
-   */
-  onClose,
-}: {
-  onClose?: () => void;
-} = {}) {
+export function VfsExplorer() {
   const [theme] = useStorageItem(themePreference, 'system');
   const [openPreference, setOpenPreference] = useStorageItem(vfsOpenPreferenceV1, 'smart');
   const [themeReady, setThemeReady] = useState(false);
@@ -425,22 +410,6 @@ export function VfsExplorer({
       <div className="flex flex-col h-screen bg-background text-foreground">
         {/* Header */}
         <header className="flex flex-wrap items-center gap-2 sm:gap-4 px-3 sm:px-5 py-3 border-b border-border shrink-0">
-          {onClose && (
-            <button
-              type="button"
-              onClick={(e: MouseEvent<HTMLButtonElement>) => {
-                // blur so the focus ring doesn't linger on the button after
-                // the route change removes it from DOM
-                e.currentTarget.blur();
-                onClose();
-              }}
-              title={t('common.back')}
-              aria-label={t('common.back')}
-              className="shrink-0 size-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-            >
-              <ArrowLeft className="size-4" />
-            </button>
-          )}
           <div className="flex items-center gap-2 shrink-0">
             <span className="text-base font-semibold tracking-tight">VFS</span>
             <span className="hidden sm:inline text-xs text-muted-foreground/50 font-mono">cebian</span>
@@ -534,13 +503,7 @@ export function VfsExplorer({
           </div>
         </main>
         <Toaster theme={resolveTheme(theme)} />
-        {/* The sidepanel mount already provides a ConfirmOutlet via
-         *  `entrypoints/sidepanel/App.tsx`. In standalone `vfs.html` we own
-         *  the document ourselves and need to provide our own — otherwise
-         *  `showConfirm()` fails closed and the delete dialog silently
-         *  resolves to false. `pathname.endsWith('sidepanel.html')` is the
-         *  same host discriminator StorageSection uses. */}
-        {window.location.pathname.endsWith('sidepanel.html') ? null : <ConfirmOutlet />}
+        <ConfirmOutlet />
       </div>
     </TooltipProvider>
   );

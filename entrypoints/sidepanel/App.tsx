@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { browser } from 'wxt/browser';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from '@/components/ui/sonner';
 import { DialogOutlet } from '@/components/dialogs/outlet';
@@ -22,14 +23,6 @@ import { useSidePanelHandoff } from './useSidePanelHandoff';
 // bundle is the single biggest first-paint win.
 const SettingsRoutes = lazy(() =>
   import('./pages/settings').then(m => ({ default: m.SettingsRoutes })),
-);
-// Same idea for the VFS explorer — react-arborist + lightning-fs read paths.
-// Used to live as a standalone tab (`vfs.html`) reached via Settings →
-// Storage → "Open file browser", which always opened a new tab. Hoisting
-// it as a sidepanel route lets the chat toolbar's HardDrive shortcut jump
-// straight to the file browser view in one click.
-const VfsExplorer = lazy(() =>
-  import('@/entrypoints/vfs/VfsExplorer').then(m => ({ default: m.VfsExplorer })),
 );
 
 /** Resolve 'system' to the actual theme based on OS preference (defaults to 'light'). */
@@ -269,12 +262,13 @@ function App() {
     navigate(lastChatPathRef.current, { replace: true });
   }, [navigate, location.pathname]);
 
-  // Chat 工具栏「文件系统」快捷入口 — 直接跳到 /vfs（内嵌的 VFS 文件浏览器视图，
-  // 不再走 /settings/storage → "Open file browser" → 新标签页的三级跳转）。
+  // Chat 工具栏「文件系统」快捷入口 — 始终在新的浏览器标签页里打开
+  // 独立的 vfs.html 视图，不内嵌进 sidepanel（用户偏好「VFS 与 sidepanel
+  // 分离」的布局，所以撤销了上一版 /vfs 路由内嵌的方案）。
   const handleOpenStorage = useCallback(() => {
     debugLog.info('ui', 'app:open_storage', { fromPath: location.pathname });
-    navigate('/vfs');
-  }, [navigate, location.pathname]);
+    void browser.tabs.create({ url: browser.runtime.getURL('/vfs.html') + '#/workspaces' });
+  }, [location.pathname]);
 
   if (!themeReady || !restored) return null;
 
@@ -282,9 +276,8 @@ function App() {
     <TooltipProvider delayDuration={300}>
       <div className="flex flex-col h-screen overflow-hidden relative">
         {/* Hide Chrome's Header on routes that bring their own header:
-            - /settings/*  → SettingsLayout (top bar + back button)
-            - /vfs         → VfsExplorer (own header with breadcrumbs + download) */}
-        {!location.pathname.startsWith('/settings') && location.pathname !== '/vfs' && (
+            - /settings/*  → SettingsLayout (top bar + back button) */}
+        {!location.pathname.startsWith('/settings') && (
           <Header
             title={chatTitle}
             forkedFrom={chatForkedFrom}
@@ -305,20 +298,6 @@ function App() {
             element={
               <Suspense fallback={null}>
                 <SettingsRoutes basePath="/settings" showBackButton showOpenInTab onBack={handleExitSettings} />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/vfs"
-            element={
-              // VfsExplorer 内部用 window.location.hash 做内部导航（folder/File 跳转、
-              // anchor scroll). 与 sidepanel 自家 router 互不干扰：sidepanel 是
-              // MemoryRouter（不读 window.location.hash），所以把 vfs 嵌进来不会和
-              // /chat/:id 等历史栈串台。
-              // onClose → navigate(-1) 把 back button 接到 MemoryRouter history，
-              // 回到进入 /vfs 之前的页面（通常是 /chat/<id>）。
-              <Suspense fallback={null}>
-                <VfsExplorer onClose={() => navigate(-1)} />
               </Suspense>
             }
           />
