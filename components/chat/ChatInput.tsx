@@ -356,7 +356,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSlash]);
 
-  const canSend = value.trim().length > 0;
+  const canSend = value.trim().length > 0 || quoteChips.length > 0;
 
   // Recorder integration. The captured session lands in attachments via
   // the channel subscription below — NOT via `recorder.stop()`'s return
@@ -431,15 +431,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     }
 
     // Snapshot the text BEFORE any await so a fast follow-up edit doesn't
-    // leak into the outgoing message.
+    // leak into the outgoing message. Use the raw user draft (NOT a
+    // chip-prepended version) as the slash-command candidate — see the
+    // comment in the slash block below.
     let text = outgoingText.trim();
-    // `displayText` is what the user actually typed (`"/writing"` or
-    // `"/writing some user input"`). When a slash command is resolved at
-    // send-time (`!isExpandInline`), `text` gets replaced with the expanded
-    // prompt body — but the user bubble should still show the short command
-    // form, so we keep the original here and pass it through `onSend` as a
-    // separate display hint.
-    const displayText = text;
+    // `displayText` is what shows in the user's bubble in chat history.
+    // The chips already previewed the quoted text, so the bubble only
+    // needs the user's own typed words — no need to echo the quote back.
+    // Slash-command shortening (`/foo bar` → expanded body) is handled
+    // later in this function and overwrites `text` while keeping
+    // `displayText` short.
+    const displayText = outgoingText.trim();
     const dispatchSessionId = sessionIdRef.current;
 
     isDispatchingRef.current = true;
@@ -481,6 +483,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         }
       }
 
+      // Prepend any quote chips above the textarea so the LLM actually
+      // receives the quoted content. The chips are the source of truth
+      // (textarea stays clean), so we splice them in here at the last
+      // possible moment — AFTER slash-command resolution so a `/foo` text
+      // becomes its expanded prompt body before the chip is added. Newline-
+      // separated; if there's nothing else, the chip text is the entire
+      // outgoing message.
+      const chipTexts = quoteChipsRef.current.map((c) => c.text.trimEnd()).filter(Boolean);
+      if (chipTexts.length > 0) {
+        const quoted = chipTexts.join('\n');
+        text = text.length > 0 ? `${quoted}\n\n${text}` : quoted;
+      }
+
       if (recorder.isOwner) {
         // Pre-flight cap check: refuse to send if attachments are already
         // full — otherwise the about-to-be-delivered recording would be
@@ -514,6 +529,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       setHistoryIndex(null);
       setDraft('');
       setQuoteChips([]);
+      quoteChipsRef.current = [];
     } finally {
       isDispatchingRef.current = false;
       setIsDispatching(false);
@@ -534,6 +550,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setHistoryIndex(null);
     setDraft('');
     setQuoteChips([]);
+    quoteChipsRef.current = [];
     interimSuffixRef.current = '';
     speech.stop();
   }, [sessionId, speech.stop]);
@@ -690,15 +707,23 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setHistoryIndex(null);
   }, []);
 
-  // Same as insertText, plus records a chip so the user sees a smaller-font
-  // preview pill above the textarea. The chip is keyed by a monotonic id so
-  // successive quotes stack; the chip text mirrors what `insertText` writes
-  // into the textarea (so what the user sees in the chip == what gets sent).
+  // Mirror of `quoteChips` for synchronous reads from handleSend. The
+  // chips list drives the outgoing message at send-time, so we need to
+  // read the post-update value without waiting for a React flush.
+  const quoteChipsRef = useRef<{ id: string; text: string }[]>([]);
+
+  // Records a quote as a chip above the textarea (the chip becomes the
+  // source of truth — the textarea stays clean). The chip text is what
+  // actually ships to the LLM at send-time: handleSend concatenates the
+  // chip texts with whatever the user typed in the textarea.
   const insertQuote = useCallback((text: string) => {
-    insertText(text);
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    setQuoteChips((prev) => [...prev, { id, text }]);
-  }, [insertText]);
+    setQuoteChips((prev) => {
+      const next = [...prev, { id, text }];
+      quoteChipsRef.current = next;
+      return next;
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
 
@@ -1319,7 +1344,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 </pre>
                 <button
                   type="button"
-                  onClick={() => setQuoteChips((prev) => prev.filter((c) => c.id !== chip.id))}
+                  onClick={() => {
+                    setQuoteChips((prev) => {
+                      const next = prev.filter((c) => c.id !== chip.id);
+                      quoteChipsRef.current = next;
+                      return next;
+                    });
+                  }}
                   title={t('chat.composer.removeQuoteChip')}
                   aria-label={t('chat.composer.removeQuoteChip')}
                   className="shrink-0 -mr-0.5 -mt-0.5 p-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-background/60 transition-colors"
