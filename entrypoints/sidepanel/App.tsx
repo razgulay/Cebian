@@ -315,8 +315,10 @@ function App() {
               // anchor scroll). 与 sidepanel 自家 router 互不干扰：sidepanel 是
               // MemoryRouter（不读 window.location.hash），所以把 vfs 嵌进来不会和
               // /chat/:id 等历史栈串台。
+              // onClose → navigate(-1) 把 back button 接到 MemoryRouter history，
+              // 回到进入 /vfs 之前的页面（通常是 /chat/<id>）。
               <Suspense fallback={null}>
-                <VfsExplorer />
+                <VfsExplorer onClose={() => navigate(-1)} />
               </Suspense>
             }
           />
