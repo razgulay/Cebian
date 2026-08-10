@@ -38,11 +38,17 @@ export interface SelectionQuoteButtonProps {
   onConsumed?: () => void;
 }
 
-/** Wrap a free-form user selection in Unicode curly quote marks and append a
- *  trailing vertical-bar marker so the user can visually distinguish the
- *  quoted excerpt from their own typing. Markdown treats all of this as
- *  plain text \u2014 no italic / bold markers, since `rehypeRaw` is not enabled
- *  and curly quote marks interfere with `*` / `_` italic parsing anyway.
+/** Wrap a free-form user selection as a visible quoted block. The user's
+ *  requested format is the literal word `quote` framing the selected text:
+ *
+ *      quote "Th\u1EF1c ch\u1EA5t b\u1ED9 nh\u1EDB trong h\u1EC7 th\u1ED1ng" quote
+ *
+ *  The literal word is preferred over a graphical marker (a previous version
+ *  used `\u258E` LEFT VERTICAL BLOCK characters, which rendered as solid
+ *  black bars in the chat input's monospace font and visually dominated the
+ *  excerpt). Markdown treats all of this as plain text \u2014 no italic / bold
+ *  markers, since `rehypeRaw` is not enabled and curly quote marks interfere
+ *  with `*` / `_` italic parsing anyway.
  *  A single trailing newline keeps the quoted block close to whatever the
  *  user types next instead of being separated by a blank line. */
 function formatBlockquote(raw: string): string {
@@ -51,12 +57,13 @@ function formatBlockquote(raw: string): string {
   const lines = trimmed
     .split('\n')
     .map((line) => line.replace(/^\s*>?\s?/, ''));
-  const BAR = '\u258E';
-  const wrapped = lines.map((l) => `${BAR} ${l}`).join('\n');
   if (lines.length === 1) {
-    return `\u258E\u201C${lines[0]}\u201D ${BAR}\n`;
+    return `quote \u201C${lines[0]}\u201D quote\n`;
   }
-  return `\u201C${wrapped}\u201D\n`;
+  // Multi-line: keep the `quote \u2026 quote` framing visible at the top/bottom
+  // edges so it's obvious even when the selection spans many lines.
+  const framed = lines.map((l) => `> ${l}`).join('\n');
+  return `quote\n${framed}\nquote\n`;
 }
 export function SelectionQuoteButton({
   scopeSelector,
