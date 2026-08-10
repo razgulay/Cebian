@@ -866,7 +866,11 @@ vfs:
   pathNotFound: "Path not found: $1"
   unknownError: "Unknown error"
   # Session whose workspace dir survives but the session itself was deleted. $1 = short id
-  unknownSession: "Unknown conversation · $1"
+  # Workspace folder whose parent conversation was deleted. The folder is
+  # still on disk but no longer reachable from any session. $1 = short id
+  # (first 8 chars of the UUID that names the directory).
+  unknownSession: "Orphan workspace · $1"
+  unknownSessionTooltip: "Workspace folder from a deleted conversation — safe to delete."
   untitledSession: "Untitled conversation"
   # $1 = formatted date
   workspaceCreated: "Created $1"

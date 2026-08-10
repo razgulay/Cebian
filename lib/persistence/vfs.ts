@@ -281,7 +281,9 @@ async function mkdir(dirPath: string, opts?: MkdirOptions | number): Promise<voi
   const mkdirOpts = mode !== undefined ? { mode } : undefined;
 
   if (!recursive) {
-    return pfs().mkdir(dirPath, mkdirOpts);
+    await pfs().mkdir(dirPath, mkdirOpts);
+    emitChange({ kind: 'write', path: dirPath });
+    return;
   }
 
   const parts = dirPath.split('/').filter(Boolean);
@@ -294,6 +296,11 @@ async function mkdir(dirPath: string, opts?: MkdirOptions | number): Promise<voi
       if (e.code !== 'EEXIST') throw e;
     }
   }
+  // Emit once for the leaf. Intermediate ancestor dirs (created by the
+  // recursive loop) intentionally do NOT emit — `writeFile` uses mkdir
+  // internally to ensure parent dirs exist and would otherwise produce
+  // one event per ancestor per write, which is chatty without value.
+  emitChange({ kind: 'write', path: dirPath });
 }
 
 interface RmOptions {

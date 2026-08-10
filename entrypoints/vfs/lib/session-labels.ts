@@ -32,19 +32,27 @@ export async function resolveWorkspaceLabels(
  *  孤儿目录 → 「未知会话 · 短ID」、无日期。 */
 /** 工作区目录的列表项标签。已知会话 → 标题（空标题回落「未命名会话」）+ 最后活动日期 +
  *  完整 UUID（列表第二行以灰字展示，即真实目录名，便于区分同名会话 / 复制引用）；
- *  孤儿目录 → 「未知会话 · 短ID」、无日期、`uuid` 留空（标题里已含短码，不重复）。 */
+ *  孤儿目录 → 「孤立工作区 · 短ID」、无日期，但第二行仍显示完整 UUID，便于排查 + 删除。 */
 export function formatWorkspaceEntry(
   uuid: string,
   row: SessionLabelRow | undefined,
-): { title: string; dateLabel: string; uuid: string } {
+): { title: string; dateLabel: string; uuid: string; isOrphan: boolean } {
   if (!row) {
-    // 孤儿目录：标题里已含短 ID，故第二行的 uuid 留空，避免重复。
-    return { title: t('vfs.unknownSession', [shortId(uuid)]), dateLabel: '', uuid: '' };
+    // 孤儿目录：标题里已含短 ID，第二行仍展示完整 UUID 让用户能从工作区根
+    // 直接定位或照着删除目录名。`isOrphan: true` 让 DirRow 给标题加 tooltip
+    // 解释「这是已删除会话的残留目录」。
+    return {
+      title: t('vfs.unknownSession', [shortId(uuid)]),
+      dateLabel: '',
+      uuid,
+      isOrphan: true,
+    };
   }
   return {
     title: row.title.trim() || t('vfs.untitledSession'),
     dateLabel: formatDate(row.updatedAt),
     uuid,
+    isOrphan: false,
   };
 }
 

@@ -369,6 +369,10 @@ function DirRow({
   // takes up flex-1, the kebab lives at the right. Two sibling buttons are
   // valid HTML — nested buttons would be the actual problem.
   const showActions = !!(onCopy || onCut || onDelete || onStartRename);
+  // Orphan workspace rows: tooltip explains "this is a leftover from a
+  // deleted session, safe to delete". `title` is the cheapest accessible
+  // affordance; we don't pull in Tooltip just for this one row case.
+  const titleTooltip = wsLabel?.isOrphan ? t('vfs.unknownSessionTooltip') : displayName;
   return (
     <div className="flex items-stretch group">
       {isRenaming ? (
@@ -389,8 +393,12 @@ function DirRow({
           )}
           <span className="flex-1 min-w-0 flex flex-col">
             <span
-              title={displayName}
-              className="text-sm truncate text-foreground/90 group-hover:text-foreground transition-colors"
+              title={titleTooltip}
+              className={
+                wsLabel?.isOrphan
+                  ? 'text-sm truncate text-muted-foreground group-hover:text-foreground transition-colors'
+                  : 'text-sm truncate text-foreground/90 group-hover:text-foreground transition-colors'
+              }
             >
               {displayName}
             </span>
