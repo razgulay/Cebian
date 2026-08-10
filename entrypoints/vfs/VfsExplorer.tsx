@@ -18,7 +18,7 @@ import { DirView } from './ui/DirView';
 import { FileView } from './ui/FileView';
 import type { FileMedia, ViewState } from './types';
 
-export default function App() {
+export function VfsExplorer() {
   const [theme] = useStorageItem(themePreference, 'system');
   const [openPreference, setOpenPreference] = useStorageItem(vfsOpenPreferenceV1, 'smart');
   const [themeReady, setThemeReady] = useState(false);
