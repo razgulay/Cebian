@@ -21,6 +21,7 @@ function parseTokenInput(raw: string): number | undefined {
 
 interface ModelListItemProps {
   model: CustomModelDef;
+  onToggleEnabled: (modelId: string) => void;
   onToggleReasoning: (modelId: string) => void;
   onToggleImage: (modelId: string) => void;
   onRemove: (modelId: string) => void;
@@ -28,15 +29,20 @@ interface ModelListItemProps {
 }
 
 /**
- * 自定义 provider 里的单个模型行：摘要行（modelId + 非默认 chip + 推理/多模态开关 +
- * 删除 + 展开箭头）+ 展开后的 context/maxTokens 配置。父级用 <Accordion> 包裹一组
+ * 自定义 provider 里的单个模型行。两行布局：
+ * - 行 1：modelId + 非默认 chip + 删除 + 展开箭头。ModelId 占满剩余宽度，避免
+ *   长 id 被截断（早期一行布局下 "claude-opus-4-6-thinking" 这种长名字只有 7-8 字符宽）。
+ * - 行 2：显示/推理/多模态 三个开关。
+ * 父级用 <Accordion> 包裹一组，展开后接 context/maxTokens 配置。
  */
-export function ModelListItem({ model, onToggleReasoning, onToggleImage, onRemove, onFieldChange }: ModelListItemProps) {
+export function ModelListItem({ model, onToggleEnabled, onToggleReasoning, onToggleImage, onRemove, onFieldChange }: ModelListItemProps) {
+  const enabledId = useId();
   const reasoningId = useId();
   const imageId = useId();
   const ctxId = useId();
   const maxId = useId();
 
+  const enabled = model.enabled !== false;
   const ctxChip = model.contextWindow != null && model.contextWindow !== DEFAULT_CONTEXT_WINDOW
     ? formatCompactCount(model.contextWindow)
     : null;
@@ -46,44 +52,64 @@ export function ModelListItem({ model, onToggleReasoning, onToggleImage, onRemov
 
   return (
     <AccordionItem value={model.modelId} className="border-0">
-      <div className="flex items-center gap-2 text-xs py-1.5">
-        <span className="flex-1 min-w-0 font-mono truncate">{model.modelId}</span>
-        {(ctxChip || maxChip) && (
-          <span className="shrink-0 text-[0.6rem] text-muted-foreground tabular-nums whitespace-nowrap">
-            {[ctxChip, maxChip].filter(Boolean).join(' · ')}
+      <div className={`text-xs py-1.5 space-y-1 ${enabled ? '' : 'opacity-50'}`}>
+        {/* Row 1: modelId + chips + delete + accordion trigger */}
+        <div className="flex items-center gap-2">
+          <span className="flex-1 min-w-0 font-mono truncate">
+            {model.modelId}
+            {!enabled && (
+              <span className="ml-1.5 text-[0.6rem] text-muted-foreground font-sans">({t('provider.form.hidden')})</span>
+            )}
           </span>
-        )}
-        <div className="flex items-center gap-1 shrink-0">
-          <Label htmlFor={reasoningId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.reasoning')}</Label>
-          <Switch
-            id={reasoningId}
-            checked={model.reasoning}
-            onCheckedChange={() => onToggleReasoning(model.modelId)}
-            className="scale-75"
+          {(ctxChip || maxChip) && (
+            <span className="shrink-0 text-[0.6rem] text-muted-foreground tabular-nums whitespace-nowrap">
+              {[ctxChip, maxChip].filter(Boolean).join(' · ')}
+            </span>
+          )}
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 text-destructive hover:text-destructive"
+            onClick={() => onRemove(model.modelId)}
+            aria-label={t('provider.form.removeModel', [model.modelId])}
+          >
+            <Trash2 className="size-3" />
+          </Button>
+          <AccordionTrigger
+            aria-label={t('provider.form.modelSettingsFor', [model.modelId])}
+            className="py-0 px-1 flex-none gap-0 hover:no-underline [&>svg]:size-3.5"
           />
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <Label htmlFor={imageId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.image')}</Label>
-          <Switch
-            id={imageId}
-            checked={model.image ?? false}
-            onCheckedChange={() => onToggleImage(model.modelId)}
-            className="scale-75"
-          />
+        {/* Row 2: 3 toggles — Show / Reasoning / Multimodal. flex-wrap 兜底窄屏不溢出 */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1">
+            <Label htmlFor={enabledId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.enabled')}</Label>
+            <Switch
+              id={enabledId}
+              checked={enabled}
+              onCheckedChange={() => onToggleEnabled(model.modelId)}
+              className="scale-75"
+            />
+          </div>
+          <div className="flex items-center gap-1">
+            <Label htmlFor={reasoningId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.reasoning')}</Label>
+            <Switch
+              id={reasoningId}
+              checked={model.reasoning}
+              onCheckedChange={() => onToggleReasoning(model.modelId)}
+              className="scale-75"
+            />
+          </div>
+          <div className="flex items-center gap-1">
+            <Label htmlFor={imageId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.image')}</Label>
+            <Switch
+              id={imageId}
+              checked={model.image ?? false}
+              onCheckedChange={() => onToggleImage(model.modelId)}
+              className="scale-75"
+            />
+          </div>
         </div>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          className="shrink-0 text-destructive hover:text-destructive"
-          onClick={() => onRemove(model.modelId)}
-          aria-label={t('provider.form.removeModel', [model.modelId])}
-        >
-          <Trash2 className="size-3" />
-        </Button>
-        <AccordionTrigger
-          aria-label={t('provider.form.modelSettingsFor', [model.modelId])}
-          className="py-0 px-1 flex-none gap-0 hover:no-underline [&>svg]:size-3.5"
-        />
       </div>
       <AccordionContent className="pb-2">
         <div className="rounded-md bg-muted/30 p-2 space-y-1.5">

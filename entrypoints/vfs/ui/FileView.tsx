@@ -1,14 +1,15 @@
-import { useMemo, useState } from 'react';
-import { Code, Eye } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Code, Eye, Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
 import { CopyButton } from '@/components/common/CopyButton';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
+import { createPdfPreviewController, resolvePdfRenderScale, type PdfIntrinsicMeasurement } from '@/lib/content/pdf-loader';
 import { t } from '@/lib/i18n';
-import { fileExtension, formatSize, pickFileIcon } from '../lib/path-utils';
+import { fileExtension, formatSize, pickFileIcon, resolveMarkdownOpenMode, type VfsOpenPreference } from '../lib/path-utils';
 import type { FileMedia } from '../types';
 
-export function FileView({ path, media }: { path: string; media: FileMedia }) {
+export function FileView({ path, media, openPreference }: { path: string; media: FileMedia; openPreference: VfsOpenPreference }) {
   const name = path.split('/').pop() ?? path;
   const ext = fileExtension(name);
   const Icon = pickFileIcon(ext);
@@ -17,12 +18,12 @@ export function FileView({ path, media }: { path: string; media: FileMedia }) {
   // bits that apply to its type (copy / line count / size / toggle), keeping
   // the per-type header rules colocated with the body.
   const renderHeader = (right: React.ReactNode) => (
-    <div className="flex items-center justify-between px-4 py-2.5 bg-card border-b border-border">
+    <div className="flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2.5 bg-card border-b border-border">
       <div className="flex items-center gap-2.5 min-w-0">
         <Icon size={18} strokeWidth={1.5} className="shrink-0 text-muted-foreground" />
         <span className="text-sm font-medium truncate">{name}</span>
       </div>
-      <div className="flex items-center gap-2 shrink-0">{right}</div>
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">{right}</div>
     </div>
   );
 
@@ -54,7 +55,9 @@ export function FileView({ path, media }: { path: string; media: FileMedia }) {
       );
     }
     case 'markdown':
-      return <MarkdownFileView media={media} renderHeader={renderHeader} />;
+      return <MarkdownFileView key={`${path}:${openPreference}`} path={path} media={media} openPreference={openPreference} renderHeader={renderHeader} />;
+    case 'pdf':
+      return <PdfFileView media={media} renderHeader={renderHeader} />;
     case 'image':
       return (
         <div className="border border-border rounded-lg overflow-hidden">
@@ -99,6 +102,15 @@ export function FileView({ path, media }: { path: string; media: FileMedia }) {
           </div>
         </div>
       );
+    case 'unknown':
+      return (
+        <div className="border border-border rounded-lg overflow-hidden">
+          {renderHeader(sizeBadge)}
+          <div className="p-4 text-[13px] text-muted-foreground">
+            {t('vfs.unknownFile', [formatSize(media.size)])}
+          </div>
+        </div>
+      );
     case 'tooLarge':
       return (
         <div className="border border-border rounded-lg overflow-hidden">
@@ -129,13 +141,17 @@ export function FileView({ path, media }: { path: string; media: FileMedia }) {
  *  re-toggle each time. State naturally resets only when leaving the
  *  markdown branch entirely (different file class / dir / error). */
 function MarkdownFileView({
+  path,
   media,
+  openPreference,
   renderHeader,
 }: {
+  path: string;
   media: Extract<FileMedia, { type: 'markdown' }>;
+  openPreference: VfsOpenPreference;
   renderHeader: (right: React.ReactNode) => React.ReactNode;
 }) {
-  const [mode, setMode] = useState<'preview' | 'source'>('preview');
+  const [mode, setMode] = useState<'preview' | 'source'>(() => resolveMarkdownOpenMode(openPreference));
   const lineCount = media.content.length === 0 ? 0 : media.content.split('\n').length;
   const showingPreview = mode === 'preview';
 
@@ -148,19 +164,10 @@ function MarkdownFileView({
   const hasFrontmatter = Object.keys(frontmatterData).length > 0;
 
   const toggle = (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          onClick={() => setMode(showingPreview ? 'source' : 'preview')}
-          aria-label={showingPreview ? t('vfs.viewSource') : t('vfs.preview')}
-          className="size-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-        >
-          {showingPreview ? <Code className="size-4" /> : <Eye className="size-4" />}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent>{showingPreview ? t('vfs.viewSource') : t('vfs.preview')}</TooltipContent>
-    </Tooltip>
+    <div className="flex items-center rounded-md border border-border p-0.5">
+      <ModeButton active={showingPreview} label={t('vfs.preview')} onClick={() => setMode('preview')}><Eye className="size-3.5" /></ModeButton>
+      <ModeButton active={!showingPreview} label={t('vfs.viewSource')} onClick={() => setMode('source')}><Code className="size-3.5" /></ModeButton>
+    </div>
   );
 
   return (
@@ -198,7 +205,7 @@ function MarkdownFileView({
             }
           >
             {hasFrontmatter && <FrontmatterTable data={frontmatterData} />}
-            <MarkdownRenderer content={body} />
+            <MarkdownRenderer content={body} currentVfsPath={path} />
           </div>
         ) : (
           <pre className="p-4 text-[13px] leading-relaxed font-mono text-foreground/90 whitespace-pre-wrap wrap-break-word selection:bg-primary/20">
@@ -207,6 +214,165 @@ function MarkdownFileView({
         )}
       </div>
     </div>
+  );
+}
+
+function ModeButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" aria-label={label} aria-pressed={active} onClick={onClick} className={`size-6 inline-flex items-center justify-center rounded ${active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
+          {children}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function PdfFileView({ media, renderHeader }: {
+  media: Extract<FileMedia, { type: 'pdf' }>;
+  renderHeader: (right: React.ReactNode) => React.ReactNode;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const controllerRef = useRef<ReturnType<typeof createPdfPreviewController> | null>(null);
+  const loadedDocumentRef = useRef<Uint8Array | null>(null);
+  const passwordUpdateRef = useRef<((password: string) => void) | null>(null);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'password' | 'error'>('loading');
+  const [error, setError] = useState('');
+  const [pageCount, setPageCount] = useState(0);
+  const [page, setPage] = useState(1);
+  const [zoom, setZoom] = useState(1);
+  const [fitWidth, setFitWidth] = useState(true);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [intrinsicMeasurement, setIntrinsicMeasurement] = useState<PdfIntrinsicMeasurement | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [password, setPassword] = useState('');
+  const [passwordReason, setPasswordReason] = useState(1);
+
+  useEffect(() => {
+    let live = true;
+    const controller = createPdfPreviewController(media.data);
+    controllerRef.current = controller;
+    loadedDocumentRef.current = null;
+    setIntrinsicMeasurement(null);
+    setStatus('loading');
+    controller.load((updatePassword, reason) => {
+      if (!live) return;
+      passwordUpdateRef.current = updatePassword;
+      setPasswordReason(reason);
+      setStatus('password');
+    }).then((count) => {
+      if (!live) return;
+      loadedDocumentRef.current = media.data;
+      setPageCount(count);
+      setPage(1);
+      setStatus('ready');
+    }).catch((reason) => {
+      if (!live) return;
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setStatus('error');
+    });
+    return () => {
+      live = false;
+      controllerRef.current = null;
+      loadedDocumentRef.current = null;
+      void controller.destroy();
+    };
+  }, [media.data]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const update = () => setContainerWidth(container.clientWidth);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [status]);
+
+  const renderScale = resolvePdfRenderScale(
+    fitWidth,
+    containerWidth,
+    zoom,
+    { document: media.data, page },
+    intrinsicMeasurement,
+  );
+
+  useEffect(() => {
+    if (
+      status !== 'ready' ||
+      !canvasRef.current ||
+      !controllerRef.current ||
+      loadedDocumentRef.current !== media.data
+    ) return;
+    let live = true;
+    setRendering(true);
+    controllerRef.current.renderPage(page, canvasRef.current, renderScale).then(({ width }) => {
+      if (!live || width <= 0) return;
+      setIntrinsicMeasurement({ document: media.data, page, width: width / renderScale });
+    }).catch((reason) => {
+      if (!live) return;
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setStatus('error');
+    }).finally(() => {
+      if (live) setRendering(false);
+    });
+    return () => { live = false; };
+  }, [status, page, renderScale, media.data]);
+
+  function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    if (!password || !passwordUpdateRef.current) return;
+    setStatus('loading');
+    passwordUpdateRef.current(password);
+    setPassword('');
+  }
+
+  const toolbar = status === 'ready' ? (
+    <div className="flex min-w-0 flex-wrap items-center justify-end gap-1">
+      <IconButton label={t('vfs.previousPage')} disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}><ChevronLeft className="size-4" /></IconButton>
+      <input aria-label={t('vfs.pageNumber')} type="number" min={1} max={pageCount} value={page} onChange={(event) => setPage(Math.min(pageCount, Math.max(1, Number(event.target.value) || 1)))} className="h-7 w-12 rounded border border-border bg-background px-1 text-center text-xs tabular-nums" />
+      <span className="text-xs text-muted-foreground tabular-nums">/ {pageCount}</span>
+      <IconButton label={t('vfs.nextPage')} disabled={page >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}><ChevronRight className="size-4" /></IconButton>
+      <span className="mx-1 h-4 w-px bg-border" />
+      <IconButton label={t('vfs.zoomOut')} disabled={!fitWidth && zoom <= 0.5} onClick={() => { setFitWidth(false); setZoom((value) => Math.max(0.5, value - 0.25)); }}><ZoomOut className="size-4" /></IconButton>
+      <span className="w-10 text-center text-xs tabular-nums">{Math.round(renderScale * 100)}%</span>
+      <IconButton label={t('vfs.zoomIn')} disabled={!fitWidth && zoom >= 3} onClick={() => { setFitWidth(false); setZoom((value) => Math.min(3, value + 0.25)); }}><ZoomIn className="size-4" /></IconButton>
+      <IconButton label={t('vfs.fitWidth')} active={fitWidth} onClick={() => setFitWidth(true)}><Maximize2 className="size-4" /></IconButton>
+    </div>
+  ) : <span className="text-xs text-muted-foreground">{formatSize(media.size)}</span>;
+
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-border">
+      {renderHeader(toolbar)}
+      <div ref={containerRef} className="relative min-h-48 min-w-0 overflow-auto bg-muted/30 p-3 max-h-[calc(100vh-10rem)]">
+        {status === 'loading' && <div role="status" className="flex h-48 items-center justify-center text-sm text-muted-foreground">{t('common.loading')}</div>}
+        {status === 'password' && (
+          <form onSubmit={submitPassword} className="mx-auto flex min-h-48 max-w-sm flex-col items-stretch justify-center gap-3">
+            <p className="text-sm text-muted-foreground">{t(passwordReason === 2 ? 'vfs.pdfWrongPassword' : 'vfs.pdfPasswordRequired')}</p>
+            <div className="flex min-w-0 gap-2">
+              <input autoFocus type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-border bg-background px-2 text-sm" />
+              <button type="submit" className="h-8 shrink-0 rounded bg-primary px-3 text-xs text-primary-foreground">{t('common.confirm')}</button>
+            </div>
+          </form>
+        )}
+        {status === 'error' && <div role="alert" className="flex min-h-48 items-center justify-center p-4 text-center text-sm text-destructive">{t('vfs.pdfLoadFailed', [error])}</div>}
+        <canvas ref={canvasRef} className={`mx-auto block max-w-none bg-white shadow-sm ${status === 'ready' ? '' : 'hidden'} ${rendering ? 'opacity-60' : ''}`} />
+      </div>
+    </div>
+  );
+}
+
+function IconButton({ label, active, disabled, onClick, children }: { label: string; active?: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" title={label} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick} className={`size-7 inline-flex shrink-0 items-center justify-center rounded-md disabled:opacity-40 ${active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}>{children}</button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

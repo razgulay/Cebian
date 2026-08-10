@@ -51,7 +51,9 @@ import {
 } from '@/lib/agent/tool-permissions';
 import type { ServerMessage, TurnSettings } from '@/lib/ipc/protocol';
 import type { SessionRecord } from '@/lib/persistence/db';
-import { truncateForRetry, sanitizeAgentMessages } from '@/lib/agent/message-helpers';
+import { truncateForRetry, truncateForEditRerun, sanitizeAgentMessages, extractUserText } from '@/lib/agent/message-helpers';
+import type { Message } from '@earendil-works/pi-ai';
+import { debugLog, withSession } from '@/lib/debug/log';
 import {
   providerCredentials,
   customProviders as customProvidersStorage,
@@ -67,6 +69,31 @@ import { getMCPManager } from '@/lib/mcp/manager';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { t } from '@/lib/i18n';
 import { acquireKeepAlive, releaseKeepAlive } from './sw-keepalive';
+
+/**
+ * Best-effort size of `JSON.stringify(value)` in characters. Returns 0 on
+ * circular reference or other stringify failure. Used by the debug log to
+ * surface payload sizes without dumping the full content (which may carry
+ * secrets — credentials, file contents, etc.). The actual log entry is just
+ * the integer size, not the stringified value itself.
+ */
+function safeStringifySize(value: unknown): number {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Per-token `message_update` events are filtered out by `NOISY_PREFIXES` in
+ * the debug-log layer (one log row per token would drown the timeline). To
+ * still give a sense of streaming throughput, we accumulate the count
+ * client-side and emit `stream:progress` every N tokens per session. The
+ * threshold is small enough to surface stalls but large enough that a 500-
+ * token reply produces only ~10 progress rows instead of 500.
+ */
+const STREAM_DELTA_LOG_THRESHOLD = 50;
 
 // ─── Types ───
 
@@ -130,6 +157,29 @@ interface ManagedSession {
    * to abandon the turn. Cleared back to `undefined` when compaction ends.
    */
   compactionController?: AbortController;
+  /** Cumulative delta count for the current assistant stream. Reset on
+   *  `message_start`, incremented on each `message_update` (assistant
+   *  role), used to emit `stream:progress` every
+   *  `STREAM_DELTA_LOG_THRESHOLD` tokens for observability without
+   *  per-token log spam. */
+  streamDeltaCount: number;
+  /** Wall-clock timestamp of `message_start` for the active stream, used
+   *  to compute `stream:progress.durationMs` deltas. Reset on message_start. */
+  streamStartedAt: number;
+  /** LLM latency marker: wall-clock of the most recent `agent_start` (i.e.
+   *  when we handed control to the model). Reset to 0 on `agent_end` after
+   *  emitting `llm:request:end`. Used to compute TTFT and total request
+   *  duration. */
+  llmRequestStartedAt: number;
+  /** LLM latency marker: wall-clock of the FIRST assistant `message_start`
+   *  in the current turn (= TTFT point). Set once per turn, reset on
+   *  `agent_end`. A turn can have multiple assistant messages (one per tool
+   *  round) — only the first one is the user-visible TTFT. */
+  llmFirstTokenAt: number;
+  /** LLM latency marker: count of assistant message_starts in the current
+   *  turn. Equal to the number of LLM rounds (initial + N tool rounds).
+   *  Reset on `agent_end`. Useful to spot turns with excessive tool loops. */
+  llmRounds: number;
   modelKey: string;
   /** Unified interactive tool bridge manager for this session. */
   toolCtx: SessionToolContext;
@@ -454,6 +504,11 @@ class AgentManager {
       toolCtx,
       permissionBridge,
       unsubscribeAgent: () => {},
+      streamDeltaCount: 0,
+      streamStartedAt: 0,
+      llmRequestStartedAt: 0,
+      llmFirstTokenAt: 0,
+      llmRounds: 0,
     };
     this.wireSubscriptions(managed);
     this.sessions.set(sessionId, managed);
@@ -481,6 +536,14 @@ class AgentManager {
     });
     managed.toolCtx.subscribe((toolName, pending) => {
       if (pending) {
+        const args = pending.request as Record<string, unknown> | undefined;
+        const argsSize = args ? safeStringifySize(args) : 0;
+        debugLog.info('tool', 'tool:dispatch', withSession({
+          toolName,
+          toolCallId: pending.toolCallId,
+          argsKeys: args ? Object.keys(args) : [],
+          argsSize,
+        }, managed.sessionId));
         this.broadcast(managed.sessionId, {
           type: 'tool_pending',
           sessionId: managed.sessionId,
@@ -489,6 +552,19 @@ class AgentManager {
           args: pending.request,
         });
       } else {
+        // toolCtx.subscribe fires with pending=null on both resolve() and
+        // cancel(); the InteractiveBridge doesn't expose which one happened
+        // via the callback signature, so we can't tell apart "user answered"
+        // from "user bypassed/cancelled" without extra plumbing. The agent
+        // will surface tool errors as separate AgentEvent 'tool_resolved'
+        // variants downstream, so the resultSize is best-effort (0 here).
+        // `ok: true` reflects "the request cycle completed normally" —
+        // downstream `recv:tool_failed` events capture actual tool errors.
+        debugLog.info('tool', 'tool:resolved', withSession({
+          toolName,
+          ok: true,
+          resultSize: 0,
+        }, managed.sessionId));
         this.broadcast(managed.sessionId, {
           type: 'tool_resolved',
           sessionId: managed.sessionId,
@@ -500,6 +576,132 @@ class AgentManager {
 
   private async handleAgentEvent(managed: ManagedSession, event: AgentEvent): Promise<void> {
     const { sessionId, agent } = managed;
+
+    // Emit type-aware variants for the most-queried AgentEvent boundaries
+    // so log filters can target a single transition by message prefix instead
+    // of grepping JSON-stringified payloads from the generic `event:${type}`
+    // log below. The generic entry still fires for backward compat and for
+    // events that don't have a dedicated variant.
+    //
+    // Note: tool_pending / tool_resolved live on the toolCtx subscription
+    // (not AgentEvent), so their type-aware logs are added there below.
+    switch (event.type) {
+      case 'message_start': {
+        const start = event as Extract<AgentEvent, { type: 'message_start' }>;
+        debugLog.info('stream', 'message:start', withSession({
+          role: start.message?.role ?? 'unknown',
+        }, sessionId));
+        // Reset streaming counter at the start of each new assistant message
+        // so progress rows are scoped to the current stream, not cumulative
+        // across multiple messages in one turn.
+        if (start.message?.role === 'assistant') {
+          managed.streamDeltaCount = 0;
+          managed.streamStartedAt = Date.now();
+          // LLM latency marker: first assistant message_start is the
+          // user-visible TTFT. Only fire on the FIRST message in this turn
+          // (a turn can have multiple assistant messages when tool calls
+          // happen — we only care about the first one for TTFT, subsequent
+          // ones are tool-round continuations).
+          if (managed.llmRequestStartedAt > 0 && managed.llmFirstTokenAt === 0) {
+            managed.llmFirstTokenAt = Date.now();
+            const ttftMs = managed.llmFirstTokenAt - managed.llmRequestStartedAt;
+            debugLog.info('llm', 'llm:request:first_token', withSession({
+              ttftMs,
+              round: managed.llmRounds + 1,
+            }, sessionId));
+            managed.llmRounds += 1;
+          }
+        }
+        break;
+      }
+      case 'agent_start':
+        debugLog.info('stream', 'agent:start', withSession({
+          msgsLen: agent.state.messages.length,
+        }, sessionId));
+        // LLM latency marker: marks the moment we hand control to the model.
+        // Paired with `llm:request:first_token` (on first assistant message)
+        // and `llm:request:end` (on agent_end) so we can compute time-to-
+        // first-token (TTFT) and total request duration from the log alone.
+        managed.llmRequestStartedAt = Date.now();
+        debugLog.info('llm', 'llm:request:start', withSession({
+          modelKey: managed.modelKey,
+          msgsLen: agent.state.messages.length,
+        }, sessionId));
+        break;
+      case 'agent_end': {
+        const end = event as Extract<AgentEvent, { type: 'agent_end' }>;
+        const ok = !(end as { error?: unknown }).error;
+        debugLog.info('stream', 'agent:end', withSession({
+          ok,
+          msgsLen: agent.state.messages.length,
+        }, sessionId));
+        // LLM latency marker: end of the entire LLM request (after any tool
+        // rounds inside the turn). `totalDurationMs` covers thinking + tool
+        // execution + streaming. `tokensCount` is the cumulative delta count
+        // for the assistant messages in this turn. `ttftMs` is the wall-clock
+        // from request start to the first assistant message_start (the most
+        // user-visible latency — "how long until I see the first character").
+        if (managed.llmRequestStartedAt > 0) {
+          const totalDurationMs = Date.now() - managed.llmRequestStartedAt;
+          debugLog.info('llm', 'llm:request:end', withSession({
+            ok,
+            totalDurationMs,
+            ttftMs: managed.llmFirstTokenAt > 0
+              ? managed.llmFirstTokenAt - managed.llmRequestStartedAt
+              : null,
+            tokensCount: managed.streamDeltaCount,
+            rounds: managed.llmRounds,
+          }, sessionId));
+          // Reset markers so the next turn starts clean.
+          managed.llmRequestStartedAt = 0;
+          managed.llmFirstTokenAt = 0;
+          managed.llmRounds = 0;
+        }
+        break;
+      }
+      case 'tool_execution_start': {
+        // Tool execution boundary (from pi-agent-core). We log tool name +
+        // arg sizes only — never the args themselves (they can carry file
+        // paths, URLs, partial prompts). Pairs with `tool_execution_end`
+        // below for timing.
+        const te = event as Extract<AgentEvent, { type: 'tool_execution_start' }> & {
+          toolCallId?: string;
+          toolName?: string;
+          args?: unknown;
+        };
+        debugLog.info('tool', 'tool:exec:start', withSession({
+          toolName: te.toolName ?? 'unknown',
+          toolCallId: te.toolCallId ?? null,
+          argsSize: safeStringifySize(te.args),
+        }, sessionId));
+        break;
+      }
+      case 'tool_execution_end': {
+        const te = event as Extract<AgentEvent, { type: 'tool_execution_end' }> & {
+          toolCallId?: string;
+          toolName?: string;
+          result?: unknown;
+          isError?: boolean;
+        };
+        debugLog.info('tool', 'tool:exec:end', withSession({
+          toolName: te.toolName ?? 'unknown',
+          toolCallId: te.toolCallId ?? null,
+          resultSize: safeStringifySize(te.result),
+          isError: !!te.isError,
+        }, sessionId));
+        break;
+      }
+      // 'message_update' is intentionally not variant-logged — per-token
+      // events are filtered by NOISY_PREFIXES in the debug-log layer.
+    }
+
+    debugLog.info('agent', `event:${event.type}`, {
+      sessionId,
+      msgsLen: agent.state.messages.length,
+      lastRole: agent.state.messages.at(-1)?.role,
+      lastStopReason: (agent.state.messages.at(-1) as { stopReason?: string } | undefined)?.stopReason,
+      phase: managed.phase,
+    });
 
     switch (event.type) {
       case 'agent_start':
@@ -524,6 +726,28 @@ class AgentManager {
 
       case 'message_update':
         if (event.message.role === 'assistant') {
+          // Count text_delta events to surface streaming throughput without
+          // per-token log spam. Each delta is one or a few tokens; we
+          // emit `stream:progress` every STREAM_DELTA_LOG_THRESHOLD tokens
+          // so a 500-token reply produces ~10 progress rows instead of 500.
+          // The `recv:message_update` per-token log is filtered by the
+          // NOISY_PREFIXES rule at the debug-log layer; this counter is
+          // the summary view that survives that filter.
+          const ame = (event as { assistantMessageEvent?: { type?: string; delta?: string } })
+            .assistantMessageEvent;
+          if (ame?.type === 'text_delta') {
+            managed.streamDeltaCount += 1;
+            if (managed.streamDeltaCount % STREAM_DELTA_LOG_THRESHOLD === 0) {
+              const durationMs = Date.now() - managed.streamStartedAt;
+              debugLog.info('stream', 'stream:progress', withSession({
+                deltas: managed.streamDeltaCount,
+                tokensPerSec: durationMs > 0
+                  ? Math.round((managed.streamDeltaCount / durationMs) * 1000)
+                  : 0,
+                durationMs,
+              }, sessionId));
+            }
+          }
           this.broadcast(sessionId, {
             type: 'message_update',
             sessionId,
@@ -535,6 +759,21 @@ class AgentManager {
       case 'message_end': {
         const messages = [...agent.state.messages];
         this.broadcast(sessionId, { type: 'message_end', sessionId, messages });
+        // Emit a final progress summary on message_end for the assistant
+        // stream so the log always shows the closing delta count, even when
+        // the total was under STREAM_DELTA_LOG_THRESHOLD. Skip user/tool
+        // messages — they don't accumulate text_delta events.
+        const lastMessage = messages.at(-1);
+        if (lastMessage?.role === 'assistant' && managed.streamDeltaCount > 0) {
+          const durationMs = Date.now() - managed.streamStartedAt;
+          debugLog.info('stream', 'stream:progress:done', withSession({
+            deltas: managed.streamDeltaCount,
+            tokensPerSec: durationMs > 0
+              ? Math.round((managed.streamDeltaCount / durationMs) * 1000)
+              : 0,
+            durationMs,
+          }, sessionId));
+        }
         if (managed.sessionCreated) {
           sessionStore.scheduleWrite(sessionId, messages);
         }
@@ -581,10 +820,15 @@ class AgentManager {
     attachments: Attachment[] = [],
     turn?: TurnSettings,
   ): Promise<void> {
-    // Persist + broadcast 'session_created' for brand-new sessions BEFORE any
-    // agent setup work (model resolve, tool factory, MCP, createAgent — easily
-    // several hundred ms). Without this the UI stays on /chat/new with an empty
-    // title and a no-op "new chat" button until the first agent_start arrives.
+    const dispatchStartedAt = performance.now();
+    let dispatchOk = false;
+    debugLog.info('agent', 'dispatch_prompt',
+      withSession({ textLen: text.length, attachmentsLen: attachments.length }, sessionId));
+    try {
+      // Persist + broadcast 'session_created' for brand-new sessions BEFORE any
+      // agent setup work (model resolve, tool factory, MCP, createAgent — easily
+      // several hundred ms). Without this the UI stays on /chat/new with an empty
+      // title and a no-op "new chat" button until the first agent_start arrives.
     //
     // Detection: not in the live sessions map AND no DB record. The DB record
     // we write here is what getOrCreateAgent's sessionStore.load() will find,
@@ -621,6 +865,7 @@ class AgentManager {
         };
         try {
           await sessionStore.create(session);
+          debugLog.info('agent', 'session:created:dispatch', { sessionId });
           this.broadcast(sessionId, {
             type: 'session_created',
             sessionId,
@@ -636,13 +881,21 @@ class AgentManager {
     }
 
     const managed = await this.getOrCreateAgent(sessionId);
+    debugLog.info('agent', 'prompt:entry', {
+      sessionId,
+      phase: managed.phase,
+      msgsLen: managed.agent.state.messages.length,
+      lastRole: managed.agent.state.messages.at(-1)?.role,
+      lastStopReason: (managed.agent.state.messages.at(-1) as { stopReason?: string } | undefined)?.stopReason,
+      textLen: text.length,
+    });
 
-    if (managed.phase === 'preparing' || managed.phase === 'compacting') {
-      // A retry's preparation OR a compaction is already in flight for this
-      // session. The UI gates the composer to prevent concurrent prompts,
-      // but a stale or out-of-order IPC could still arrive — dispatching a
-      // fresh turn now would race the in-flight `continue()` / compaction and
-      // corrupt the phase machine. Silently dropping matches `retry()`'s
+    if (managed.phase !== 'idle') {
+      // Preparing (retry / model-switch setup), compacting, or running.
+      // The UI gates the composer to prevent concurrent prompts, but a stale
+      // or out-of-order IPC could still arrive — dispatching a fresh turn
+      // now would race the in-flight `continue()` / compaction / streaming
+      // and corrupt the phase machine. Silently dropping matches `retry()`'s
       // phase-guard pattern; the in-flight work's broadcasts reconcile every
       // subscribed window to the correct state.
       console.debug('[agent-manager] prompt: phase busy, ignored', sessionId, managed.phase);
@@ -754,7 +1007,32 @@ class AgentManager {
         const cancelled = await this.maybeCompact(managed, pendingUserMessage);
         if (cancelled) return;
       }
+
+      // Drop a trailing synthetic `assistant{aborted}` marker left behind by
+      // pi-agent-core's `handleRunFailure` after a cancel. Without this, the
+      // new user message would be appended onto `[..., user, assistant{stopReason:
+      // 'aborted'}]` and sent to the provider; some providers (notably
+      // Gemini) reject the empty aborted assistant turn and silently return
+      // an empty response. Crucially, only the marker itself is dropped —
+      // everything earlier in the transcript (including the previous turn's
+      // real assistant text / tool calls / tool results) is preserved so the
+      // user sees their full conversation history, not a partial slice.
+      const msgs = managed.agent.state.messages as Array<{ role: string; stopReason?: string }>;
+      if (msgs.length > 0) {
+        const last = msgs[msgs.length - 1]!;
+        if (last.role === 'assistant' && last.stopReason === 'aborted') {
+          debugLog.info('agent', 'prompt:drop-aborted-marker', { sessionId });
+          msgs.pop();
+        }
+      }
+      debugLog.info('agent', 'prompt:dispatch', { sessionId, msgsLen: managed.agent.state.messages.length });
       await managed.agent.prompt(enriched, images.length > 0 ? images : undefined);
+      debugLog.info('agent', 'prompt:done', { sessionId, msgsLen: managed.agent.state.messages.length });
+      dispatchOk = true;
+    }
+    } finally {
+      debugLog.info('agent', 'dispatch_prompt:done',
+        withSession({ ok: dispatchOk, durationMs: performance.now() - dispatchStartedAt }, sessionId));
     }
   }
 
@@ -868,6 +1146,7 @@ class AgentManager {
         previousSummary,
         signal,
         thinkingLevel: managed.agent.state.thinkingLevel,
+        sessionId: managed.sessionId,
       });
 
       // 取消：丢弃这次压缩，不插摘要，并通知调用方放弃本轮发送。
@@ -959,6 +1238,131 @@ class AgentManager {
       pendingTools: [],
     });
     return true;
+  }
+
+  /**
+   * Fork the source session at the assistant message at `atAssistantIndex`.
+   * The new `SessionRecord` is seeded with ONLY that assistant bubble
+   * (no user message, no prior turns) — the branch point is the response,
+   * not the question. The user then types a new message in the new session
+   * and the agent continues from there with the assistant bubble as context.
+   *
+   * The source session is untouched — its agent (if any) keeps running,
+   * the BG keeps serving subscribers, etc. The fork is a pure copy.
+   *
+   * Title is taken from the user message that triggered this assistant
+   * turn (walked back in `source.messages`) so the new session has a
+   * meaningful label in HistoryPanel. The trigger user bubble does NOT
+   * appear in the new session's messages — only the assistant response
+   * does.
+   *
+   * Returns the new session id + title (callers use it to notify the
+   * sidepanel that initiated the fork). Does NOT broadcast — the typical
+   * `broadcast()` filter is keyed on the requesting port's subscribed
+   * session, which is the source, not the new fork. The caller routes
+   * `session_created` to the right port(s) explicitly. Throws if the
+   * source row can't be loaded, or if `atAssistantIndex` points at a
+   * non-assistant message.
+   */
+  async forkSession(
+    sourceSessionId: string,
+    atAssistantIndex: number,
+  ): Promise<{ newSessionId: string; title: string }> {
+    const startedAt = performance.now();
+    debugLog.info('agent', 'fork:entry',
+      withSession({ atAssistantIndex, sourceMsgsLen: -1 }, sourceSessionId));
+    // Flush the source session before reading: the sidepanel may click
+    // "fork" right after the LLM finishes streaming, when the React state
+    // shows the just-finished assistant bubble (idx = N) but the throttled
+    // session writer hasn't committed it to Dexie yet. Without this flush,
+    // `sessionStore.load` returns a row missing the tail bubble(s) and the
+    // user-passed index falls off the end → "not an assistant message"
+    // error. Flushing first forces a sync write so the row reflects what
+    // the user actually sees.
+    await sessionStore.flush(sourceSessionId);
+    const source = await sessionStore.load(sourceSessionId);
+    if (!source) {
+      debugLog.error('agent', 'fork:fail:source-not-found',
+        withSession({ atAssistantIndex }, sourceSessionId));
+      throw new Error(`forkSession: source session ${sourceSessionId} not found`);
+    }
+    // Re-log entry now that we know the source length — keeps a single
+    // timeline point per fork so we can correlate dispatch → load.
+    debugLog.info('agent', 'fork:loaded-source',
+      withSession({ atAssistantIndex, sourceMsgsLen: source.messages.length }, sourceSessionId));
+    if (
+      atAssistantIndex < 0
+      || atAssistantIndex >= source.messages.length
+      || source.messages[atAssistantIndex].role !== 'assistant'
+    ) {
+      debugLog.error('agent', 'fork:fail:bad-index',
+        withSession({
+          atAssistantIndex,
+          sourceMsgsLen: source.messages.length,
+          actualRole: source.messages[atAssistantIndex]?.role ?? 'undefined',
+        }, sourceSessionId));
+      throw new Error(`forkSession: atAssistantIndex ${atAssistantIndex} is not an assistant message`);
+    }
+    // New session chỉ chứa duy nhất assistant bubble được chọn — không kèm
+    // user bubble hay các turn trước đó. Branch point = response, không phải
+    // question. User sẽ gõ message mới; agent coi assistant bubble làm context.
+    const slice = source.messages.slice(atAssistantIndex, atAssistantIndex + 1);
+
+    // Title vẫn lấy từ user message đã trigger turn này (walk back trong
+    // source.messages) để HistoryPanel có label có nghĩa. User bubble
+    // không nằm trong new session.messages — chỉ dùng cho title.
+    let triggerContent = '';
+    for (let i = atAssistantIndex - 1; i >= 0; i--) {
+      if (source.messages[i].role === 'user') {
+        triggerContent = extractUserText(source.messages[i] as Message);
+        break;
+      }
+    }
+    const trimmed = triggerContent.trim();
+    const title = trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : '')
+      || source.title
+      || t('common.newChat');
+
+    const newSessionId = crypto.randomUUID();
+    const now = Date.now();
+    const forked: SessionRecord = {
+      id: newSessionId,
+      title,
+      model: source.model,
+      provider: source.provider,
+      userInstructions: source.userInstructions,
+      thinkingLevel: source.thinkingLevel,
+      messageCount: slice.length,
+      createdAt: now,
+      updatedAt: now,
+      messages: slice,
+      // Snapshot source identity so the sidepanel can render a "Forked from:
+      // <title>" badge with a back link even if the source is later edited or
+      // deleted. Title is taken from source.title (the current display title),
+      // not from the trigger message, so the badge matches what the user sees
+      // in HistoryPanel for the source.
+      forkedFrom: { sessionId: source.id, title: source.title },
+      // Remember which assistant bubble in the source this branch was forked
+      // from, so navigating back via the badge scrolls the source back to
+      // the same message instead of dropping the user at the bottom of the
+      // (now likely empty) source.
+      forkedAtIndex: atAssistantIndex,
+    };
+    await sessionStore.create(forked);
+    // NOTE: deliberately not calling `this.broadcast(...)` here. `broadcast`
+    // filters ports by `subscribedSession === sessionId`, so passing the
+    // new fork id would skip every port that's still on the source.
+    // The port handler in `entrypoints/background/index.ts` is responsible
+    // for routing `session_created` to the right port(s).
+    debugLog.info('agent', 'fork:done',
+      withSession({
+        atAssistantIndex,
+        newSessionId,
+        title,
+        sliceLen: slice.length,
+        durationMs: Math.round(performance.now() - startedAt),
+      }, sourceSessionId));
+    return { newSessionId, title };
   }
 
   /**
@@ -1152,6 +1556,127 @@ class AgentManager {
   }
 
   /**
+   * Edit a previous user message and resume the agent from that turn.
+   *
+   * Mirrors `retry()`'s in-place refresh + continue flow: same phase machine
+   * guards, same abort checkpoint, same model / thinking override path, same
+   * broadcast cadence. The only structural difference is the slice: instead
+   * of `truncateForRetry` (drops everything after the most recent user), we
+   * call `truncateForEditRerun` which rewrites that user's `<user-request>`
+   * text in place (preserving attached context / images) and then drops the
+   * tail.
+   *
+   * Throws when `messageIndex` doesn't point at a user message (UI should
+   * not let this happen — defensive), or when `text` is empty / whitespace
+   * only (same), or when the agent is currently running / preparing
+   * (silent no-op, same as `retry`).
+   */
+  async editAndRerun(
+    sessionId: string,
+    messageIndex: number,
+    text: string,
+    turn?: TurnSettings,
+  ): Promise<void> {
+    const managed = await this.getOrCreateAgent(sessionId);
+
+    if (managed.phase !== 'idle') {
+      console.debug('[agent-manager] editAndRerun: phase not idle, ignored', sessionId, managed.phase);
+      return;
+    }
+
+    managed.phase = 'preparing';
+    managed.prepareController = new AbortController();
+    const signal = managed.prepareController.signal;
+    this.updateKeepAlive();
+    let busySnapshot: AgentMessage[] | null = null;
+
+    try {
+      const messages = [...managed.agent.state.messages];
+      const truncated = truncateForEditRerun(messages, messageIndex, text);
+      if (!truncated) {
+        throw new Error('Cannot edit: target is not a user message or text is empty');
+      }
+      busySnapshot = truncated;
+      this.broadcast(sessionId, {
+        type: 'session_state',
+        sessionId,
+        messages: truncated,
+        isRunning: true,
+        pendingTools: this.getPendingToolSnapshot(managed),
+      });
+
+      // Persist edit BEFORE continue — same SW-restart protection as retry.
+      if (managed.sessionCreated) {
+        sessionStore.scheduleWrite(sessionId, truncated);
+        await sessionStore.flush(sessionId);
+      }
+
+      // Same model / thinking override path as retry.
+      const turnKey = turn?.model
+        ? `${turn.model.provider}/${turn.model.modelId}`
+        : null;
+      const modelChanged = turnKey != null && turnKey !== managed.modelKey;
+      const resolved = modelChanged ? await this.resolveSessionModel(turn!.model) : null;
+      if (modelChanged && !resolved) throw new Error('No model selected or model not found');
+
+      if (signal.aborted) {
+        await this.commitRetryCancel(managed, truncated);
+        return;
+      }
+
+      managed.toolCtx.cancelAll();
+      managed.permissionBridge.cancel();
+      managed.agent.state.messages = truncated;
+      if (resolved) {
+        managed.agent.state.model = resolved.model;
+        managed.modelKey = turnKey!;
+      }
+      const nextThinking = turn?.thinkingLevel != null
+        ? clampThinkingLevel(managed.agent.state.model, turn.thinkingLevel)
+        : null;
+      const thinkingChanged = nextThinking != null && nextThinking !== managed.agent.state.thinkingLevel;
+      if (thinkingChanged) {
+        managed.agent.state.thinkingLevel = nextThinking!;
+      }
+      if (managed.sessionCreated && (modelChanged || thinkingChanged)) {
+        await sessionStore.updateSettings(sessionId, {
+          provider: modelChanged ? turn!.model!.provider : undefined,
+          model: modelChanged ? turn!.model!.modelId : undefined,
+          thinkingLevel: thinkingChanged ? managed.agent.state.thinkingLevel : undefined,
+        });
+      }
+
+      this.broadcast(sessionId, {
+        type: 'session_state',
+        sessionId,
+        messages: truncated,
+        isRunning: true,
+        pendingTools: this.getPendingToolSnapshot(managed),
+      });
+
+      await managed.agent.continue();
+    } catch (err) {
+      if (busySnapshot && managed.phase === 'preparing') {
+        managed.agent.state.messages = busySnapshot;
+        this.broadcast(managed.sessionId, {
+          type: 'session_state',
+          sessionId: managed.sessionId,
+          messages: busySnapshot,
+          isRunning: false,
+          pendingTools: [],
+        });
+      }
+      throw err;
+    } finally {
+      managed.prepareController = undefined;
+      if (managed.phase === 'preparing') {
+        managed.phase = 'idle';
+        this.updateKeepAlive();
+      }
+    }
+  }
+
+  /**
    * Commit a retry that was cancelled during its `preparing` window (before
    * `continue()` started). Appends a synthetic aborted marker to the
    * truncated transcript, writes it back onto the still-live agent, persists,
@@ -1256,23 +1781,31 @@ class AgentManager {
    *   from cancel would either flicker the UI between states or double-dispose
    *   a tool context.
    *
-   * - `running` / `idle`: standard teardown — abort, unsubscribe, dispose
-   *   tool ctx, flush DB, remove from map, broadcast `agent_end`. `idle`
-   *   is folded into the same branch so a stale cancel click after an
-   *   agent already finished still acts as a session-close (matches
-   *   pre-redesign behavior).
+   * - `idle`: silent no-op. The agent is already settled — no event will
+   *   fire and no broadcast is needed (the listener's earlier `agent_end`
+   *   already reconciled the UI). A stale stop click after the agent
+   *   finished must not churn state.
+   *
+   * - `running`: signal abort and wait for the loop to settle, then force
+   *   `phase = 'idle'` synchronously. The already-attached listener (via
+   *   `wireSubscriptions`) handles `agent_end` naturally — broadcasts
+   *   `agent_end`, persists, clears pending tools / permissions. Keeping
+   *   the entry alive (vs. evicting it from `sessions`) lets the next
+   *   prompt reuse the in-memory agent instead of cold-loading from the
+   *   half-flushed DB snapshot, which is what previously caused
+   *   "I clicked stop and the next message won't go through". The forced
+   *   phase reset closes a tiny race window where the listener's async
+   *   broadcast hasn't reached `setState({ phase: 'idle' })` yet but a
+   *   follow-up `prompt()` has already arrived.
    *
    * No-op if no managed entry exists — the session has nothing to cancel
    * (either never started or already cleaned up).
-   *
-   * Flushes the throttled session writer BEFORE removing the agent from
-   * the map so any concurrent `subscribe` / `prompt` for the same id
-   * either reuses the still-live in-memory state or reads a fully-persisted
-   * DB row — never an interleaved half-flushed snapshot.
    */
   async cancel(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId);
     if (!managed) return;
+
+    debugLog.info('agent', 'cancel:start', { sessionId, phase: managed.phase, msgsLen: managed.agent.state.messages.length });
 
     if (managed.phase === 'preparing') {
       // Signal the preparation to bail at its checkpoint, AND stop the agent
@@ -1296,67 +1829,33 @@ class AgentManager {
       return;
     }
 
-    // phase === 'running' or 'idle' — standard teardown path.
-    //
-    // Snapshot message-count BEFORE abort so we can tell, after the dust
-    // settles, whether pi-agent-core's `handleRunFailure` actually appended
-    // a synthetic marker. Without this guard the idle branch (stale stop
-    // click on an already-finished agent) would write back identical
-    // content and bump `updatedAt`, reordering the session in the history
-    // list with no real change.
-    const preLen = managed.agent.state.messages.length;
+    if (managed.phase === 'idle') {
+      // Already settled — no event will fire, no broadcast needed. A stale
+      // stop click after the agent finished must not churn state.
+      debugLog.info('agent', 'cancel:noop:idle', { sessionId });
+      return;
+    }
+
+    // phase === 'running' — signal abort and wait for the loop to settle.
+    // After `waitForIdle()` resolves, the loop is done from pi-agent-core's
+    // perspective, but the async event-listener pipeline (which handles
+    // `agent_end` → phase reset / broadcast / persist) may still be in
+    // flight on a separate microtask. Force the phase to `idle` synchronously
+    // so a follow-up `prompt()` arriving the moment cancel returns doesn't
+    // hit the phase guard and silently no-op. The listener will still run
+    // and emit its own broadcast, but `phase` is already correct for any
+    // race winner; idempotent resets in `agent_end` are a no-op.
+    debugLog.info('agent', 'cancel:abort', { sessionId, msgsLen: managed.agent.state.messages.length });
     managed.agent.abort();
-    managed.unsubscribeAgent();
-    managed.toolCtx.dispose();
-    // 显式取消在途授权请求。abort() 的 signal 通常已让 bridge.request 解析，
-    // 这里再 cancel 一次是幂等的兜底（bridge 内部有 pendingResolve 守卫）。
-    managed.permissionBridge.cancel();
-    // Wait for the agent's lifecycle to actually settle. `waitForIdle()`
-    // resolves to `Promise.resolve()` when there's no active run (idle
-    // branch falls through cheaply) and otherwise waits for
-    // `runWithLifecycle`'s try/catch/finally to complete — that's the
-    // only moment we can be sure pi-agent-core's catch path has finished
-    // running `handleRunFailure` and the synthetic `stopReason: 'aborted'`
-    // marker is observable on `state.messages`.
-    //
-    // We previously tried to rely on `sessionStore.flush(...)` as an
-    // implicit microtask drain. That assumption was wrong: flush is a
-    // near-synchronous no-op when no write is pending (the common case
-    // at cancel time), so it does NOT serialize with pi-agent-core's
-    // async catch chain. The result was a real race where the snapshot
-    // could miss the marker, the explicit persist would then store a
-    // bare `[user]` transcript, and the late-arriving marker would land
-    // on an orphan agent reference — silently lost. `waitForIdle()` is
-    // the API pi-agent-core exposes precisely for this synchronization.
     await managed.agent.waitForIdle();
-    // Drain any throttler write scheduled by trailing message_end events
-    // from the just-aborted run.
-    try {
-      await sessionStore.flush(sessionId);
-    } catch (err) {
-      console.warn(`[agent-manager] flush on cancel failed for ${sessionId}:`, err);
-    }
-    // Snapshot post-abort state. If pi-agent-core appended the marker,
-    // length increased by one; if not (idle branch / no active run),
-    // length is unchanged and we skip the redundant write.
-    const finalMessages = [...managed.agent.state.messages];
-    if (managed.sessionCreated && finalMessages.length !== preLen) {
-      sessionStore.scheduleWrite(sessionId, finalMessages);
-      try {
-        await sessionStore.flush(sessionId);
-      } catch (err) {
-        console.warn(`[agent-manager] post-abort persist failed for ${sessionId}:`, err);
-        // Continue to broadcast anyway — DB lag is recoverable.
-      }
-    }
-    this.sessions.delete(sessionId);
-    this.updateKeepAlive();
-    // Ensure client knows the agent stopped (abort may not fire agent_end)
-    this.broadcast(sessionId, {
-      type: 'agent_end',
+    debugLog.info('agent', 'cancel:settled', {
       sessionId,
-      messages: finalMessages,
+      msgsLen: managed.agent.state.messages.length,
+      lastRole: managed.agent.state.messages.at(-1)?.role,
+      lastStopReason: (managed.agent.state.messages.at(-1) as { stopReason?: string } | undefined)?.stopReason,
     });
+    managed.phase = 'idle';
+    this.updateKeepAlive();
   }
 
   /** Resolve an interactive tool's pending request */
@@ -1389,7 +1888,13 @@ class AgentManager {
     const managed = this.sessions.get(sessionId);
     if (!managed) return;
     const pending = managed.permissionBridge.getPending();
-    if (!pending || pending.toolCallId !== toolCallId) return; // stale / mismatched
+    const matched = pending?.toolCallId === toolCallId;
+    debugLog.info('agent', 'permission:resolved',
+      withSession({
+        toolName: (pending?.request as { toolName?: string } | undefined)?.toolName ?? '',
+        decision: matched ? decision : 'stale',
+      }, sessionId));
+    if (!matched) return; // stale / mismatched
     managed.permissionBridge.resolve(decision);
   }
 

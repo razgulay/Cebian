@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowDown } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -8,8 +8,24 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+
+// Scope selector used by SelectionQuoteButton to detect text selections
+// inside chat messages. Kept in sync with the `role` attribute on the
+// messages container rendered below.
+const CHAT_MESSAGES_SELECTOR = '[role="chat-messages"]';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
 import { ChatInput, type ChatInputHandle } from '@/components/chat/ChatInput';
+import { SelectionQuoteButton } from '@/components/chat/SelectionQuoteButton';
 import { WelcomeScreen } from '@/components/chat/WelcomeScreen';
+import { useChatFontSize } from '@/hooks/useChatFontSize';
 import {
   UserMessageBubble,
   AgentMessage,
@@ -42,20 +58,48 @@ import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, p
 import { hasUsableModel } from '@/lib/providers/usable-models';
 import type { Attachment } from '@/lib/agent/attachments';
 import type { SessionRecord } from '@/lib/persistence/db';
+import { debugLog, withSession } from '@/lib/debug/log';
 import { t } from '@/lib/i18n';
 
 // ─── ChatPage ───
 
-export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: () => void; onTitleChange?: (title: string) => void }) {
+export function ChatPage({
+  onOpenSettings,
+  onTitleChange,
+  onForkedFromChange,
+  pendingScrollToIndex,
+  onPendingScrollConsumed,
+}: {
+  onOpenSettings?: () => void;
+  onTitleChange?: (title: string) => void;
+  /** Push fork identity (source + branched-at index) up to App so the Header
+   *  badge can render it. `forkedAtIndex` is the index in the source's
+   *  messages array — used to scroll the source back to the right spot when
+   *  the user clicks "Go to original". Null when not on a forked session. */
+  onForkedFromChange?: (forkedFrom: { sessionId: string; title: string; forkedAtIndex: number | null } | null) => void;
+  /** One-shot scroll target staged by App when the user clicks the fork
+   *  badge's back link. ChatPage consumes it in `onSessionLoaded` to scroll
+   *  the source's forked bubble to the viewport top, then calls
+   *  `onPendingScrollConsumed` to clear the intent. Null on normal navigations. */
+  pendingScrollToIndex?: number | null;
+  onPendingScrollConsumed?: () => void;
+}) {
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const isNewChat = !routeSessionId || routeSessionId === 'new';
   const navigate = useNavigate();
+
+  // Apply the user-selected chat font size as a CSS variable on the document
+  // root so all child elements (Message, MarkdownRenderer, ChatInput) pick
+  // it up via `text-[length:var(--chat-font-size)]`.
+  useChatFontSize();
 
   // 本窗口 / 本对话「当前选中的模型 / 思考档」本地草稿。发送 / 重试时随消息带出作
   // turn；新对话从全局种子 seed、已有会话从会话行（onSessionLoaded）seed。不直连全局
   // storage，以免一个窗口切模型影响另一个。
   const [turnModel, setTurnModel] = useState<ModelIdentity | null>(null);
   const [turnThinking, setTurnThinking] = useState<ThinkingLevel>('medium');
+  const hasUserOverrideModelRef = useRef(false);
+  const hasUserOverrideThinkingRef = useRef(false);
 
   // 是否存在至少一个可选模型（= 用户至少配好一个 provider）。驱动欢迎页空状态文案：
   // 有 → 显示示例（引导去底部选模型）；无 → 引导去设置。响应式订阅 provider 凭据 /
@@ -74,33 +118,51 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
     let mounted = true;
     Promise.all([lastSelectedModel.getValue(), thinkingLevelStorage.getValue()]).then(([m, l]) => {
       if (!mounted) return;
-      setTurnModel(m);
-      setTurnThinking(l ?? 'medium');
+      if (!hasUserOverrideModelRef.current) setTurnModel(m);
+      if (!hasUserOverrideThinkingRef.current) setTurnThinking(l ?? 'medium');
     });
     return () => { mounted = false; };
   }, [isNewChat]);
 
-  // 把会话行存的选择 seed 进本地 turn 草稿。provider / model 为空（旧会话 / 旧备份）
-  // 时置 null，让发送门禁拦下来提示用户重选。onSessionLoaded（首次加载）与
-  // onSessionSettings（重订阅活 agent 走 session_state）共用同一逻辑。
+  // 重置 user-override 标记 when 切换会话
+  useEffect(() => {
+    hasUserOverrideModelRef.current = false;
+    hasUserOverrideThinkingRef.current = false;
+  }, [routeSessionId]);
+
+  // 把会话行存的选择 seed 进本地 turn 草稿。若用户在发送前已手动切了模型/思考档，
+  // 优先保留用户的在途选择，避免 session_state 广播将用户刚选的新模型盖回旧模型。
   const seedTurnFromSession = useCallback((provider?: string, model?: string, thinkingLevel?: string) => {
-    setTurnModel(provider && model ? { provider, modelId: model } : null);
-    setTurnThinking((thinkingLevel as ThinkingLevel) || 'medium');
+    if (!hasUserOverrideModelRef.current) {
+      setTurnModel(provider && model ? { provider, modelId: model } : null);
+    }
+    if (!hasUserOverrideThinkingRef.current) {
+      setTurnThinking((thinkingLevel as ThinkingLevel) || 'medium');
+    }
   }, []);
 
-  // 切模型 / 思考档：更新本地草稿 + 回写全局种子（供下一个新对话用，fire-and-forget）。
-  // 不在此落库到会话行——那是发送 / 重试时由 turn 随消息带给后台做的（carry-on-message）。
+  // 切模型 / 思考档：更新本地草稿 + 标记 user-override + 回写全局种子（供下一个新对话用）。
   const handleModelChange = useCallback((m: ModelIdentity) => {
+    hasUserOverrideModelRef.current = true;
     setTurnModel(m);
     void lastSelectedModel.setValue(m);
   }, []);
   const handleThinkingChange = useCallback((l: ThinkingLevel) => {
+    hasUserOverrideThinkingRef.current = true;
     setTurnThinking(l);
     void thinkingLevelStorage.setValue(l);
   }, []);
 
   // 句柄：欢迎页示例卡片通过它把 prompt 填入输入框。
   const inputRef = useRef<ChatInputHandle>(null);
+
+  // When the user selects text in an assistant message and clicks the floating
+  // Quote button, the formatted Markdown blockquote is inserted at the current
+  // caret position in the chat input. If the input is empty, the blockquote is
+  // pasted as-is; if there's existing draft, it's appended after a newline.
+  const handleQuote = useCallback((text: string) => {
+    inputRef.current?.insertText?.(text);
+  }, []);
 
   // ─── Agent port (all agent/session logic via background) ───
   const {
@@ -110,24 +172,56 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
     send,
     cancel,
     retry,
+    editAndRerun,
+    forkSession,
     subscribe: portSubscribe,
     unsubscribe: portUnsubscribe,
+    clearSession,
     resolveTool,
     resolvePermission,
   } = useBackgroundAgent({
     onSessionCreated: useCallback((sessionId: string, title: string) => {
       onTitleChange?.(title);
+      // Brand-new session from `prompt` — never a fork, so clear the badge.
+      onForkedFromChange?.(null);
       navigate(`/chat/${sessionId}`, { replace: true });
-    }, [navigate, onTitleChange]),
+    }, [navigate, onTitleChange, onForkedFromChange]),
     onSessionLoaded: useCallback((session: SessionRecord | null) => {
       if (!session) {
+        onForkedFromChange?.(null);
         navigate('/chat/new', { replace: true });
         return;
+      }
+      // Push forked-from identity to App so Header can render the back-link
+      // badge. Snapshot is in `session.forkedFrom` (set by forkSession in BG);
+      // null/missing means brand-new / non-fork session — clear the badge.
+      // `forkedAtIndex` only exists on the new (forked) session, paired with
+      // `forkedFrom` — both come from the same fork write, so they travel
+      // together. If `forkedFrom` is missing, drop both.
+      if (session.forkedFrom) {
+        onForkedFromChange?.({
+          sessionId: session.forkedFrom.sessionId,
+          title: session.forkedFrom.title,
+          forkedAtIndex: session.forkedAtIndex ?? null,
+        });
+      } else {
+        onForkedFromChange?.(null);
       }
       // 已有会话：本地草稿 seed 自会话行自己存的选择（而非全局）。模型 / provider
       // 为空（旧会话 / 旧备份）时置 null，让发送门禄拦下来提示用户重选。
       seedTurnFromSession(session.provider, session.model, session.thinkingLevel);
-    }, [navigate, seedTurnFromSession]),
+
+      // One-shot: if App staged a scroll intent (user clicked "Go to
+      // original" on a fork badge), honour it here by parking the index in
+      // a ref so the layout effect below can scroll to it. We do this AFTER
+      // messages have been assigned to state via the hook's session_loaded
+      // handler — the bubble DOM nodes exist on the next render. Clear the
+      // intent synchronously so subsequent renders don't re-trigger.
+      if (pendingScrollToIndex != null) {
+        scrollToForkedRef.current = pendingScrollToIndex;
+        onPendingScrollConsumed?.();
+      }
+    }, [navigate, seedTurnFromSession, onForkedFromChange, pendingScrollToIndex, onPendingScrollConsumed]),
     // 重新订阅一个仍有活 agent 的会话时，后台走 session_state（不带完整会话行），
     // 由它单独回传该会话的模型 / 思考档来 seed——与 onSessionLoaded 同样的逻辑。
     onSessionSettings: useCallback((provider: string, model: string, thinkingLevel: string) => {
@@ -146,6 +240,16 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
   const activeSessionIdRef = useRef<string | null>(null);
   activeSessionIdRef.current = activeSessionId;
 
+  // One-shot scroll target for the "Go to original" flow. Set in
+  // `onSessionLoaded` when App stages `pendingScrollToIndex` (the index of
+  // the assistant bubble IN THE SOURCE that this fork branched from). Read
+  // by a layout effect below that scrolls the matching bubble to the
+  // viewport top instead of the default "scroll to bottom on session
+  // switch". Declared here (vs. next to its only setter/useEffect) so the
+  // `onSessionLoaded` callback closure can reference it without a TS
+  // "used before declaration" hazard.
+  const scrollToForkedRef = useRef<number | null>(null);
+
   // When an interactive tool (e.g. ask_user) OR a permission prompt is pending,
   // the agent is blocked waiting for user input — treat as "not running" so the
   // composer stays usable. For permissions this is deliberate: sending a message
@@ -155,18 +259,25 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
 
   // Subscribe to existing session or unsubscribe for new chat.
   //
-  // Skip the subscribe IPC when the hook already considers this id active
-  // (`activeSessionId === routeSessionId`). That's the case right after
-  // sending the first message in a new chat: session_created set
-  // state.sessionId to the new id, and the BG port's subscribedSession was
-  // already pinned by the 'prompt' handler — we're implicitly subscribed.
-  // A redundant 'subscribe' here would race with the in-flight
-  // getOrCreateAgent: BG would fall through to a DB load of the just-written
-  // empty row and reply with session_loaded{messages:[]}, clobbering the
-  // optimistic user message and briefly flashing the welcome screen.
+  // Critical: the effect must NOT depend on `activeSessionId` — when user sends
+  // the first message in a new chat, `activeSessionId` flips from null to the
+  // new sessionId. If this effect re-ran, the `portUnsubscribe()` branch
+  // (taken because `isNewChat` is still true) would reset hook state and
+  // wipe the optimistic user bubble for 2-3 seconds. The hook is already
+  // implicitly subscribed to the new sessionId via the 'prompt' handler's
+  // sessionId-binding on the BG port; we just need to NOT touch it from
+  // this effect.
+  //
+  // Subscription should only happen when the user explicitly navigates to
+  // an *existing* session route. The original dep `activeSessionId` was a
+  // bug — it caused a re-subscribe (or unsubscribe) on every session-id change,
+  // racing with the in-flight prompt dispatch. Only react to `routeSessionId`
+  // changes — the URL.
   useEffect(() => {
     if (isNewChat) {
-      portUnsubscribe();
+      // New chat: don't touch the port subscription. The 'prompt' handler in
+      // BG pins the subscription when the user sends. The hook's sessionIdRef
+      // will be set to the new id on the next render.
       return;
     }
     if (routeSessionId && routeSessionId !== activeSessionIdRef.current) {
@@ -174,48 +285,244 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
     }
   }, [routeSessionId, isNewChat, portSubscribe, portUnsubscribe]);
 
+  // When the user clicks "New Chat" the same ChatPage component instance is
+  // reused (React Router doesn't remount when navigating between two routes
+  // that share a component). So we must explicitly clear hook state when the
+  // route becomes `/chat/new`, otherwise the previous chat's messages
+  // linger behind the welcome screen.
+  useEffect(() => {
+    if (isNewChat) {
+      clearSession();
+      // /chat/new has no session row, so no "forked from" badge. Without
+      // this reset, navigating from a forked chat directly to /chat/new
+      // (e.g. via the header's "New chat" button) would leave the previous
+      // fork badge stuck on the empty welcome screen — the IPC callbacks
+      // only fire on session_created/loaded, and neither runs on /chat/new.
+      onForkedFromChange?.(null);
+    }
+  }, [routeSessionId, isNewChat, clearSession, onForkedFromChange]);
+
   // Sync session title to parent
   useEffect(() => {
     onTitleChange?.(sessionTitle);
   }, [sessionTitle, onTitleChange]);
 
-  // Auto-scroll: stick to bottom while content streams, but stop following
-  // as soon as the user scrolls up. Resumes when the user scrolls back near
-  // the bottom. Driven internally by ResizeObserver, so no `messages`-dep
-  // effect needed here.
-  const { scrollRef, isAtBottom, scrollToBottom } = useStickToBottom();
+  // Auto-scroll: Gemini-style prompt top-alignment.
+  // When a new prompt is sent, `scrollToUserPrompt` aligns the user's question to the
+  // top of the viewport and UNSTICKS from the bottom. Streaming output generates below
+  // without yanking the scrollbar down, allowing the user to read from top to bottom.
+  const { scrollRef, isAtBottom, scrollToBottom, scrollToUserPrompt, setSticky } = useStickToBottom();
 
   // Force-pin to bottom when switching sessions or opening a fresh chat.
+  // NOTE: `effectiveRunning` is intentionally NOT in the dependency array.
+  // When LLM finishes streaming, `effectiveRunning` flips from `true` to
+  // `false` — if we re-ran this effect on that flip, we'd yank the viewport
+  // back to the bottom of the chat, defeating the Gemini-style "prompt
+  // pinned at top" UX. We only want to scroll-to-bottom when the user
+  // explicitly switches sessions or opens a new chat.
+  const prevSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
-    scrollToBottom({ force: true });
-  }, [activeSessionId, isNewChat, scrollToBottom]);
+    if (activeSessionId === prevSessionIdRef.current) return;
 
-  // Force-pin when the user sends a new message — sending is an explicit
-  // intent to see the latest output.
+    const prev = prevSessionIdRef.current;
+    prevSessionIdRef.current = activeSessionId;
+
+    // Skip scroll-to-bottom if we are just transitioning from a brand new chat (null)
+    // to its newly created ID (activeSessionId). The optimistic user message is already
+    // snapped to the top; forcing scroll to bottom here would push it off-screen
+    // down to the spacer for ~2s while the LLM loads.
+    if (!prev && activeSessionId) {
+      return;
+    }
+
+    // Skip for fork-style transitions: switching to a session that has no
+    // user message yet (e.g. a freshly forked session containing only an
+    // assistant bubble). Force-scrolling to bottom would push the bubble
+    // off-screen into empty space; the user will type their next prompt
+    // and natural scroll-to-bottom (driven by the input + streaming) will
+    // follow.
+    if (lastUserMsgIndex === -1) {
+      return;
+    }
+
+    // Skip when a "Go to original" scroll intent is pending: the layout
+    // effect below will scroll to the forked bubble instead of the bottom.
+    // The ref is cleared synchronously by the layout effect after it fires,
+    // so this just gates the default scroll-to-bottom exactly once.
+    if (scrollToForkedRef.current != null) {
+      return;
+    }
+
+    scrollToBottom({ force: true });
+  }, [activeSessionId, scrollToBottom]);
+
+  // Index of the latest user message in the session
+  const lastUserMsgIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return i;
+    }
+    return -1;
+  }, [messages]);
+
+  // Token incremented each time the user sends a new prompt. Drives the
+  // Gemini-style "snap to top on send" effect below. Using a counter (rather
+  // than a boolean flag) makes the effect robust to rapid double-sends
+  // (e.g. retry + enter) — each dispatch bumps the token, the effect fires
+  // once per dispatch, and an in-flight snap doesn't get swallowed.
+  const [pendingSnapToken, setPendingSnapToken] = useState(0);
+
+  // Snap-to-top effect: when a new prompt is dispatched, run
+  // `scrollToUserPrompt` synchronously via useLayoutEffect. This measures the
+  // new DOM nodes (user bubble + bottom spacer) and adjusts the scroll position
+  // before the browser paints the frame. This completely eliminates the visual
+  // jump that occurs if we wait for requestAnimationFrame.
+  useLayoutEffect(() => {
+    if (pendingSnapToken === 0) return;
+    scrollToUserPrompt();
+  }, [pendingSnapToken, scrollToUserPrompt]);
+
+  // "Go to original" effect: when the user clicks the fork badge's back link,
+// App stages `pendingScrollToIndex` (the index in the source's messages
+// array of the assistant bubble that was forked). `onSessionLoaded` parks
+// it in `scrollToForkedRef`, then this layout effect runs after the source
+// bubble DOM is committed, scrolls it to the viewport top with 16px of
+// breathing room, and disarms auto-stick. The ref itself is NOT cleared
+// here — see the follow-up useEffect below for the clear, sequenced AFTER
+// the scroll-to-bottom effect so that effect can also see the intent and
+// skip its default force-scroll.
+//
+// Why a layout effect (not a regular one): we want the scroll to happen
+// BEFORE the browser paints the frame, so the user never sees the source
+// land at the bottom. Mirrors why `pendingSnapToken` also uses layout.
+useLayoutEffect(() => {
+    const targetIdx = scrollToForkedRef.current;
+    if (targetIdx == null) return;
+    // The ScrollArea wraps its viewport in a div with data-slot="scroll-area-viewport"
+    // — the actual scrolling element. `scrollRef` points at the wrapper.
+    const viewport = scrollRef.current?.querySelector(
+      '[data-slot="scroll-area-viewport"]',
+    ) as HTMLElement | null;
+    if (!viewport) return;
+    const el = viewport.querySelector(
+      `[data-forked-source-idx="${targetIdx}"]`,
+    ) as HTMLElement | null;
+    if (!el) return;
+    // Disarm auto-stick so the upcoming assistant content (if any) doesn't
+    // yank the viewport back to the bottom.
+    setSticky(false);
+    const viewportRect = viewport.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const desiredTopOffset = 16;
+    const currentDiff = elRect.top - viewportRect.top;
+    const targetScrollTop = viewport.scrollTop + (currentDiff - desiredTopOffset);
+    const finalScrollTop = Math.max(0, targetScrollTop);
+    viewport.scrollTop = finalScrollTop;
+    debugLog.info('ui', 'fork:scroll-to-source',
+      withSession({
+        targetIdx,
+        currentDiffPx: Math.round(currentDiff),
+        targetScrollTopPx: Math.round(finalScrollTop),
+        viewportHeightPx: Math.round(viewportRect.height),
+      }, activeSessionId ?? ''));
+  }, [messages, setSticky, activeSessionId]);
+
+  // Clear the forked-scroll intent AFTER the scroll-to-bottom effect has
+  // had its chance to skip. Both effects re-run on the same render commit
+  // (scroll-to-bottom because `activeSessionId` changed; this one because
+  // `messages` changed), so we need to sequence them by hook type — layout
+  // effects run synchronously before regular effects. By the time this
+  // useEffect fires, the scroll-to-bottom useEffect above has already
+  // checked `scrollToForkedRef.current` and skipped, so it's safe to clear.
+  useEffect(() => {
+    if (scrollToForkedRef.current == null) return;
+    // Schedule the clear for after this commit cycle so subsequent renders
+    // don't accidentally re-read the intent. Setting it null synchronously
+    // here is also fine since the scroll-to-bottom effect has already
+    // fired (or skipped) by this point.
+    scrollToForkedRef.current = null;
+  }, [messages]);
+
+  // Gemini-style send handler: bumps the snap token on successful dispatch.
   const handleSend = useCallback(
-    async (text: string, attachments: Attachment[] | undefined, expectedSessionId: string | null) => {
-      // 切换到已有会话但其会话行尚未加载完（sessionLoading）时拒绝派发：此刻
-      // turnModel 还是上一个会话的本地草稿，若此时发送会把旧模型携带给新会话、
-      // 污染新会话行。等 onSessionLoaded 把 turnModel 重新 seed 后再放行。
+    async (text: string, attachments: Attachment[] | undefined, expectedSessionId: string | null, options?: { displayText?: string }) => {
+      debugLog.info('ui', 'chat:handle_send',
+        withSession({ sessionId: expectedSessionId ?? '', textLen: text.length }, expectedSessionId ?? ''));
       if (!isNewChat && routeSessionId !== activeSessionId) {
         return { status: 'notDispatched', reason: 'unavailable' } as const;
       }
+      // CRITICAL: disarm auto-stick SYNCHRONOUSLY (BEFORE the await). The
+      // ResizeObserver in useStickToBottom fires on the next React commit,
+      // and with stickRef=true it would scroll to scrollHeight — yanking the
+      // optimistic user bubble far off the bottom of the viewport. Setting
+      // it false here (same tick as the user input) means the observer's
+      // next tick is a no-op and the user bubble stays at the top.
+      setSticky(false);
       const result = await send(text, attachments, expectedSessionId, {
         model: turnModel ?? undefined,
         thinkingLevel: turnThinking,
-      });
+      }, options?.displayText);
       if (result.status === 'dispatched') {
-        scrollToBottom({ force: true });
+        hasUserOverrideModelRef.current = false;
+        hasUserOverrideThinkingRef.current = false;
+        setPendingSnapToken((t) => t + 1);
       }
       return result;
     },
-    [scrollToBottom, send, turnModel, turnThinking, isNewChat, routeSessionId, activeSessionId],
+    [send, turnModel, turnThinking, isNewChat, routeSessionId, activeSessionId, setSticky],
   );
 
   // 重试同样携带本轮选中的模型 / 思考档，支持「换个模型再重试」。
   const handleRetry = useCallback(() => {
+    debugLog.info('ui', 'send:retry',
+      withSession({ sessionId: activeSessionId ?? '' }, activeSessionId ?? ''));
+    hasUserOverrideModelRef.current = false;
+    hasUserOverrideThinkingRef.current = false;
     retry({ model: turnModel ?? undefined, thinkingLevel: turnThinking });
-  }, [retry, turnModel, turnThinking]);
+    setSticky(false);
+    setPendingSnapToken((t) => t + 1);
+  }, [retry, turnModel, turnThinking, setSticky, activeSessionId]);
+
+  // ─── Edit + rerun ───
+  // Click the pencil on any user message → dialog opens with the extracted
+  // user text pre-filled. Submit dispatches `editAndRerun` to the BG; BG
+  // replaces the <user-request> at that index, drops everything after it,
+  // and resumes the agent. Multi-window safe because the BG's broadcast
+  // reconciles every subscriber.
+  //
+  // `editingIndex` doubles as "is dialog open"; we never display two dialogs
+  // at once. While the agent is running, edits are blocked — the BG's phase
+  // guard would silently no-op anyway, but hiding the UI is friendlier.
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const editingMessage = editingIndex != null ? messages[editingIndex] : null;
+  const editingText = editingMessage && editingMessage.role === 'user' ? extractUserText(editingMessage) : '';
+  const [editDraft, setEditDraft] = useState('');
+
+  const openEdit = useCallback((index: number) => {
+    const m = messages[index];
+    if (!m || m.role !== 'user') return;
+    setEditDraft(extractUserText(m));
+    setEditingIndex(index);
+  }, [messages]);
+
+  const closeEdit = useCallback(() => {
+    setEditingIndex(null);
+    setEditDraft('');
+  }, []);
+
+  const submitEdit = useCallback(() => {
+    if (editingIndex == null) return;
+    const trimmed = editDraft.trim();
+    if (!trimmed) return;
+    debugLog.info('ui', 'send:edit_resubmit',
+      withSession({ sessionId: activeSessionId ?? '', targetIdx: editingIndex }, activeSessionId ?? ''));
+    editAndRerun(editingIndex, trimmed, {
+      model: turnModel ?? undefined,
+      thinkingLevel: turnThinking,
+    });
+    closeEdit();
+    setSticky(false);
+    setPendingSnapToken((t) => t + 1);
+  }, [editingIndex, editDraft, editAndRerun, turnModel, turnThinking, closeEdit, setSticky, activeSessionId]);
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   // 压缩期间隐藏思考占位符，改由专门的压缩状态条提示，避免两个动效重叠。
@@ -240,7 +547,7 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
     <>
       <div className="flex-1 min-h-0 relative flex flex-col">
         <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-          <div className="flex flex-col gap-4 p-5">
+          <div role="chat-messages" className="flex min-h-full flex-col gap-3 px-4 py-3">
             {sessionLoading && (
               <div className="text-center text-sm text-muted-foreground py-12">
                 {t('chat.session.loading')}
@@ -271,8 +578,19 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
             }
 
             if (msg.role === 'user') {
+              const isLastUser = idx === lastUserMsgIndex;
               return (
-                <UserMessageBubble key={`user-${idx}`} msg={msg} />
+                <div
+                  key={`user-wrap-${idx}`}
+                  data-user-message={isLastUser ? 'last' : 'true'}
+                  className={isLastUser ? 'pl-[1.5cm] pr-4' : undefined}
+                >
+                  <UserMessageBubble
+                    key={`user-${idx}`}
+                    msg={msg}
+                    onEdit={effectiveRunning ? undefined : () => openEdit(idx)}
+                  />
+                </div>
               );
             }
 
@@ -356,15 +674,54 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
               const canRetry = isLast && isTurnClosing && !isAgentRunning;
               const onRetry = canRetry ? handleRetry : undefined;
 
+              // Fork button: any turn-closing assistant (not just the last),
+              // so users can branch from any past response. The new session
+              // contains ONLY this assistant bubble — no user bubble, no
+              // prior turns. The BG walks back to find the trigger user
+              // message for the title only.
+              const canFork = isTurnClosing && !isAgentRunning;
+              const onFork = canFork ? () => {
+                // Log the click so we can correlate dispatch → BG IPC → DB
+                // write. Without this we have no idea whether a missing
+                // fork was caused by the click never firing, the IPC
+                // dropping, or the BG rejecting the index.
+                debugLog.info('ui', 'fork:button-click',
+                  withSession({ atAssistantIndex: idx, isLast, isTurnClosing }, activeSessionId ?? ''));
+                forkSession(idx);
+              } : undefined;
+
+              // The trailing assistant wrap must reserve at least one
+              // viewport of height so the sticky last-user bubble above
+              // always has scroll space to pin to top, even when the
+              // response is short and there's nothing else to scroll
+              // over. Without this min-height, short chats collapse the
+              // sticky bubble back to its natural position (bottom of the
+              // content), defeating the "user bubble pinned, response
+              // streams below" UX. The 80px subtracts the header so a full
+              // viewport of scroll is available above the bottom edge.
               return (
-                <AgentMessage
-                  key={`asst-${idx}`}
-                  isStreaming={isStreaming}
-                  showHeader={showHeader}
-                  meta={meta}
-                  copyText={copyText}
-                  onRetry={onRetry}
+                <div
+                  key={`asst-wrap-${idx}`}
+                  // data-forked-source-idx lets the "Go to original" scroll
+                  // effect (set up in `useStickToForked`) find this exact
+                  // bubble in the source after the user clicks the back
+                  // link on the fork's badge. Set on EVERY assistant bubble
+                  // — index is unique within the messages array, the cost
+                  // is a single attribute per bubble, and the source only
+                  // ever needs to scroll to one of them.
+                  data-forked-source-idx={idx}
+                  className={isLast && isStreaming ? 'min-h-[calc(100vh-80px)]' : undefined}
                 >
+                  <AgentMessage
+                    key={`asst-${idx}`}
+                    isStreaming={isStreaming}
+                    isThinking={isStreaming && thinkingBlocks.length > 0 && !text}
+                    showHeader={showHeader}
+                    meta={meta}
+                    copyText={copyText}
+                    onRetry={onRetry}
+                    onFork={onFork}
+                  >
                   {thinkingBlocks.map((block, i) => (
                     <ThinkingBlock key={`t-${idx}-${i}`} content={block.thinking} isLive={isStreaming} />
                   ))}
@@ -475,6 +832,7 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
                     </div>
                   )}
                 </AgentMessage>
+                </div>
               );
             }
 
@@ -503,7 +861,9 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
 
           {/* Waiting placeholder */}
           {showWaitingPlaceholder && (
-            <AgentMessage isStreaming />
+            <div className="min-h-[calc(100vh-80px)]">
+              <AgentMessage isStreaming />
+            </div>
           )}
 
           {/* Compaction in-progress placeholder: normal Cebian Agent shell + grey italic status */}
@@ -521,6 +881,20 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
               hasModel={canStartChat}
               onPickExample={(prompt) => inputRef.current?.fill(prompt)}
               onOpenSettings={() => onOpenSettings?.()}
+            />
+          )}
+
+          {/* Bottom scroll spacer.
+              When generating, we need a large spacer so `scrollToUserPrompt` can snap
+              the user bubble to the top, providing room for the AI text to stream below
+              it without forcing the user to scroll.
+              Once generation finishes, the spacer smoothly collapses to 0 so the user
+              doesn't see a massive empty space at the bottom of the chat. */}
+          {!sessionLoading && messages.length > 0 && (
+            <div
+              className="shrink-0 transition-[height] duration-500 ease-in-out"
+              style={{ height: isAgentRunning ? '60vh' : '0px' }}
+              aria-hidden
             />
           )}
         </div>
@@ -556,6 +930,53 @@ export function ChatPage({ onOpenSettings, onTitleChange }: { onOpenSettings?: (
         thinkingLevel={turnThinking}
         onModelChange={handleModelChange}
         onThinkingChange={handleThinkingChange}
+      />
+
+      <Dialog open={editingIndex != null} onOpenChange={(open) => { if (!open) closeEdit(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('chat.edit.title')}</DialogTitle>
+            <DialogDescription>{t('chat.edit.description')}</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={editDraft}
+            onChange={(e) => setEditDraft(e.target.value)}
+            className="min-h-32"
+            autoFocus
+            onFocus={(e) => {
+              // Caret mặc định ở đầu khi autoFocus; đẩy về cuối để user
+              // có thể gõ tiếp mà không phải bấm End.
+              const target = e.currentTarget;
+              const len = target.value.length;
+              target.setSelectionRange(len, len);
+            }}
+            onKeyDown={(e) => {
+              // Cmd/Ctrl+Enter submits, Escape cancels — same affordances
+              // as the chat composer for muscle-memory continuity.
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                submitEdit();
+              }
+            }}
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={closeEdit}>{t('common.cancel')}</Button>
+            <Button
+              onClick={submitEdit}
+              disabled={editDraft.trim().length === 0 || editDraft === editingText}
+            >
+              {t('chat.edit.submit')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Floating "Quote" button — appears whenever the user selects text
+          inside a chat message. Clicking it inserts the formatted Markdown
+          blockquote into the chat input via the `handleQuote` callback. */}
+      <SelectionQuoteButton
+        scopeSelector={CHAT_MESSAGES_SELECTOR}
+        onQuote={handleQuote}
       />
     </>
   );

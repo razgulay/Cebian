@@ -1,6 +1,7 @@
 import Dexie, { type EntityTable } from 'dexie';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { asString, isValidSessionId } from '@/lib/utils';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 // ─── Schema ───
 
@@ -27,6 +28,29 @@ export interface SessionRecord extends SessionRecordLike {
   thinkingLevel: string;
   messageCount: number;
   messages: AgentMessage[];
+  /** Set by `agentManager.forkSession` — points to the conversation this
+   *  branch was forked from. Optional: brand-new sessions and pre-fork-feature
+   *  sessions never have this. Rendered as a Header badge with a "back to
+   *  original" link. Title is snapshotted at fork time so the link label
+   *  survives even if the source's title is later edited or the source is
+   *  deleted. */
+  forkedFrom?: { sessionId: string; title: string };
+  /** Index of the assistant bubble in the SOURCE session that was forked.
+   *  Optional: only set on the new (forked) session, never on the source
+   *  itself. Used by ChatPage to scroll the source back to the forked
+   *  message when the user clicks "Go to original" from the badge —
+   *  otherwise the source jumps to the bottom on re-entry and hides the
+   *  message the user just forked. Survives across reloads because it
+   *  lives on the SessionRecord.
+   *
+   *  CAVEAT: this is a snapshot of the source's `messages` array index at
+   *  fork time. If the user later inserts or deletes messages in the
+   *  source BEFORE `forkedAtIndex`, the scroll target becomes stale. The
+   *  typical flow (continue the source chat, append at the end) doesn't
+   *  shift indexes, so this stays correct in practice; edge cases
+   *  (prepending, deleting earlier messages) may scroll to a different
+   *  bubble. Acceptable trade-off vs. a heavier message-id based mapping. */
+  forkedAtIndex?: number;
 }
 
 /**
@@ -39,6 +63,19 @@ export interface SessionRecord extends SessionRecordLike {
  */
 export function toSessionRecord(input: SessionRecordLike): SessionRecord {
   const s = input as unknown as Record<string, unknown>;
+  // Optional metadata field — preserve through the IPC boundary so the
+  // sidepanel can render the fork badge. Drop silently when missing or
+  // malformed; do NOT promote a half-valid entry to a session without
+  // sessionId (the link would be a no-op otherwise).
+  let forkedFrom: SessionRecord['forkedFrom'];
+  const rawFf = s.forkedFrom;
+  if (rawFf && typeof rawFf === 'object') {
+    const ff = rawFf as Record<string, unknown>;
+    const sid = asString(ff.sessionId, '');
+    if (sid) {
+      forkedFrom = { sessionId: sid, title: asString(ff.title, '') };
+    }
+  }
   return {
     id: input.id,
     title: asString(s.title, ''),
@@ -50,6 +87,13 @@ export function toSessionRecord(input: SessionRecordLike): SessionRecord {
     updatedAt: input.updatedAt,
     messages: input.messages as AgentMessage[],
     messageCount: input.messages.length,
+    ...(forkedFrom ? { forkedFrom } : {}),
+    // `forkedAtIndex` is optional + numeric; preserve if a finite non-negative
+    // number so callers can scroll the source back to the forked message.
+    // Drop silently on malformed input (negative, NaN, Infinity, undefined).
+    ...(typeof s.forkedAtIndex === 'number' && Number.isFinite(s.forkedAtIndex) && s.forkedAtIndex >= 0
+      ? { forkedAtIndex: s.forkedAtIndex as number }
+      : {}),
   };
 }
 
@@ -92,6 +136,7 @@ db.version(1).stores({
 // ─── Session CRUD ───
 
 export async function createSession(session: SessionRecord): Promise<void> {
+  debugLog.info('db', 'db:session:create', withSession({ id: session.id }, session.id));
   await db.sessions.add(session);
 }
 
@@ -137,14 +182,28 @@ export async function updateSessionMessages(
   // Token / cost totals are derived on-demand from each AssistantMessage.usage
   // in the UI; we deliberately do not persist aggregates to keep a single
   // source of truth (see entrypoints/sidepanel/pages/chat/index.tsx).
-  await db.sessions.update(id, {
-    messages,
-    messageCount: messages.length,
-    updatedAt: Date.now(),
-  });
+  try {
+    await db.sessions.update(id, {
+      messages,
+      messageCount: messages.length,
+      updatedAt: Date.now(),
+    });
+  } catch (err) {
+    // Dexie's `update` resolves silently even when nothing matched, but quota
+    // errors and schema mismatches reject — both are real production failure
+    // modes that should show up in the debug log so a stale-tail bug
+    // (e.g. silent rollback) is observable.
+    const name = (err as { name?: string } | null)?.name ?? 'unknown';
+    debugLog.error('db', 'db:writer:quota_error', withSession({
+      messagesLen: messages.length,
+      errorName: name,
+    }, id));
+    throw err;
+  }
 }
 
 export async function updateSessionTitle(id: string, title: string): Promise<void> {
+  debugLog.info('db', 'db:session:update_title', withSession({ titleLen: title.length }, id));
   await db.sessions.update(id, { title, updatedAt: Date.now() });
 }
 
@@ -165,10 +224,12 @@ export async function updateSessionSettings(
   if (settings.thinkingLevel !== undefined) patch.thinkingLevel = settings.thinkingLevel;
   if (Object.keys(patch).length === 0) return;
   patch.updatedAt = Date.now();
+  debugLog.info('db', 'db:session:update_settings', withSession({ patch }, id));
   await db.sessions.update(id, patch);
 }
 
 export async function deleteSession(id: string): Promise<void> {
+  debugLog.info('db', 'db:session:delete', withSession({}, id));
   await db.sessions.delete(id);
 }
 
@@ -203,6 +264,8 @@ export class ThrottledSessionWriter {
 
   schedule(id: string, messages: AgentMessage[]): void {
     this.pending = { id, messages: [...messages] };
+    debugLog.info('db', 'db:writer:schedule',
+      withSession({ messagesLen: messages.length, delayMs: this.delayMs }, id));
     if (this.timer) return; // Already scheduled
     this.timer = setTimeout(() => this.flush(), this.delayMs);
   }
@@ -212,18 +275,42 @@ export class ThrottledSessionWriter {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.pending) {
-      const { id, messages } = this.pending;
-      this.pending = null;
+    if (!this.pending) return;
+    const { id, messages } = this.pending;
+    this.pending = null;
+    const startedAt = performance.now();
+    debugLog.info('db', 'db:writer:flush:start',
+      withSession({ messagesLen: messages.length }, id));
+    try {
       await updateSessionMessages(id, messages);
+      debugLog.info('db', 'db:writer:flush:done',
+        withSession({
+          messagesLen: messages.length,
+          durationMs: Math.round(performance.now() - startedAt),
+          ok: true,
+        }, id));
+    } catch (err) {
+      debugLog.error('db', 'db:writer:flush:failed',
+        withSession({
+          messagesLen: messages.length,
+          durationMs: Math.round(performance.now() - startedAt),
+          errorName: (err as { name?: string } | null)?.name ?? 'unknown',
+        }, id));
+      throw err;
     }
   }
 
   dispose(): void {
+    const droppedSessionId = this.pending?.id ?? null;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
     this.pending = null;
+    if (droppedSessionId) {
+      // Drop on shutdown is a silent data-loss surface — surface it.
+      debugLog.warn('db', 'db:writer:dispose',
+        withSession({ droppedSessionId, reason: 'shutdown' }, droppedSessionId));
+    }
   }
 }

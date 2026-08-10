@@ -6,15 +6,37 @@ import { WORKSPACES_ROOT } from '@/lib/persistence/vfs-paths';
  *  read). Some media extensions (e.g. `png`, `mp4`) also appear here as a
  *  safety net — `classifyFile` routes the dedicated image/video/audio
  *  buckets first, so this set only matches "binary blobs we don't render"
- *  like archives, fonts, and PDFs. */
+ *  like archives and fonts. */
 export const BINARY_EXTS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp',
-  'pdf', 'zip', 'gz', 'tar',
+  'zip', 'gz', 'tar', '7z', 'rar',
   'woff', 'woff2', 'ttf', 'otf', 'eot',
   'mp3', 'mp4', 'wav', 'ogg',
 ]);
 
 const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'css', 'html']);
+
+/** UTF-8 decoding is opt-in. Unknown extensions must stay opaque because a
+ * binary payload decoded with replacement characters is both misleading and
+ * potentially expensive to render. */
+export const TEXT_EXTS = new Set([
+  'txt', 'text', 'log', 'csv', 'tsv',
+  'json', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'xml',
+  'html', 'htm', 'css', 'scss', 'sass', 'less',
+  'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'vue', 'svelte', 'astro', 'mdx',
+  'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs',
+  'swift', 'php', 'lua', 'r', 'dart', 'ex', 'exs', 'erl', 'hrl', 'clj', 'cljs',
+  'scala', 'groovy', 'gradle', 'proto', 'tf', 'hcl',
+  'sh', 'bash', 'zsh', 'fish', 'ps1', 'sql', 'graphql', 'gql',
+  'ini', 'cfg', 'conf', 'env', 'properties', 'lock',
+  'gitignore', 'gitattributes', 'dockerignore', 'npmrc', 'nvmrc', 'editorconfig',
+  'prettierrc', 'eslintrc', 'stylelintrc', 'babelrc', 'browserslistrc',
+]);
+
+export const TEXT_FILENAMES = new Set([
+  'readme', 'license', 'copying', 'changelog', 'dockerfile', 'makefile',
+  'gemfile', 'rakefile', 'procfile', 'vagrantfile', 'brewfile', 'justfile',
+]);
 
 /** Extensions recognized as inline-renderable media. */
 export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
@@ -32,23 +54,67 @@ export const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
  *  specific media buckets (markdown / image / video / audio) win before
  *  the generic binary fallback, since BINARY_EXTS still overlaps with
  *  some media extensions for safety. */
-export function classifyFile(name: string): 'text' | 'markdown' | 'image' | 'video' | 'audio' | 'binary' {
+export type FileClass = 'text' | 'markdown' | 'pdf' | 'image' | 'video' | 'audio' | 'binary' | 'unknown';
+
+export function classifyFile(name: string): FileClass {
   const ext = fileExtension(name);
   if (MARKDOWN_EXTS.has(ext)) return 'markdown';
+  if (ext === 'pdf') return 'pdf';
   if (IMAGE_EXTS.has(ext)) return 'image';
   if (VIDEO_EXTS.has(ext)) return 'video';
   if (AUDIO_EXTS.has(ext)) return 'audio';
   if (BINARY_EXTS.has(ext)) return 'binary';
-  return 'text';
+  if (TEXT_EXTS.has(ext) || (!ext && TEXT_FILENAMES.has(name.toLowerCase()))) return 'text';
+  return 'unknown';
+}
+
+/** Decode previewable text without silently substituting malformed bytes. */
+export function decodePreviewText(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+export type VfsOpenPreference = 'smart' | 'preview' | 'source';
+export type MarkdownOpenMode = 'preview' | 'source';
+
+export function resolveMarkdownOpenMode(preference: VfsOpenPreference | string): MarkdownOpenMode {
+  return preference === 'source' ? 'source' : 'preview';
+}
+
+export function parseVfsLocation(hash: string, search: string): { path: string; anchor: string | null } {
+  const raw = hash.startsWith('#') ? hash.slice(1) : hash;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    // Keep malformed percent escapes literal so a bad link reaches the normal
+    // VFS not-found state instead of crashing the entire viewer route.
+  }
+  const path = normalizePath(decoded || '/');
+  const anchor = new URLSearchParams(search).get('anchor');
+  return { path, anchor: anchor || null };
 }
 
 export function getHashPath(): string {
-  const raw = window.location.hash.slice(1); // strip leading #
-  return normalizePath(decodeURIComponent(raw) || '/');
+  return parseVfsLocation(window.location.hash, window.location.search).path;
+}
+
+export function getRequestedAnchor(): string | null {
+  return parseVfsLocation(window.location.hash, window.location.search).anchor;
+}
+
+export function vfsNavigationUrl(path: string, pathname: string): string {
+  return pathname + '#' + encodeURIComponent(path);
 }
 
 export function navigateTo(path: string) {
-  window.location.hash = '#' + encodeURIComponent(path);
+  if (window.location.search) {
+    window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+  }
+  window.location.hash = vfsNavigationUrl(path, '').slice(1);
 }
 
 export function parentOf(p: string): string {

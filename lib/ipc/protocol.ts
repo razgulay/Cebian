@@ -7,6 +7,7 @@ import type { Attachment } from '@/lib/agent/attachments';
 import type { RecordedSession } from '@/lib/recorder/types';
 import type { MCPResourceContents } from '@/lib/mcp/client';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
+import type { DebugLogEntry } from '@/lib/debug/log';
 
 // ─── Port name ───
 
@@ -43,6 +44,11 @@ export type ClientMessage =
    *  `model` / `thinkingLevel`（见 TurnSettings）同 prompt：携带「重试这一轮要用的
    *  模型 / 思考档」，支持「换个更强的模型再重试」。缺省时保持会话当前选择不变。 */
   | ({ type: 'retry'; sessionId: string } & TurnSettings)
+  /** Edit a previous user message and rerun the agent from that point.
+   *  The background replaces only the `<user-request>` text at `messageIndex`,
+   *  drops every message after it, persists, and resumes the agent loop.
+   *  `model` / `thinkingLevel` same semantics as `retry`. */
+  | ({ type: 'edit_rerun'; sessionId: string; messageIndex: number; text: string } & TurnSettings)
   | { type: 'resolve_tool'; sessionId: string; toolName: string; response: any }
   | { type: 'cancel_tool'; sessionId: string; toolName: string }
   /** User's decision on a tool's pre-execution permission prompt, keyed by
@@ -52,6 +58,15 @@ export type ClientMessage =
   | { type: 'resolve_permission'; sessionId: string; toolCallId: string; decision: 'once' | 'always' | 'denied' }
   | { type: 'session_list' }
   | { type: 'session_delete'; sessionId: string }
+  /** Fork the source session at the assistant message at
+   *  `atAssistantIndex`. Background creates a brand-new `SessionRecord`
+   *  seeded with ONLY that assistant bubble (no user bubble, no prior
+   *  turns) — the branch point is the response, not the question.
+   *  The user then types a new message in the new session and the agent
+   *  continues from there with the assistant bubble as context. Provider
+   *  / model / thinkingLevel / userInstructions are copied from the source.
+   *  Source session is untouched — its agent (if any) keeps running. */
+  | { type: 'fork_session'; sourceSessionId: string; atAssistantIndex: number }
   | { type: 'recorder_start' }
   | { type: 'recorder_stop' }
   /** Sent by a sidepanel right after it opens a port, declaring a unique
@@ -72,7 +87,14 @@ export type ClientMessage =
   | { type: 'memory_organize' }
   /** 查当前是否正在整理（供设置页重新挂载时恢复「整理中」指示——切 tab 再切回不丢状态）。
    *  后台仅向发起端口回一条 `memory_organize_state`（不带 outcome，不触发 toast）。 */
-  | { type: 'memory_organize_query' };
+  | { type: 'memory_organize_query' }
+  /** Subscribe to the live debug-log stream. While subscribed, the BG
+   *  forwards every new `DebugLogEntry` to the requesting port via
+   *  `debug_log_entry` server messages. Idempotent: subscribing twice
+   *  is the same as subscribing once (the BG tracks one sender per port).
+   *  No replay of past entries — callers seed from IDB via `readRecentEntries`. */
+  | { type: 'debug_log_subscribe' }
+  | { type: 'debug_log_unsubscribe' };
 
 // ─── Background → Client (events) ───
 
@@ -150,4 +172,13 @@ export type ServerMessage =
       running: boolean;
       outcome?: 'ok' | 'empty' | 'conflict' | 'rejected' | 'failed' | 'no-model';
       error?: string;
-    };
+    }
+  /** One new entry written to the persistent debug log. Pushed to ports
+   *  that have `debug_log_subscribe`d. Includes all original fields except
+   *  the auto-assigned `id` (the sidepanel uses the timestamp + source +
+   *  message as its React key, so id isn't needed client-side). */
+  | { type: 'debug_log_entry'; entry: DebugLogEntry }
+  /** Fires after the log is cleared so live viewers can drop their tail
+   *  alongside the on-disk store (no replay is sent — viewers re-seed
+   *  from IDB if they want to recover). */
+  | { type: 'debug_log_cleared' };

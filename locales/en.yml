@@ -105,6 +105,7 @@ settings:
     memory: "Memory"
     mcp: "MCP Servers"
     pageInteraction: "Page interaction"
+    appearance: "Appearance"
     backup: "Backup & Restore"
     storage: "Filesystem"
     advanced: "Advanced"
@@ -138,12 +139,48 @@ settings:
       xiaohongshuHandle: "一只猫头猫"
       x: "X"
       xHandle: "@maotoumao0_0"
+  debugLog:
+    title: "Debug log"
+    # Explains the affordance and when to use it (file a bug → export log).
+    description: "Captures every console message from the extension into a local ring buffer. Export this file when reporting a bug so the maintainer can see what happened without you having to reproduce it live."
+    enable:
+      label: "Capture debug log"
+      hint: "When off, nothing is written to the ring buffer. The Export button is also disabled."
+    verbose:
+      label: "Verbose (per-token events)"
+      hint: "Also capture every streaming LLM token. Off by default — the default level already keeps all agent boundaries and warnings, which is what you usually want when filing a bug."
+    live:
+      label: "Live log"
+      hint: "Watch new entries appear as they happen, instead of waiting to export."
+      open: "Open live log"
+      close: "Close"
+      pause: "Pause"
+      resume: "Resume"
+      cleared: "Log cleared"
+      empty: "No entries yet — interact with the extension to generate events."
+    export: "Export log"
+    clear: "Clear log"
+    # $1 = number of entries currently buffered
+    countLabel: "$1 entries buffered"
+    countUnavailable: "Log unavailable (private browsing?)"
+    # $1 = entries included in the file
+    exported: "Exported $1 entries to your downloads folder"
+    exportFailed: "Export failed: $1"
+    cleared: "Debug log cleared"
+    clearFailed: "Clear failed: $1"
+    # Triggered when the user clicks Export with zero buffered events —
+    # keeps the empty file out of their downloads folder.
+    empty: "Debug log is empty — nothing to export yet"
   advanced:
     title: "Advanced"
     compaction:
       label: "Context compaction model"
       hint: "The model used to automatically compact overly long conversations. Defaults to the conversation model."
       followMain: "Same as conversation model"
+    domSubAgent:
+      label: "DOM sub-agent model"
+      hint: "Cheap model that handles heavy page-reading tasks delegated by the main chat model. Off = feature disabled."
+      off: "Off (disabled)"
   pageInteraction:
     title: "Page interaction"
     ball:
@@ -160,6 +197,19 @@ settings:
       label: "Translation target language"
       hint: "The language the toolbar translates into."
       auto: "Follow interface language"
+  appearance:
+    title: "Appearance"
+    fontSize:
+      label: "Chat font size"
+      hint: "Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 14–15 px (step 0.1). Default 14 px."
+      preview: "Preview — The quick brown fox jumps over the lazy dog."
+    fontFamily:
+      label: "Chat font family"
+      hint: "Choose the typeface used in the sidepanel chat. Affects user prompts and assistant messages."
+      geist: "Geist (default)"
+      inter: "Inter"
+      roboto: "Roboto"
+      system: "System default"
   instructions:
     title: "Instructions"
     label: "Custom instructions"
@@ -170,12 +220,14 @@ settings:
     newBody: "(Write your prompt here)"
     # $1 = trigger character ("/")
     hint: "Reusable prompt templates. Trigger them with $1 in the chat input."
+    expandInline: "Expand prompts in the input box"
     placeholders:
       selectedText: "Selected text on page"
       pageUrl: "Current page URL"
       pageTitle: "Current page title"
       date: "Current date"
       clipboard: "Clipboard content"
+      input: "Text typed after the slash command"
   memory:
     title: "Memory"
     enable: "Enable memory"
@@ -443,6 +495,7 @@ chat:
     imageStripped: "Removed image attachments — the current model doesn't support multimodal input"
     noPrompts: "No prompts yet — create one from AI config"
     noMatch: "No matches"
+    loadMore: "Show $1 more"
     iframeEnterHint: "⏎ enter"
     # Voice input (local-first speech recognition with cloud fallback)
     voiceStart: "Voice input"
@@ -465,6 +518,12 @@ chat:
     recordingDownload: "Download recording JSON"
     # $1 = event count, $2 = compact char count (e.g. 1.2K, 3M)
     recordingHover: "$1 events · ~$2 chars"
+    # PDF attachment badge label. $1 = page count
+    pdfPageCount: "$1 pages"
+    # PDF attachment tooltip when fully extracted. $1 = filename, $2 = page count
+    pdfPages: "$1 — $2 pages"
+    # PDF attachment tooltip when truncated. $1 = filename, $2 = total pages, $3 = pages extracted
+    pdfTruncated: "$1 — extracted $3 of $2 pages (text capped)"
   recorder:
     start: "Start recording user actions"
     stop: "Stop recording (will attach to next message)"
@@ -542,6 +601,12 @@ chat:
     errorServerUnavailable: "This MCP server is no longer available. Re-enable it in settings to view this diagram."
     # $1 = raw failure detail from the BG (e.g. "connect ECONNREFUSED ...")
     errorFetchFailed: "Couldn't load the interactive view: $1"
+  fork:
+    # Header badge label rendered next to the source session title — marks
+    # the current view as a branch of another conversation.
+    badgeLabel: "Forked from:"
+    # Tooltip on the back link in the fork badge.
+    backTooltip: "Go to original conversation"
   message:
     # $1 = input tokens (formatted, e.g. "1.2k"), $2 = output tokens (formatted)
     tokensInOut: "↑$1 ↓$2"
@@ -551,6 +616,21 @@ chat:
     tokensInBreakdownHitWrite: "uncached $1 · cached $2 · write $3"
     # Tooltip/aria-label for the retry button on the latest assistant turn.
     retry: "Retry"
+    # Tooltip/aria-label for the fork button on any turn-closing assistant.
+    # Starts a new session seeded with the transcript up to (and including)
+    # this turn's user message — useful for exploring "what if I'd asked
+    # differently" from any past point without polluting the original chat.
+    fork: "Fork from here"
+    # Tooltip/aria-label for the edit pencil on every user turn.
+    edit: "Edit & rerun"
+  edit:
+    # Dialog title when the user clicks the pencil on a prior user turn.
+    title: "Edit message"
+    # Body text under the title — explains that this rewinds everything after
+    # the edited turn and reruns the agent.
+    description: "Edit this message and rerun the agent from this point. Everything after it will be discarded."
+    # Submit button label.
+    submit: "Rerun"
   compaction:
     # Label on the divider marking where earlier context was folded into a summary.
     divider: "Earlier context compacted"
@@ -627,6 +707,10 @@ provider:
     apiKeyPlaceholder: "Leave empty to skip auth"
     models: "Models"
     autoFetch: "Auto-fetch"
+    showAll: "Show all"
+    hideAll: "Hide all"
+    enabled: "Show"
+    hidden: "hidden"
     reasoning: "Reasoning"
     image: "Multimodal"
     # $1 = model id
@@ -762,6 +846,19 @@ vfs:
   inlineLoadFailed: "$1 — $2"
   preview: "Preview"
   viewSource: "View source"
+  source: "Source"
+  defaultOpen: "Default open mode"
+  openSmart: "Smart"
+  unknownFile: "Unknown file type — $1. Use Download to open it safely."
+  previousPage: "Previous page"
+  nextPage: "Next page"
+  pageNumber: "Page number"
+  zoomOut: "Zoom out"
+  zoomIn: "Zoom in"
+  fitWidth: "Fit width"
+  pdfPasswordRequired: "This PDF requires a password."
+  pdfWrongPassword: "Incorrect password. Try again."
+  pdfLoadFailed: "PDF preview failed: $1"
   # $1 = path
   pathNotFound: "Path not found: $1"
   unknownError: "Unknown error"

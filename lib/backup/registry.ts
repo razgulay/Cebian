@@ -10,9 +10,11 @@ import type { RestoreStrategy } from './types';
 import {
   lastSelectedModel,
   compactionModel,
+  domSubAgentModel,
   customProviders,
   userInstructions,
   themePreference,
+  vfsOpenPreferenceV1,
   lastSelectedThinkingLevel,
   mcpServers,
   providerCredentials,
@@ -26,6 +28,9 @@ import {
   pageInteractionSettings,
   floatingBallPosition,
   pendingSidePanelHandoff,
+  expandPromptsInline,
+  debugLogSettings,
+  chatFontSize,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -273,6 +278,7 @@ function entry<T>(e: BackupEntry<T>): BackupEntry<any> {
 export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastSelectedModel, storageClass: 'settings' }),
   entry({ item: compactionModel, storageClass: 'settings' }),
+  entry({ item: domSubAgentModel, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',
@@ -287,6 +293,7 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   }),
   entry({ item: userInstructions, storageClass: 'settings' }),
   entry({ item: themePreference, storageClass: 'settings' }),
+  entry({ item: vfsOpenPreferenceV1, storageClass: 'settings' }),
   entry({ item: lastSelectedThinkingLevel, storageClass: 'settings' }),
   entry({
     item: mcpServers,
@@ -320,6 +327,8 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   // 记忆系统设置（仅开关，无密钥）。merge 恢复时保留本地开关状态（无 fillMissing）。
   entry({ item: memorySettings, storageClass: 'settings' }),
   entry({ item: memoryOrganizeState, storageClass: 'exclude' }),
+  // 提示词在输入框内展开设置（仅开关，无密钥）。
+  entry({ item: expandPromptsInline, storageClass: 'settings' }),
   // 页面交互设置（悬浮球 / 划词工具条开关 + 工具条模型 + 翻译目标；无密钥）。
   entry({ item: pageInteractionSettings, storageClass: 'settings' }),
   // 悬浮球位置（设备本地 UI 状态）。
@@ -330,6 +339,10 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastSettingsSection, storageClass: 'exclude' }),
   entry({ item: updateNoticeState, storageClass: 'exclude' }),
   entry({ item: pendingChangelogVersion, storageClass: 'exclude' }),
+  // 调试日志偏好（设备本地开关，不进 config.json）。
+  entry({ item: debugLogSettings, storageClass: 'exclude' }),
+  // Chat font size（设备本地 UI 偏好，不进 config.json）。
+  entry({ item: chatFontSize, storageClass: 'exclude' }),
 ];
 
 /** BACKUP_REGISTRY 中所有已登记的 storage key 集合（供覆盖性测试比对）。 */

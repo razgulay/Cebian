@@ -5,6 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
+import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Accordion, AccordionItem, AccordionContent, AccordionTrigger } from '@/components/ui/accordion';
 import type { CustomProviderConfig, CustomModelDef } from '@/lib/persistence/storage';
@@ -100,6 +101,8 @@ function ProviderFormBody({
   onFetchModels,
   onAddManualModel,
   onRemoveModel,
+  onBulkToggleEnabled,
+  onToggleEnabled,
   onToggleReasoning,
   onToggleImage,
   onModelFieldChange,
@@ -113,6 +116,8 @@ function ProviderFormBody({
   onFetchModels: () => void;
   onAddManualModel: () => void;
   onRemoveModel: (modelId: string) => void;
+  onBulkToggleEnabled: () => void;
+  onToggleEnabled: (modelId: string) => void;
   onToggleReasoning: (modelId: string) => void;
   onToggleImage: (modelId: string) => void;
   onModelFieldChange: (modelId: string, patch: Partial<Pick<CustomModelDef, 'contextWindow' | 'maxTokens'>>) => void;
@@ -128,6 +133,9 @@ function ProviderFormBody({
       const k = h.key.trim().toLowerCase();
       return k === 'authorization' || k === 'cf-aig-authorization';
     });
+  // 「全部显示 / 全部隐藏」按钮文案：全启用时显示「全部隐藏」，其它（含空列表）
+  // 显示「全部显示」。空列表不渲染按钮（点击无意义）。
+  const allEnabled = fields.models.length > 0 && fields.models.every(m => m.enabled !== false);
   return (
     <div className="space-y-3 border border-border rounded-lg p-3">
       <div className="space-y-2">
@@ -166,7 +174,22 @@ function ProviderFormBody({
       {/* Fetch models */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <Label className="text-xs">{t('provider.form.models')}</Label>
+          <div className="flex items-center gap-2">
+            <Label className="text-xs">{t('provider.form.models')}</Label>
+            {fields.models.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Switch
+                  checked={allEnabled}
+                  onCheckedChange={onBulkToggleEnabled}
+                  aria-label={allEnabled ? t('provider.form.hideAll') : t('provider.form.showAll')}
+                  className="scale-75"
+                />
+                <span className="text-[0.65rem] text-muted-foreground">
+                  {allEnabled ? t('provider.form.hideAll') : t('provider.form.showAll')}
+                </span>
+              </div>
+            )}
+          </div>
           <Button
             variant="ghost"
             size="xs"
@@ -189,6 +212,7 @@ function ProviderFormBody({
               <ModelListItem
                 key={m.modelId}
                 model={m}
+                onToggleEnabled={onToggleEnabled}
                 onToggleReasoning={onToggleReasoning}
                 onToggleImage={onToggleImage}
                 onRemove={onRemoveModel}
@@ -286,11 +310,23 @@ function useProviderForm(initial?: { name: string; baseUrl: string; apiKey: stri
   const handleAddManualModel = () => {
     const id = manualModelId.trim();
     if (!id || models.some(m => m.modelId === id)) return;
-    setModels([...models, { modelId: id, name: id, reasoning: false, image: false }]);
+    setModels([...models, { modelId: id, name: id, reasoning: false, image: false, enabled: true }]);
     setManualModelId('');
   };
 
   const handleRemoveModel = (modelId: string) => setModels(models.filter(m => m.modelId !== modelId));
+
+  const handleToggleEnabled = (modelId: string) =>
+    setModels(models.map(m => m.modelId === modelId ? { ...m, enabled: !(m.enabled !== false) } : m));
+
+  // 一键切换所有「enabled」：全启用 → 全部隐藏；其它（含全隐藏）→ 全部显示。
+  // `undefined` 视为启用（向后兼容），所以比较时 `m.enabled !== false`。
+  const handleBulkToggleEnabled = () => {
+    if (models.length === 0) return;
+    const allEnabled = models.every(m => m.enabled !== false);
+    const next = !allEnabled;
+    setModels(models.map(m => ({ ...m, enabled: next })));
+  };
 
   const handleToggleReasoning = (modelId: string) =>
     setModels(models.map(m => m.modelId === modelId ? { ...m, reasoning: !m.reasoning } : m));
@@ -313,7 +349,7 @@ function useProviderForm(initial?: { name: string; baseUrl: string; apiKey: stri
     setFetchError('');
   };
 
-  return { fields, onFieldChange, handleFetchModels, handleAddManualModel, handleRemoveModel, handleToggleReasoning, handleToggleImage, handleModelFieldChange, reset };
+  return { fields, onFieldChange, handleFetchModels, handleAddManualModel, handleRemoveModel, handleBulkToggleEnabled, handleToggleEnabled, handleToggleReasoning, handleToggleImage, handleModelFieldChange, reset };
 }
 
 // ─── Create form ───
@@ -373,6 +409,8 @@ export function CustomProviderForm({ onAdd }: CustomProviderFormProps) {
       onFetchModels={form.handleFetchModels}
       onAddManualModel={form.handleAddManualModel}
       onRemoveModel={form.handleRemoveModel}
+      onBulkToggleEnabled={form.handleBulkToggleEnabled}
+      onToggleEnabled={form.handleToggleEnabled}
       onToggleReasoning={form.handleToggleReasoning}
       onToggleImage={form.handleToggleImage}
       onModelFieldChange={form.handleModelFieldChange}
@@ -445,6 +483,8 @@ export function CustomProviderCard({ config, apiKey, onUpdate, onRemove }: Custo
         onFetchModels={form.handleFetchModels}
         onAddManualModel={form.handleAddManualModel}
         onRemoveModel={form.handleRemoveModel}
+        onBulkToggleEnabled={form.handleBulkToggleEnabled}
+        onToggleEnabled={form.handleToggleEnabled}
         onToggleReasoning={form.handleToggleReasoning}
         onToggleImage={form.handleToggleImage}
         onModelFieldChange={form.handleModelFieldChange}

@@ -14,6 +14,7 @@ import type { MatchPattern } from './url-pattern';
 import { parseBgFetchPatterns } from './url-pattern';
 import { handleBgFetch } from './bg-fetch';
 import { parsePermission, grantsChromeNamespace, grantsPageExec } from './permissions';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 // ─── Pending run requests ───
 
@@ -90,6 +91,7 @@ async function handleChromeCall(msg: {
 }): Promise<void> {
   let result: unknown;
   let error: string | undefined;
+  debugLog.info('tool', 'tool:sandbox:received', { method: msg.method });
 
   try {
     // 反查权威 run —— sandbox envelope 不可信。run 结束 / 超时后 pendingRuns
@@ -135,6 +137,7 @@ async function handlePageExec(msg: {
 }): Promise<void> {
   let resultText: string | undefined;
   let error: string | undefined;
+  debugLog.info('tool', 'tool:sandbox:received', { method: 'page_exec' });
 
   try {
     // 反查权威 run —— 缺失即失效 / 重放，直接拒
@@ -176,6 +179,10 @@ async function handleVfsCall(msg: {
 }): Promise<void> {
   let result: unknown;
   let error: string | undefined;
+  debugLog.info('tool', 'vfs:rpc:received', {
+    path: typeof msg.args[0] === 'string' ? msg.args[0] : null,
+    op: msg.method,
+  });
 
   try {
     // 反查权威 scope / permissions —— sandbox 那侧的 message envelope 不可信。
@@ -269,6 +276,8 @@ async function handleVfsCall(msg: {
     error = (err as Error).message;
   }
 
+  debugLog.info('tool', 'vfs:rpc:done', { ok: !error });
+
   await chrome.runtime.sendMessage({
     type: 'sandbox:vfs_result',
     id: msg.id,
@@ -290,8 +299,14 @@ async function handleBgFetchCall(msg: {
   url: unknown;
   init: unknown;
 }): Promise<void> {
+  const startedAt = performance.now();
   let result: unknown;
   let error: string | undefined;
+  const httpMethod =
+    msg.init && typeof msg.init === 'object'
+      ? ((msg.init as Record<string, unknown>).method as string | undefined)
+      : undefined;
+  debugLog.info('tool', 'tool:fetch:start', { url: msg.url, method: httpMethod ?? null });
 
   try {
     const pending = pendingRuns.get(msg.id);
@@ -332,6 +347,16 @@ async function handleBgFetchCall(msg: {
   } catch (err) {
     error = (err as Error).message;
   }
+
+  const responseStatus =
+    result && typeof result === 'object' && 'status' in (result as Record<string, unknown>)
+      ? ((result as { status?: unknown }).status as number | undefined)
+      : undefined;
+  debugLog.info('tool', 'tool:fetch:done', {
+    ok: !error,
+    status: responseStatus ?? null,
+    durationMs: Math.round(performance.now() - startedAt),
+  });
 
   await chrome.runtime.sendMessage({
     type: 'sandbox:bg_fetch_result',

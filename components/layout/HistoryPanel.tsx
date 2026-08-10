@@ -11,6 +11,7 @@ import {
 import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage, type SessionMeta } from '@/lib/ipc/protocol';
 import { showConfirm } from '@/lib/ui/dialog';
 import { t } from '@/lib/i18n';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 interface HistoryPanelProps {
   open: boolean;
@@ -82,6 +83,22 @@ export function HistoryPanel({ open, onClose, onSelectSession, onDeleteSession }
 
   const groups = useMemo(() => groupSessionsByRecency(sessions, Date.now()), [sessions]);
 
+  // One-shot lifecycle log: fires once when the panel first mounts. The
+  // mount + unmount pair brackets the entire open/close cycle for this
+  // sidepanel session; combined with `history:select` / `history:delete*`
+  // they give a complete picture of user activity inside the drawer.
+  useEffect(() => {
+    debugLog.info('ui', 'history:open');
+    return () => {
+      debugLog.info('ui', 'history:close');
+    };
+  }, []);
+
+  const handleSelect = (sessionId: string) => {
+    debugLog.info('ui', 'history:select', withSession({ sessionId }, sessionId));
+    onSelectSession(sessionId);
+  };
+
   // Load via the background port so we can include live `isRunning` state
   // for each session. The DB itself doesn't know which agents are mid-stream.
   useEffect(() => {
@@ -130,6 +147,7 @@ export function HistoryPanel({ open, onClose, onSelectSession, onDeleteSession }
       confirmText: t('common.delete'),
     });
     if (!ok) return;
+    debugLog.info('ui', 'history:delete:confirmed', withSession({ sessionId: id }, id));
     try {
       // Optimistic UI update
       setSessions(prev => prev.filter(s => s.id !== id));
@@ -202,8 +220,8 @@ export function HistoryPanel({ open, onClose, onSelectSession, onDeleteSession }
                           role="button"
                           tabIndex={0}
                           className="w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left hover:bg-muted/50 transition-colors group cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => onSelectSession(session.id)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectSession(session.id); } }}
+                          onClick={() => handleSelect(session.id)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleSelect(session.id); } }}
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 min-w-0">

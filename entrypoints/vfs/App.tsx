@@ -3,13 +3,13 @@ import { toast } from 'sonner';
 import { Download, Loader2 } from 'lucide-react';
 import { vfs } from '@/lib/persistence/vfs';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { themePreference } from '@/lib/persistence/storage';
+import { themePreference, vfsOpenPreferenceV1 } from '@/lib/persistence/storage';
 import { downloadFile } from '@/lib/utils';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from '@/components/ui/sonner';
 import { t } from '@/lib/i18n';
 import { applyTheme, resolveTheme } from './lib/theme';
-import { MAX_PREVIEW_BYTES, classifyFile, fileExtension, getHashPath, isWorkspacesRoot, navigateTo, workspaceUuidOf } from './lib/path-utils';
+import { MAX_PREVIEW_BYTES, classifyFile, decodePreviewText, fileExtension, getHashPath, getRequestedAnchor, isWorkspacesRoot, navigateTo, workspaceUuidOf } from './lib/path-utils';
 import { mimeFor } from '@/lib/content/mime';
 import { zipDirectory, zipNameFor } from './lib/download';
 import { resolveWorkspaceLabels } from './lib/session-labels';
@@ -20,6 +20,7 @@ import type { FileMedia, ViewState } from './types';
 
 export default function App() {
   const [theme] = useStorageItem(themePreference, 'system');
+  const [openPreference, setOpenPreference] = useStorageItem(vfsOpenPreferenceV1, 'smart');
   const [themeReady, setThemeReady] = useState(false);
   const [view, setView] = useState<ViewState>({ kind: 'loading' });
   // Global busy flag for the download button. Kept outside `view` because a
@@ -138,9 +139,16 @@ export default function App() {
         let media: FileMedia;
 
         if (klass === 'text' || klass === 'markdown') {
-          const raw = (await vfs.readFile(p, 'utf8')) as unknown as string;
+          const raw = (await vfs.readFile(p)) as unknown as Uint8Array;
           if (myId !== loadIdRef.current) return;
-          media = { type: klass, content: raw, size: st.size };
+          const content = decodePreviewText(raw);
+          media = content === null
+            ? { type: 'unknown', size: st.size }
+            : { type: klass, content, size: st.size };
+        } else if (klass === 'pdf') {
+          const data = (await vfs.readFile(p)) as unknown as Uint8Array;
+          if (myId !== loadIdRef.current) return;
+          media = { type: 'pdf', data, size: st.size };
         } else if (klass === 'image' || klass === 'video' || klass === 'audio') {
           const data = (await vfs.readFile(p)) as unknown as Uint8Array;
           if (myId !== loadIdRef.current) return;
@@ -152,9 +160,9 @@ export default function App() {
           const url = URL.createObjectURL(new Blob([data as BlobPart], { type: mime }));
           blobUrlRef.current = url;
           media = { type: klass, mime, size: st.size, url };
-        } else if (klass === 'binary') {
+        } else if (klass === 'binary' || klass === 'unknown') {
           // No read — just surface size. Download still works independently.
-          media = { type: 'binary', size: st.size };
+          media = { type: klass, size: st.size };
         } else {
           // Exhaustiveness guard — matches FileView's pattern. If
           // classifyFile's return union ever grows, TS will flag this.
@@ -183,6 +191,16 @@ export default function App() {
       window.removeEventListener('hashchange', loadPath);
     };
   }, [themeReady]);
+
+  useEffect(() => {
+    if (view.kind !== 'file' || view.media.type !== 'markdown') return;
+    const anchor = getRequestedAnchor();
+    if (!anchor) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(anchor)?.scrollIntoView({ block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [view]);
 
   // ── Download (file or zipped folder) ──
   //
@@ -230,15 +248,26 @@ export default function App() {
     <TooltipProvider delayDuration={300}>
       <div className="flex flex-col h-screen bg-background text-foreground">
         {/* Header */}
-        <header className="flex items-center gap-4 px-5 py-3 border-b border-border shrink-0">
+        <header className="flex flex-wrap items-center gap-2 sm:gap-4 px-3 sm:px-5 py-3 border-b border-border shrink-0">
           <div className="flex items-center gap-2 shrink-0">
             <span className="text-base font-semibold tracking-tight">VFS</span>
-            <span className="text-xs text-muted-foreground/50 font-mono">cebian</span>
+            <span className="hidden sm:inline text-xs text-muted-foreground/50 font-mono">cebian</span>
           </div>
           <div className="h-4 w-px bg-border shrink-0" />
           <div className="flex-1 min-w-0">
             <Breadcrumbs path={currentPath} />
           </div>
+          <select
+            value={openPreference}
+            onChange={(event) => setOpenPreference(event.target.value as typeof openPreference)}
+            aria-label={t('vfs.defaultOpen')}
+            title={t('vfs.defaultOpen')}
+            className="h-7 min-w-0 max-w-28 rounded-md border border-border bg-background px-2 text-xs text-foreground"
+          >
+            <option value="smart">{t('vfs.openSmart')}</option>
+            <option value="preview">{t('vfs.preview')}</option>
+            <option value="source">{t('vfs.source')}</option>
+          </select>
           {/* Keep the button mounted while a download is in flight, even if
            *  `view` has flipped to `loading` because the user navigated
            *  away — otherwise the spinner unmounts and the user loses the
@@ -264,7 +293,7 @@ export default function App() {
 
         {/* Main content */}
         <main className="flex-1 min-h-0 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-5 py-5">
+          <div className="max-w-5xl mx-auto px-3 sm:px-5 py-5">
             {view.kind === 'loading' && (
               <div className="flex items-center justify-center py-20">
                 <div className="h-5 w-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
@@ -280,7 +309,9 @@ export default function App() {
               />
             )}
 
-            {view.kind === 'file' && <FileView path={view.path} media={view.media} />}
+            {view.kind === 'file' && (
+              <FileView path={view.path} media={view.media} openPreference={openPreference} />
+            )}
 
             {view.kind === 'error' && (
               <div className="flex flex-col items-center justify-center py-20 gap-3">

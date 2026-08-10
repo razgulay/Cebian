@@ -11,6 +11,7 @@
  */
 import FS from '@isomorphic-git/lightning-fs';
 import { CEBIAN_HOME, WORKSPACES_ROOT } from './vfs-paths';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 // Lazy-initialized singleton — defers IndexedDB connection until first use.
 let _pfs: FS.PromisifiedFS | null = null;
@@ -135,9 +136,14 @@ export type VfsChangeKind = 'write' | 'delete' | 'rename';
 
 /** A successful VFS mutation. Emitted synchronously after the underlying
  *  IndexedDB write resolves. Modeled as a discriminated union so that
- *  narrowing on `kind` guarantees `oldPath` is present on `rename`. */
+ *  narrowing on `kind` guarantees `oldPath` is present on `rename`.
+ *
+ *  `size` (write only) carries the byte length written — `string` is encoded
+ *  as UTF-8 first, matching what the underlying lightning-fs store records.
+ *  Optional because not every producer has the payload in hand at the point
+ *  of the event; consumers must tolerate its absence. */
 export type VfsChangeEvent =
-  | { kind: 'write'; path: string }
+  | { kind: 'write'; path: string; size?: number }
   | { kind: 'delete'; path: string }
   | { kind: 'rename'; path: string; oldPath: string };
 
@@ -186,6 +192,21 @@ function emitChange(event: VfsChangeEvent): void {
     // chrome.runtime may be unavailable in some test environments.
     // In-process notification (above) is still functional.
   }
+
+  // Per-kind debug log — fan-out above already covered listeners; this just
+  // mirrors the event into the persistent IDB debug log so the sidepanel
+  // "Export debug log" button surfaces file activity around a bug.
+  switch (event.kind) {
+    case 'write':
+      debugLog.info('vfs', 'vfs:write', { path: event.path, size: event.size ?? null });
+      break;
+    case 'delete':
+      debugLog.info('vfs', 'vfs:delete', { path: event.path });
+      break;
+    case 'rename':
+      debugLog.info('vfs', 'vfs:rename', { from: event.oldPath, to: event.path });
+      break;
+  }
 }
 
 // Bridge: receive cross-context broadcasts and re-emit them locally so
@@ -193,6 +214,25 @@ function emitChange(event: VfsChangeEvent): void {
 // per realm — ES modules are evaluated at most once. In MV3 SW the
 // listener registers during top-level boot, BEFORE Chrome dispatches
 // any pending wake-up message, so no broadcast is lost.
+
+// Lifecycle markers: vfs.ts is imported in multiple contexts (background
+// SW, sidepanel, offscreen, possibly content scripts in test fixtures).
+// Logging mount/unmount once per realm lets the sidepanel debug-log view
+// confirm which context a change event originated from. Unmount only
+// fires in window contexts (sidepanel / offscreen); MV3 SW tearing down
+// does not raise an unload event we can observe here — that's an
+// acceptable gap since the persistent IDB log already survives restarts.
+debugLog.info('vfs', 'vfs:mount', {});
+try {
+  if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+    self.addEventListener('unload', () => {
+      debugLog.info('vfs', 'vfs:unmount', {});
+    });
+  }
+} catch {
+  /* addEventListener unavailable in this realm */
+}
+
 try {
   chrome.runtime.onMessage.addListener((msg: unknown) => {
     const m = msg as Partial<VfsBroadcastMessage> | null;
@@ -349,7 +389,10 @@ async function writeFile(
     await mkdir(dir, { recursive: true });
   }
   await pfs().writeFile(filePath, data, opts as FS.WriteFileOptions);
-  emitChange({ kind: 'write', path: filePath });
+  // Size in bytes: Uint8Array carries it directly; strings are encoded as
+  // UTF-8 to match what lightning-fs stores on disk.
+  const size = typeof data === 'string' ? new TextEncoder().encode(data).length : data.byteLength;
+  emitChange({ kind: 'write', path: filePath, size });
 }
 
 /**

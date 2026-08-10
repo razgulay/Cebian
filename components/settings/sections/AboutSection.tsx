@@ -1,11 +1,21 @@
 /**
  * AboutSection — version, update check, project links, and social media.
  */
+import { useState } from 'react';
 import type { ReactElement, ReactNode, SVGProps } from 'react';
+import { Activity, Download, FileWarning } from 'lucide-react';
 import { t } from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
+import { useStorageItem } from '@/hooks/useStorageItem';
 import { getInstallGuideUrl } from '@/lib/site-links';
+import { downloadDebugLog } from '@/lib/debug/export';
+import { clearEntries, readAllEntries } from '@/lib/debug/log';
+import { debugLogSettings, DEFAULT_DEBUG_LOG_SETTINGS } from '@/lib/persistence/storage';
+import { showDialog } from '@/lib/ui/dialog';
+import { toast } from 'sonner';
 
 type SocialKey = 'wechat' | 'bilibili' | 'xiaohongshu' | 'x';
 
@@ -89,7 +99,144 @@ export function AboutSection() {
 
       <UpdateCheckRow status={status} onRecheck={recheck} />
 
+      <DebugLogSection />
+
       <FollowAuthorSection />
+    </div>
+  );
+}
+
+/** "Export debug log" — captures everything `console.*` has emitted this
+ *  session into a JSON file the user can send to the maintainer. The
+ *  mirror is wired in `entrypoints/sidepanel/main.tsx` and
+ *  `entrypoints/background/index.ts` so the file covers both contexts
+ *  without extra plumbing here. */
+function DebugLogSection() {
+  const [busy, setBusy] = useState<'export' | 'clear' | null>(null);
+  const [count, setCount] = useState<number | null>(null);
+  const [stored, setStored] = useStorageItem(
+    debugLogSettings,
+    { ...DEFAULT_DEBUG_LOG_SETTINGS },
+  );
+
+  const refreshCount = async () => {
+    try {
+      const entries = await readAllEntries();
+      setCount(entries.length);
+    } catch {
+      // IndexedDB unavailable (e.g. private browsing in some browsers).
+      setCount(null);
+    }
+  };
+
+  const handleExport = async () => {
+    if (busy) return;
+    setBusy('export');
+    try {
+      const entries = await readAllEntries();
+      if (entries.length === 0) {
+        toast.warning(t('settings.debugLog.empty'));
+        return;
+      }
+      // Pull the extension version from chrome.runtime so the exported
+      // filename + payload reflect the build that actually produced the log.
+      const manifest = chrome.runtime.getManifest();
+      await downloadDebugLog(manifest.version);
+      toast.success(t('settings.debugLog.exported', [String(entries.length)]));
+    } catch (err) {
+      toast.error(t('settings.debugLog.exportFailed', [(err as Error).message ?? String(err)]));
+    } finally {
+      setBusy(null);
+      void refreshCount();
+    }
+  };
+
+  const handleClear = async () => {
+    if (busy) return;
+    setBusy('clear');
+    try {
+      await clearEntries();
+      toast.info(t('settings.debugLog.cleared'));
+    } catch (err) {
+      toast.error(t('settings.debugLog.clearFailed', [(err as Error).message ?? String(err)]));
+    } finally {
+      setBusy(null);
+      void refreshCount();
+    }
+  };
+
+  const patch = (next: Partial<typeof stored>) => setStored({ ...stored, ...next });
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-3">
+        <p className="text-sm font-medium">{t('settings.debugLog.title')}</p>
+        <div className="h-px flex-1 bg-linear-to-r from-border to-transparent" />
+      </div>
+      <p className="text-xs text-muted-foreground">{t('settings.debugLog.description')}</p>
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0 space-y-1">
+          <Label htmlFor="debug-log-enabled" className="text-sm">
+            {t('settings.debugLog.enable.label')}
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.debugLog.enable.hint')}
+          </p>
+        </div>
+        <Switch
+          id="debug-log-enabled"
+          checked={stored.enabled}
+          onCheckedChange={(v) => patch({ enabled: v })}
+          className="shrink-0"
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0 space-y-1">
+          <Label htmlFor="debug-log-verbose" className="text-sm">
+            {t('settings.debugLog.verbose.label')}
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.debugLog.verbose.hint')}
+          </p>
+        </div>
+        <Switch
+          id="debug-log-verbose"
+          checked={stored.verbose}
+          onCheckedChange={(v) => patch({ verbose: v })}
+          disabled={!stored.enabled}
+          className="shrink-0"
+        />
+      </div>
+
+      <div className="flex items-center gap-2 pt-1">
+        <Button variant="outline" size="sm" onClick={handleExport} disabled={busy !== null || !stored.enabled}>
+          <Download className="size-3.5" />
+          {t('settings.debugLog.export')}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            void chrome.tabs.create({ url: browser.runtime.getURL('/live-log.html') });
+          }}
+          disabled={!stored.enabled}
+          title={t('settings.debugLog.live.hint')}
+        >
+          <Activity className="size-3.5 text-emerald-500" />
+          {t('settings.debugLog.live.open')}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={handleClear} disabled={busy !== null}>
+          <FileWarning className="size-3.5" />
+          {t('settings.debugLog.clear')}
+        </Button>
+        <span className="text-xs text-muted-foreground" onMouseEnter={refreshCount}>
+          {count == null
+            ? t('settings.debugLog.countUnavailable')
+            : t('settings.debugLog.countLabel', [String(count)])}
+        </span>
+      </div>
     </div>
   );
 }

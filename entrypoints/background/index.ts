@@ -15,6 +15,23 @@ import { isInjectablePage } from '@/lib/browser/tab-actions';
 import { vfs } from '@/lib/persistence/vfs';
 import { pendingChangelogVersion } from '@/lib/persistence/storage';
 import { isValidSessionId } from '@/lib/utils';
+import { installConsoleMirror, bootstrapDebugLogSettings, subscribeLiveLog, debugLog, withSession, type DebugLogEntry } from '@/lib/debug/log';
+
+// Mirror every console.* call from the background into the persistent
+// IndexedDB log so the user can export it via the sidepanel button
+// without having to pre-open DevTools. SW restarts are fine — the store
+// is durable; only the in-memory write queue is lost.
+installConsoleMirror('background');
+
+// Pull the user's debug-log toggles from storage into the runtime mirror.
+// Fire-and-forget: the in-memory defaults are the same as the storage
+// fallbacks, so a missed read just means a brief window where the wrong
+// setting is in effect before the watch() callback re-syncs. Deferred via
+// setTimeout(0) for the same reason as in sidepanel/main.tsx — see
+// comment there.
+setTimeout(() => {
+  bootstrapDebugLogSettings().catch(() => {});
+}, 0);
 
 /**
  * Grace period after the last subscribed port disconnects before the agent
@@ -27,8 +44,28 @@ import { isValidSessionId } from '@/lib/utils';
  */
 const AGENT_GRACE_PERIOD_MS = 60_000;
 
+/**
+ * Chrome's MV3 service worker is torn down after ~30s idle and respawned
+ * on the next event. Without dedup, "Cebian background started" ends up
+ * in the debug log hundreds of times per day and drowns out real events.
+ *
+ * Solution: log at `info` only on the first start after install/update;
+ * every respawn (the common case) logs at `debug`, which is filtered
+ * out of the default persisted log but still appears in DevTools.
+ *
+ * `firstStartLogged` resets when the SW is fully killed (each new SW
+ * instance starts with a fresh module scope), which is what we want —
+ * a true cold restart after a real bug is worth surfacing.
+ */
+let firstStartLogged = false;
+
 export default defineBackground(() => {
-  console.log('Cebian background started', { id: browser.runtime.id });
+  if (firstStartLogged) {
+    console.debug('Cebian background resumed', { id: browser.runtime.id });
+  } else {
+    firstStartLogged = true;
+    console.log('Cebian background started', { id: browser.runtime.id });
+  }
 
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })
@@ -50,6 +87,17 @@ export default defineBackground(() => {
 
   // 注册备份 IPC 响应器（会话采集 / 写回；Dexie 唯一写者经此转发）。
   registerBackupHandler();
+
+  // MV3 forensic: when Chrome tears down the SW (tab close, idle eviction,
+  // update install), drain any pending throttled writes synchronously so we
+  // know whether in-flight messages survived. Best-effort — `onSuspend` is
+  // not guaranteed to fire on every kill path (force-kill, OOM). The log
+  // entry `db:writer:dispose_all` appears only if there was pending data,
+  // so a missing entry is fine; a present entry means "data was at risk,
+  // and we either flushed or dropped it".
+  chrome.runtime.onSuspend?.addListener(() => {
+    sessionStore.disposeAll();
+  });
 
   // 注册页面交互（悬浮球 / 划词工具条）的 runtime 消息处理器。
   setupPageActions({
@@ -73,6 +121,13 @@ export default defineBackground(() => {
 
   /** All connected ports and the session each is subscribed to. */
   const ports = new Map<chrome.runtime.Port, { subscribedSession: string | null; instanceId: string | null }>();
+
+  /** Ports that have `debug_log_subscribe`d. While non-empty, the BG
+   *  fans every new debug-log entry out via `debug_log_entry` so the
+   *  sidepanel's "Live log" view scrolls in real time. A port is
+   *  removed on `debug_log_unsubscribe` or on its `onDisconnect`
+   *  handler. */
+  const liveLogSubscribers = new Set<chrome.runtime.Port>();
 
   /**
    * Pending grace cancels keyed by sessionId. When the last subscriber
@@ -134,6 +189,22 @@ export default defineBackground(() => {
   }
 
   agentManager.setBroadcast(broadcast);
+
+  // Forward new debug-log entries to every port that has subscribed to
+  // the live stream. Wraps subscribeLiveLog once per SW lifetime so
+  // re-entries (BG resume, etc.) don't double-deliver.
+  subscribeLiveLog((event) => {
+    if (event.kind === 'cleared') {
+      for (const port of liveLogSubscribers) {
+        safePost(port, { type: 'debug_log_cleared' });
+      }
+      return;
+    }
+    const entry: DebugLogEntry = { ...event.entry };
+    for (const port of liveLogSubscribers) {
+      safePost(port, { type: 'debug_log_entry', entry });
+    }
+  });
 
   /** Post a global (non-session-scoped) message to every connected port. */
   function broadcastAll(msg: ServerMessage): void {
@@ -355,6 +426,11 @@ export default defineBackground(() => {
       const disconnectedState = ports.get(port);
       const sessionId = disconnectedState?.subscribedSession;
       ports.delete(port);
+      // Live-log subscription is per-port; if this port was subscribed,
+      // drop it from the fanout set so we don't try to post to a closed
+      // port. (safePost swallows the throw, but iterating dead ports
+      // every emit is wasted work.)
+      liveLogSubscribers.delete(port);
 
       // If no other port is subscribed to this session, schedule a grace
       // cancel instead of killing the agent immediately. This lets the user
@@ -419,6 +495,8 @@ export default defineBackground(() => {
           } else {
             // Agent finished during the await — fall through to DB-based
             // session_loaded using the row we already loaded.
+            debugLog.info('bg', 'session:loaded:dispatch',
+              withSession({ messageCount: session?.messageCount ?? 0 }, msg.sessionId));
             safePost(port, {
               type: 'session_loaded',
               sessionId: msg.sessionId,
@@ -429,6 +507,8 @@ export default defineBackground(() => {
           // Agent not running — load from DB
           const session = await sessionStore.load(msg.sessionId);
           if (session) {
+            debugLog.info('bg', 'session:loaded:dispatch',
+              withSession({ messageCount: session.messageCount }, msg.sessionId));
             safePost(port, {
               type: 'session_loaded',
               sessionId: msg.sessionId,
@@ -436,6 +516,8 @@ export default defineBackground(() => {
             });
           } else {
             // Session not found in DB
+            debugLog.info('bg', 'session:loaded:dispatch',
+              withSession({ messageCount: 0 }, msg.sessionId));
             safePost(port, {
               type: 'session_loaded',
               sessionId: msg.sessionId,
@@ -450,7 +532,62 @@ export default defineBackground(() => {
         state.subscribedSession = null;
         break;
 
+      case 'fork_session': {
+        const startedAt = performance.now();
+        debugLog.info('bg', 'ipc:fork_session:received',
+          withSession({ atAssistantIndex: msg.atAssistantIndex }, msg.sourceSessionId));
+        // Create a new session seeded with ONLY the assistant bubble at
+        // `messages[atAssistantIndex]` from the source — no user bubble,
+        // no prior turns. `agentManager.forkSession` deliberately does
+        // NOT broadcast — `broadcast()` filters ports by their subscribed
+        // session, and the requesting port is still on the source.
+        //
+        // Pin the port's subscription to the new fork BEFORE posting
+        // `session_created`, mirroring what the `prompt` handler does for
+        // brand-new sessions. Otherwise the sidepanel's
+        // session_created → navigate → setState(sessionId=newId) leaves the
+        // BG port still subscribed to the source — so subsequent
+        // `subscribe` no-ops on the client and the fork never receives
+        // `session_loaded` (UI stays empty / on the old session).
+        //
+        // We also load and post `session_loaded` immediately. The client
+        // skips an explicit `subscribe` (routeSessionId already matches
+        // activeSessionIdRef after the navigate), so without this push the
+        // hook would never learn the forked transcript.
+        agentManager.forkSession(msg.sourceSessionId, msg.atAssistantIndex).then(async ({ newSessionId, title }) => {
+          state.subscribedSession = newSessionId;
+          for (const [p, s] of ports) {
+            if (s.subscribedSession !== newSessionId) continue;
+            safePost(p, { type: 'session_created', sessionId: newSessionId, title });
+            const session = await sessionStore.load(newSessionId);
+            safePost(p, {
+              type: 'session_loaded',
+              sessionId: newSessionId,
+              session: session ?? null,
+            });
+          }
+          debugLog.info('bg', 'ipc:fork_session:dispatched',
+            withSession({
+              newSessionId,
+              totalDurationMs: Math.round(performance.now() - startedAt),
+            }, msg.sourceSessionId));
+        }).catch((err) => {
+          debugLog.error('bg', 'ipc:fork_session:failed',
+            withSession({ error: err.message ?? String(err) }, msg.sourceSessionId));
+          safePost(port, {
+            type: 'error',
+            sessionId: msg.sourceSessionId,
+            error: err.message ?? String(err),
+          });
+        });
+        break;
+      }
+
       case 'prompt': {
+        debugLog.info('bg', 'ipc:prompt:received', {
+          sessionId: msg.sessionId ?? null,
+          textLen: msg.text.length,
+        });
         const sessionId = msg.sessionId ?? crypto.randomUUID();
         state.subscribedSession = sessionId;
         // Start the agent (async — events will be broadcast).
@@ -474,6 +611,7 @@ export default defineBackground(() => {
 
       case 'cancel':
         // User-initiated cancel — immediate, no grace period.
+        debugLog.info('bg', 'ipc:cancel:received', { sessionId: msg.sessionId });
         cancelGrace(msg.sessionId);
         agentManager.cancel(msg.sessionId).catch(err =>
           console.warn(`[cancel] agent cancel failed for ${msg.sessionId}:`, err),
@@ -488,6 +626,23 @@ export default defineBackground(() => {
         state.subscribedSession = msg.sessionId;
         // 同 prompt：透传本轮重试携带的 model / thinkingLevel 作 override。
         agentManager.retry(msg.sessionId, {
+          model: msg.model,
+          thinkingLevel: msg.thinkingLevel,
+        }).catch((err) => {
+          safePost(port, {
+            type: 'error',
+            sessionId: msg.sessionId,
+            error: err.message ?? String(err),
+          });
+        });
+        break;
+      }
+
+      case 'edit_rerun': {
+        // Edit a previous user message and resume the agent from that turn.
+        // Same error surface and override semantics as `retry`.
+        state.subscribedSession = msg.sessionId;
+        agentManager.editAndRerun(msg.sessionId, msg.messageIndex, msg.text, {
           model: msg.model,
           thinkingLevel: msg.thinkingLevel,
         }).catch((err) => {
@@ -546,6 +701,7 @@ export default defineBackground(() => {
       }
 
       case 'session_list': {
+        debugLog.info('bg', 'ipc:session_list:received');
         const sessions = await sessionStore.list();
         // Annotate with live running state so the UI can show an indicator
         // for sessions whose agent is currently mid-stream in the background.
@@ -573,6 +729,7 @@ export default defineBackground(() => {
         }
         // Cancel any pending grace timer — the session is going away.
         cancelGrace(msg.sessionId);
+        debugLog.info('bg', 'session:deleted:dispatch', { sessionId: msg.sessionId });
         // Best-effort workspace cleanup. `vfs.rm({force:true})` already
         // tolerates ENOENT, so no exists pre-check is needed. Tolerate any
         // other VFS error and continue with DB deletion — a leaked workspace
@@ -719,6 +876,17 @@ export default defineBackground(() => {
             },
           });
         }
+        break;
+      }
+
+      case 'debug_log_subscribe': {
+        // Idempotent — Set semantics.
+        liveLogSubscribers.add(port);
+        break;
+      }
+
+      case 'debug_log_unsubscribe': {
+        liveLogSubscribers.delete(port);
         break;
       }
     }

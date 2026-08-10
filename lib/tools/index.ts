@@ -76,13 +76,26 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * in the session's workspace).
  *
  * Used both at session creation and when MCP config changes mid-session.
+ *
+ * `delegate_dom` is ALWAYS included so the main agent sees it in its tool
+ * list even when the user hasn't yet configured a sub-agent model. The tool
+ * itself checks `domSubAgentModel` at execute time and returns a friendly
+ * error message if not configured — that's cheaper than hiding the tool and
+ * having the agent ask the user "do you have a sub-agent tool?" when they
+ * could just turn it on in Settings → Advanced. This also avoids the trap
+ * where the user changes the setting AFTER creating a session: the tool is
+ * already in the list, so changes take effect immediately.
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
 ): Promise<AgentTool<any>[]> {
   const mcpTools = await discoverMCPTools();
   const runSkill = createSessionRunSkillTool(ctx.sessionId);
-  return [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
+  const base = [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
+  // Always include delegate_dom — checks the sub-agent model at runtime.
+  const { delegateDomTool } = await import('./delegate-dom');
+  base.push(delegateDomTool);
+  return base;
 }
 
 /**

@@ -6,7 +6,9 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/patch-wxt-dev.mjs",
     "dev": "wxt",
+    "predev:firefox": "node scripts/patch-wxt-dev.mjs",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build && node scripts/scan-obfuscation.mjs .output/chrome-mv3",
     "build:firefox": "wxt build -b firefox && node scripts/scan-obfuscation.mjs .output/firefox-mv2",
@@ -16,7 +18,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "check": "wxt prepare && tsc --noEmit && node scripts/lint-i18n.mjs && vitest run",
-    "postinstall": "wxt prepare && simple-git-hooks"
+    "postinstall": "wxt prepare && simple-git-hooks && node scripts/patch-wxt-dev.mjs"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm check"

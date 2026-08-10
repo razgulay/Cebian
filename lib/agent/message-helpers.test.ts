@@ -1,9 +1,73 @@
 import { describe, it, expect } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { sanitizeAgentMessages } from './message-helpers';
+import { sanitizeAgentMessages, truncateForEditRerun } from './message-helpers';
 
 // 用 `as unknown as AgentMessage[]` 构造违反类型契约的运行时数据（这正是本函数要兜的场景）。
 const asMessages = (arr: unknown[]) => arr as unknown as AgentMessage[];
+
+describe('truncateForEditRerun', () => {
+  it('replaces only the user-request block and truncates following messages', () => {
+    const msgs = asMessages([
+      { role: 'user', content: '<context>old context</context>\n\n<user-request>\nold prompt\n</user-request>', timestamp: 1 },
+      { role: 'assistant', content: [{ type: 'text', text: 'old answer' }], timestamp: 2 },
+      { role: 'user', content: '<user-request>later</user-request>', timestamp: 3 },
+    ]);
+
+    const out = truncateForEditRerun(msgs, 0, 'new prompt');
+
+    expect(out).toHaveLength(1);
+    expect((out![0] as any).content).toContain('<context>old context</context>');
+    expect((out![0] as any).content).toContain('<user-request>\nnew prompt\n</user-request>');
+    expect((out![0] as any).content).not.toContain('old prompt');
+  });
+
+  it('preserves image blocks while editing the text block', () => {
+    const image = { type: 'image', data: 'abc', mimeType: 'image/png' };
+    const msgs = asMessages([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '<attachments>x</attachments>\n\n<user-request>\nold\n</user-request>' },
+          image,
+        ],
+        timestamp: 1,
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }], timestamp: 2 },
+    ]);
+
+    const out = truncateForEditRerun(msgs, 0, 'new');
+
+    expect(out).toHaveLength(1);
+    expect((out![0] as any).content[0].text).toContain('<attachments>x</attachments>');
+    expect((out![0] as any).content[0].text).toContain('<user-request>\nnew\n</user-request>');
+    expect((out![0] as any).content[1]).toBe(image);
+  });
+
+  it('handles plain user string messages', () => {
+    const msgs = asMessages([
+      { role: 'user', content: 'old', timestamp: 1 },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }], timestamp: 2 },
+    ]);
+
+    const out = truncateForEditRerun(msgs, 0, 'new');
+
+    expect(out).toHaveLength(1);
+    expect((out![0] as any).content).toBe('new');
+  });
+
+  it('returns null for invalid target, non-user target, empty text, or user without text content', () => {
+    const msgs = asMessages([
+      { role: 'user', content: 'old', timestamp: 1 },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }], timestamp: 2 },
+      { role: 'user', content: [{ type: 'image', data: 'abc', mimeType: 'image/png' }], timestamp: 3 },
+    ]);
+
+    expect(truncateForEditRerun(msgs, -1, 'new')).toBeNull();
+    expect(truncateForEditRerun(msgs, 1, 'new')).toBeNull();
+    expect(truncateForEditRerun(msgs, 0, '   ')).toBeNull();
+    expect(truncateForEditRerun(msgs, 2, 'new')).toBeNull();
+  });
+});
 
 describe('sanitizeAgentMessages', () => {
   it('把 assistant text 块的 null text 兜成空串', () => {

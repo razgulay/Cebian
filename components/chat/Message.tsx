@@ -1,7 +1,8 @@
-import { Bot, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, ShieldAlert } from 'lucide-react';
+import { Bot, ChevronRight, FileText, Film, FoldVertical, Lightbulb, CheckCircle, Crosshair, Pencil, ShieldAlert, FileType, Zap } from 'lucide-react';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { MessageMetaRow, type MessageMetaProps } from '@/components/chat/MessageMetaRow';
 import { extractUserText, extractUserAttachments } from '@/lib/agent/message-helpers';
@@ -13,15 +14,58 @@ import { downloadFile, formatDuration, formatCompactCount } from '@/lib/utils';
 import type { Message } from '@earendil-works/pi-ai';
 
 /* ─── User Message ─── */
-export function UserMessageBubble({ msg, children }: { msg?: Message; children?: ReactNode }) {
+// Slash commands like `/writing` get the command token bolded with a zap
+// icon prefix so the user can immediately tell "this is a command" without
+// reading the expanded prompt body. The rest of the bubble (any user input
+// before or after the command, or the full text for non-commands) renders
+// normally. Matches the same shape ChatInput uses for inline expansion.
+const SLASH_COMMAND_RE = /^([\s\S]*?)(\/[a-zA-Z0-9_-]+)([\s\S]*)$/;
+
+export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; children?: ReactNode; onEdit?: () => void }) {
   const text = msg ? extractUserText(msg) : null;
   const attachments = useMemo(() => msg ? extractUserAttachments(msg) : null, [msg]);
-  const hasAttachments = attachments && (attachments.images.length > 0 || attachments.elements.length > 0 || attachments.files.length > 0 || attachments.recordings.length > 0);
+  const hasAttachments = attachments && (attachments.images.length > 0 || attachments.elements.length > 0 || attachments.files.length > 0 || attachments.pdfs.length > 0 || attachments.recordings.length > 0);
+  // Split the bubble text into prefix (before the command), the command token
+  // (bolded + zap icon), and suffix (after the command). Only the
+  // `/commandname` part gets the command treatment.
+  const slashMatch = text != null ? text.match(SLASH_COMMAND_RE) : null;
+  const prefixPart = slashMatch && slashMatch[1] ? slashMatch[1] : null;
+  const commandPart = slashMatch ? slashMatch[2] : null;
+  const suffixPart = slashMatch ? (slashMatch[3] ?? '') : null;
 
   return (
-    <div className="self-end max-w-[95%]">
-      <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[0.9rem] leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
-        {text ?? children}
+    <div className="group/edit self-end w-full">
+      <div className="relative w-fit ml-auto">
+        <div className="bg-slate-200 dark:bg-slate-700 px-3.5 py-2.5 rounded-[4rem] rounded-tr-sm text-[length:var(--chat-font-size)] font-normal leading-relaxed whitespace-pre-wrap break-words">
+          {commandPart ? (
+            <span>
+              {prefixPart && <span>{prefixPart}</span>}
+              <span className="inline-flex items-baseline gap-1 font-bold">
+                <Zap className="size-3.5 shrink-0 self-center text-amber-400" aria-hidden />
+                <span>{commandPart}</span>
+              </span>
+              {suffixPart && <span>{suffixPart}</span>}
+            </span>
+          ) : (
+            <span>{text ?? children}</span>
+          )}
+        </div>
+        {onEdit && text != null && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-6 shrink-0 absolute -top-1 -left-5 opacity-0 group-hover/edit:opacity-100 text-muted-foreground hover:text-foreground"
+                onClick={onEdit}
+                aria-label={t('chat.message.edit')}
+              >
+                <Pencil className="size-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t('chat.message.edit')}</TooltipContent>
+          </Tooltip>
+        )}
       </div>
 
       {hasAttachments && (
@@ -61,6 +105,21 @@ export function UserMessageBubble({ msg, children }: { msg?: Message; children?:
             >
               <FileText className="size-2.5 shrink-0" />
               <span className="truncate max-w-24">{f.name}</span>
+            </Badge>
+          ))}
+          {attachments.pdfs.map((p, i) => (
+            <Badge
+              key={`pdf-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-rose-400 border-rose-400/20 bg-rose-400/5"
+              title={p.truncated
+                ? t('chat.attachments.pdfTruncated', [p.name, String(p.pageCount), String(p.extractedPageCount)])
+                : t('chat.attachments.pdfPages', [p.name, String(p.pageCount)])}
+            >
+              <FileType className="size-2.5 shrink-0" />
+              <span className="truncate max-w-24">{p.name}</span>
+              <span className="text-rose-400/70">·</span>
+              <span>{t('chat.attachments.pdfPageCount', [String(p.pageCount)])}</span>
             </Badge>
           ))}
           {attachments.recordings.map((r, i) => (
@@ -157,21 +216,32 @@ function extractSpeakText(el: HTMLElement | null): string {
 export function AgentMessage({
   children,
   isStreaming,
+  isThinking,
   showHeader = true,
   meta,
   copyText,
   onRetry,
+  onFork,
 }: {
   children?: ReactNode;
   isStreaming?: boolean;
+  /** True while the agent is in its thinking phase (model emitted thinking
+   *  blocks but no visible text yet). Drives a "Think..." indicator with
+   *  animated dots next to the agent name in the header so the user sees
+   *  the model isn't stuck — it's reasoning. Resets once visible text
+   *  starts streaming (caller drops `isThinking`). */
+  isThinking?: boolean;
   showHeader?: boolean;
   /** Meta is rendered as soon as `!isStreaming`; the copy button inside the
    * row is gated on `copyText` (skipped for pure tool-call turns). */
-  meta?: Omit<MessageMetaProps, 'text' | 'onRetry'>;
+  meta?: Omit<MessageMetaProps, 'text' | 'onRetry' | 'onFork'>;
   copyText?: string;
   /** When provided, a retry button is shown in the meta row. Caller decides
    *  eligibility (last turn-closing assistant, agent idle). */
   onRetry?: () => void;
+  /** When provided, a fork button is shown in the meta row. Caller decides
+   *  eligibility (any turn-closing assistant). */
+  onFork?: () => void;
 }) {
   // 朗读按钮惰性读取这个容器的 DOM 文本（见 extractSpeakText），避免提前求值。
   const contentRef = useRef<HTMLDivElement>(null);
@@ -180,10 +250,24 @@ export function AgentMessage({
       {showHeader && (
         <div className="flex items-center gap-2 mb-2 text-xs text-muted-foreground font-medium">
           <Bot className="size-3.5 text-primary" />
-          Cebian Agent
+          <span>Cebian Agent</span>
+          {isThinking && (
+            <span
+              className="inline-flex items-center gap-0.5 text-muted-foreground/80 italic"
+              aria-live="polite"
+              data-testid="agent-thinking-indicator"
+            >
+              <span>Think</span>
+              <span className="inline-flex">
+                <span className="animate-thinking-dot" style={{ animationDelay: '0ms' }}>.</span>
+                <span className="animate-thinking-dot" style={{ animationDelay: '150ms' }}>.</span>
+                <span className="animate-thinking-dot" style={{ animationDelay: '300ms' }}>.</span>
+              </span>
+            </span>
+          )}
         </div>
       )}
-      <div ref={contentRef} className="text-[0.9rem] leading-relaxed space-y-3">
+      <div ref={contentRef} className="text-[length:var(--chat-font-size)] font-normal leading-relaxed space-y-3">
         {children}
         {isStreaming && (
           <span
@@ -192,12 +276,13 @@ export function AgentMessage({
           />
         )}
       </div>
-      {!isStreaming && (meta || copyText || onRetry) && (
+      {!isStreaming && (meta || copyText || onRetry || onFork) && (
         <MessageMetaRow
           {...(meta ?? {})}
           text={copyText}
           getSpeakText={() => extractSpeakText(contentRef.current)}
           onRetry={onRetry}
+          onFork={onFork}
         />
       )}
     </div>
@@ -218,29 +303,20 @@ export function AgentTextBlock({ content }: { content: string }) {
 /* ─── Thinking Block (renders pi-ai ThinkingContent) ─── */
 export function ThinkingBlock({ content, isLive }: { content: string; isLive?: boolean }) {
   const [manualOpen, setManualOpen] = useState(false);
-  const wasLive = useRef(false);
 
-  // Auto-collapse when transitioning from live to done
-  useEffect(() => {
-    if (wasLive.current && !isLive) {
-      setManualOpen(false);
-    }
-    wasLive.current = !!isLive;
-  }, [isLive]);
-
-  const isOpen = isLive || manualOpen;
+  const isOpen = manualOpen;
 
   return (
     <div className="border border-border rounded-lg overflow-hidden text-xs bg-card/30">
       <button
-        onClick={() => !isLive && setManualOpen(!manualOpen)}
+        onClick={() => setManualOpen(!manualOpen)}
         className="w-full flex items-center gap-2 px-3 py-2 text-muted-foreground font-mono text-[0.75rem] hover:text-foreground hover:bg-card/40 transition-colors"
       >
         <ChevronRight
           className={`size-2.5 transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
         />
-        <Lightbulb className="size-3 text-primary" />
-        {isLive ? 'Thinking...' : 'Thinking Process'}
+        <Lightbulb className={`size-3 ${isLive ? 'text-amber-400 animate-pulse' : 'text-primary'}`} />
+        <span>{isLive ? 'Thinking...' : 'Thinking Process'}</span>
       </button>
       <div
         className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${

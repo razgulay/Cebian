@@ -44,15 +44,22 @@ export function toModel(config: CustomProviderConfig, model: CustomModelDef): Mo
   return base;
 }
 
-/** Get all Model objects for a custom provider */
+/** 一个 CustomModelDef 当前是否应在模型下拉中显示。undefined = 启用（向后兼容）。 */
+export function isModelEnabled(model: CustomModelDef): boolean {
+  return model.enabled !== false;
+}
+
+/** Get all Model objects for a custom provider, filtered by the enabled flag. Models
+ *  with `enabled === false` are skipped — the dropdown shouldn't show them. (Settings
+ *  storage still keeps them so the user can re-enable.) */
 export function getCustomModels(config: CustomProviderConfig): Model<Api>[] {
-  return config.models.map(m => toModel(config, m));
+  return config.models.filter(isModelEnabled).map(m => toModel(config, m));
 }
 
 /**
- * 重新拉取模型列表后按 modelId 合并：仍存在的模型保留既有配置（reasoning/image/
- * contextWindow/maxTokens），新模型以默认值补入，远端已消失的移除；顺序跟随远端、
- * 重复 id 只取首个。避免「自动获取」把用户设过的每模型配置整批冲掉
+ * 重新拉取模型列表后按 modelId 合并：仍存在的模型保留既有配置（enabled/reasoning/
+ * image/contextWindow/maxTokens），新模型以默认值补入，远端已消失的移除；顺序跟随
+ * 远端、重复 id 只取首个。避免「自动获取」把用户设过的每模型配置整批冲掉
  */
 export function mergeFetchedModels(
   existing: CustomModelDef[],
@@ -64,7 +71,8 @@ export function mergeFetchedModels(
   for (const id of fetchedIds) {
     if (seen.has(id)) continue;
     seen.add(id);
-    out.push(byId.get(id) ?? { modelId: id, name: id, reasoning: false, image: false });
+    // 新模型默认启用（enabled 缺省视为 true），免除用户在添加后还得手动打开「显示在列表中」
+    out.push(byId.get(id) ?? { modelId: id, name: id, reasoning: false, image: false, enabled: true });
   }
   return out;
 }

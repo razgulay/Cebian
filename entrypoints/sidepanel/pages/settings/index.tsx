@@ -10,6 +10,7 @@ import { SkillsSection } from '@/components/settings/sections/SkillsSection';
 import { MemorySection } from '@/components/settings/sections/MemorySection';
 import { MCPSection } from '@/components/settings/sections/MCPSection';
 import { PageInteractionSection } from '@/components/settings/sections/PageInteractionSection';
+import { AppearanceSection } from '@/components/settings/sections/AppearanceSection';
 import { BackupSection } from '@/components/settings/sections/BackupSection';
 import { StorageSection } from '@/components/settings/sections/StorageSection';
 import { AdvancedSection } from '@/components/settings/sections/AdvancedSection';
@@ -47,6 +48,7 @@ export function SettingsRoutes({ basePath, showBackButton = false, showOpenInTab
         <Route path="memory/*" element={<MemorySection />} />
         <Route path="mcp" element={<MCPSection />} />
         <Route path="page-interaction" element={<PageInteractionSection />} />
+        <Route path="appearance" element={<AppearanceSection />} />
         <Route path="backup" element={<BackupSection />} />
         <Route path="storage" element={<StorageSection />} />
         <Route path="advanced" element={<AdvancedSection />} />

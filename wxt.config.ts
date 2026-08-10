@@ -79,6 +79,24 @@ export default defineConfig({
         "media-src 'self' data: blob: https:; " +
         "child-src 'self' data: blob:; " +
         "base-uri *;",
+      // Extension pages (sidepanel / settings / vfs) — allow the Geist Sans
+      // stylesheet + woff2 files from Google Fonts. Chrome MV3 default
+      // (`default-src 'self'`) would block external font CSS. `style-src` /
+      // `font-src` widened to `https:`; nothing else changes.
+      //
+      // Chrome MV3 rejects `'unsafe-inline'` / `'unsafe-eval'` in `script-src`
+      // for extension pages (started enforcing ~Chrome 110, becomes a hard
+      // error at install time — web-ext-run aborts the dev launch with
+      // "Insecure CSP value"). Our entry points ship as external scripts via
+      // WXT/Vite's bundler, so `'self'` is sufficient; no inline <script>
+      // or eval() lives on these pages.
+      extension_pages:
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline' https:; " +
+        "font-src https: data:; " +
+        "img-src 'self' data: blob: https:; " +
+        "connect-src 'self' https: wss: data: blob:; " +
+        "media-src 'self' data: blob: https:;",
     },
   },
   vite: () => ({

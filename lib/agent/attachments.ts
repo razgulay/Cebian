@@ -20,6 +20,25 @@ export interface TextFileAttachment {
   size: number;          // original bytes
 }
 
+/** Text extracted from a PDF the user attached. Renders into the same
+ *  `<attached-file>` block as a plain text file (the LLM doesn't need to
+ *  know it was originally a PDF), but the UI surfaces a "PDF · N pages"
+ *  badge so the user can tell at a glance. `pageCount` is the full
+ *  document size — `extractedPageCount` is how many pages made it into
+ *  `content` after the budget cap. */
+export interface PdfTextAttachment {
+  type: 'pdf';
+  content: string;
+  name: string;
+  /** "application/pdf" — preserved for the XML envelope so downstream
+   *  tools / parsers see the original MIME. */
+  mimeType: string;
+  size: number;
+  pageCount: number;
+  extractedPageCount: number;
+  truncated: boolean;
+}
+
 export interface ElementAttachment {
   type: 'element';
   selector: string;
@@ -55,7 +74,7 @@ export interface RecordingAttachment {
   truncatedAttachment?: boolean;
 }
 
-export type Attachment = ImageAttachment | TextFileAttachment | ElementAttachment | RecordingAttachment;
+export type Attachment = ImageAttachment | TextFileAttachment | PdfTextAttachment | ElementAttachment | RecordingAttachment;
 
 /** MIME type for serialized recording JSON. Used for both the agent-prompt
  *  envelope and browser downloads of recording attachments. */
@@ -67,6 +86,11 @@ export const MAX_IMAGE_SIZE = 5 * 1024 * 1024;      // 5 MB
 export const MAX_TEXT_FILE_SIZE = 100 * 1024;         // 100 KB
 /** Cap recording JSON to keep prompt budget reasonable (~80k tokens worst case). */
 export const MAX_RECORDING_SIZE = 256 * 1024;         // 256 KB
+/** Hard cap on PDF attachment file size — the offscreen PDF.js pipeline
+ *  holds the full ArrayBuffer plus decoded structures in memory, so a
+ *  50 MB cap matches the `fs_save_url` ceiling and keeps the SW from
+ *  OOMing on multi-hundred-page manuals picked straight from disk. */
+export const MAX_PDF_SIZE = 50 * 1024 * 1024;         // 50 MB
 export const MAX_ATTACHMENT_COUNT = 10;
 
 const TEXT_EXTENSIONS = new Set([
@@ -94,6 +118,28 @@ export function isTextFile(name: string): boolean {
 
 export function isImageFile(file: File): boolean {
   return IMAGE_MIME_TYPES.has(file.type);
+}
+
+/** PDF detection. Browsers are inconsistent about MIME for dropped files:
+ *  Chrome usually reports `application/pdf` for `.pdf` files but a drag
+ *  from a sandboxed iframe / a paste from a non-file source may leave
+ *  `file.type` empty, and some sandboxes report `application/octet-stream`
+ *  as a generic catch-all. We accept any of those when the extension is
+ *  `.pdf`, but require a real PDF MIME when the extension says otherwise —
+ *  a misconfigured server returning a PNG with a `.pdf` URL should not
+ *  sneak through. */
+export function isPdfFile(file: File): boolean {
+  const ext = getFileExtension(file.name);
+  const isPdfMime = file.type === 'application/pdf';
+  // Trust the extension when MIME is empty or generic octet-stream.
+  // Refuse non-PDF MIMEs (e.g. image/png with .pdf name) — MIME wins.
+  if (ext === '.pdf') {
+    if (file.type === '' || file.type === 'application/octet-stream' || isPdfMime) {
+      return true;
+    }
+    return false;
+  }
+  return isPdfMime;
 }
 
 // ─── Build LLM-ready content from attachments ───
@@ -126,6 +172,19 @@ export function buildTextPrefix(attachments: Attachment[]): string {
     if (a.type === 'file') {
       blocks.push(
         `<attached-file name="${escapeXml(a.name, { forAttribute: true })}" type="${escapeXml(a.mimeType, { forAttribute: true })}">\n${a.content}\n</attached-file>`,
+      );
+    }
+
+    if (a.type === 'pdf') {
+      // Same `<attached-file>` envelope as plain text — the LLM doesn't
+      // care whether it was originally a PDF, only about the extracted
+      // text. Preserving `mimeType="application/pdf"` keeps the type
+      // discoverable for any downstream tool that wants to know.
+      const truncNote = a.truncated
+        ? ` (text truncated to first ${a.extractedPageCount} of ${a.pageCount} pages)`
+        : '';
+      blocks.push(
+        `<attached-file name="${escapeXml(a.name, { forAttribute: true })}" type="application/pdf" pages="${a.pageCount}"${a.truncated ? ' truncated="true"' : ''}${truncNote ? ` note="${escapeXml(truncNote, { forAttribute: true })}"` : ''}>\n${a.content}\n</attached-file>`,
       );
     }
 

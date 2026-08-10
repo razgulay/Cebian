@@ -16,6 +16,7 @@ import {
   generateSummary,
   DEFAULT_COMPACTION_SETTINGS,
 } from '@earendil-works/pi-agent-core';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 /**
  * Cebian 的压缩配置（④：写死默认 + 留配置位）。当前直接对齐 pi 的
@@ -168,6 +169,10 @@ export interface RunCompactionParams {
   reserveTokens?: number;
   signal?: AbortSignal;
   thinkingLevel?: ThinkingLevel;
+  /** Optional session id for debug-log correlation. When set, compaction
+   *  start/done events get `sessionId` promoted to the top-level field so
+   *  log queries can filter by session without parsing the JSON payload. */
+  sessionId?: string;
 }
 
 /**
@@ -226,7 +231,23 @@ export async function runCompaction(params: RunCompactionParams): Promise<string
     reserveTokens = DEFAULT_COMPACTION_SETTINGS.reserveTokens,
     signal,
     thinkingLevel,
+    sessionId,
   } = params;
+
+  // Compaction observability: log start/done with timing + input/output sizes.
+  // `messagesCount` = how many messages we're summarizing (proxy for context
+  // size). `summaryLen` = length of the resulting summary text (proxy for
+  // compression ratio). `durationMs` covers both retries when they happen.
+  // We surface this at info level (not debug) because it's a user-visible
+  // event — a long compaction = user sees "Compacting..." for seconds.
+  const startedAt = Date.now();
+  const inputTokens = messagesToSummarize.reduce((sum, m) => sum + estimateTokens(m), 0);
+  debugLog.info('llm', 'compaction:start', withSession({
+    messagesCount: messagesToSummarize.length,
+    inputTokens,
+    model: `${model.provider}/${model.id}`,
+    hasPreviousSummary: !!previousSummary,
+  }, sessionId ?? ''));
 
   // 0.80 的 generateSummary 经 Models 集合解析 auth：用已解析好的 key 构造一个只
   // 服务该 model 的临时集合（见 modelsForSummary），两次重试复用同一集合。
@@ -245,10 +266,32 @@ export async function runCompaction(params: RunCompactionParams): Promise<string
       previousSummary,
       thinkingLevel,
     );
-    if (result.ok) return result.value;
+    if (result.ok) {
+      debugLog.info('llm', 'compaction:done', withSession({
+        ok: true,
+        messagesCount: messagesToSummarize.length,
+        inputTokens,
+        summaryLen: result.value.length,
+        durationMs: Date.now() - startedAt,
+        attempts: attempt,
+      }, sessionId ?? ''));
+      return result.value;
+    }
     // 取消不是失败：不记警告、不重试。
-    if (result.error.code === 'aborted' || signal?.aborted) return null;
+    if (result.error.code === 'aborted' || signal?.aborted) {
+      debugLog.info('llm', 'compaction:done', withSession({
+        ok: false,
+        cancelled: true,
+        durationMs: Date.now() - startedAt,
+      }, sessionId ?? ''));
+      return null;
+    }
     console.warn(`[compaction] generateSummary failed (attempt ${attempt}/2):`, result.error);
   }
+  debugLog.warn('llm', 'compaction:done', withSession({
+    ok: false,
+    reason: 'max_retries_exceeded',
+    durationMs: Date.now() - startedAt,
+  }, sessionId ?? ''));
   return null;
 }

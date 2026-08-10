@@ -16,6 +16,11 @@ export interface ParsedUserAttachments {
   images: { data: string; mimeType: string }[];
   elements: { selector: string }[];
   files: { name: string; type: string }[];
+  /** PDF attachments, surfaced separately so the bubble can render a
+   *  "PDF · N pages" badge instead of a generic file chip. Extracted
+   *  page count + truncation flag are the same values written by the
+   *  offscreen extraction handler. */
+  pdfs: { name: string; pageCount: number; extractedPageCount: number; truncated: boolean }[];
   recordings: { name: string; eventCount: number; durationMs: number; truncated: boolean; json: string }[];
 }
 
@@ -74,7 +79,24 @@ export function extractUserText(msg: Message): string {
 }
 
 const ELEMENT_RE = /<selected-element\s+selector="([^"]*)"[^>]*>/g;
-const FILE_RE = /<attached-file\s+name="([^"]*)"\s+type="([^"]*)">/g;
+const FILE_RE = /<attached-file\s+name="([^"]*)"\s+type="([^"]*)"([^>]*)>/g;
+// PDF attachments use the same `<attached-file>` envelope but carry extra
+// attributes (`pages`, `truncated`). Re-extract from the same `<attached-file>`
+// matches by walking the captures rather than a separate regex, so we can't
+// miss a file just because it happens to share both shapes.
+// ─── Per-file attribute scan ───
+// Cheap inline attribute parser: splits on whitespace, then `name="value"`
+// or `name=value`. Only used on the captured attribute blob (a few hundred
+// chars max), so a real HTML parser would be overkill.
+function parseAttachedFileAttrs(attrBlob: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /([a-zA-Z_-]+)\s*=\s*"([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(attrBlob)) !== null) {
+    out[m[1]!] = m[2]!;
+  }
+  return out;
+}
 // Body is XML-escaped JSON. Recorded `<`/`>`/`&` chars are encoded as
 // entities so they can't fake a `</recording>` or `</attachments>` close
 // tag, keeping the non-greedy boundary unambiguous.
@@ -83,7 +105,7 @@ const ATTACHMENTS_BLOCK_RE = /<attachments>([\s\S]*?)<\/attachments>/;
 
 /** Extract attachment metadata from a user message for display in the chat bubble. */
 export function extractUserAttachments(msg: Message): ParsedUserAttachments {
-  const result: ParsedUserAttachments = { images: [], elements: [], files: [], recordings: [] };
+  const result: ParsedUserAttachments = { images: [], elements: [], files: [], pdfs: [], recordings: [] };
   if (msg.role !== 'user') return result;
 
   // Extract images from content blocks
@@ -104,10 +126,25 @@ export function extractUserAttachments(msg: Message): ParsedUserAttachments {
     result.elements.push({ selector: unescapeXml(m[1]) });
   }
   for (const m of attachBlock.matchAll(FILE_RE)) {
-    result.files.push({
-      name: unescapeXml(m[1]),
-      type: unescapeXml(m[2]),
-    });
+    const name = unescapeXml(m[1]!);
+    const type = unescapeXml(m[2]!);
+    const attrs = parseAttachedFileAttrs(m[3] ?? '');
+    if (type === 'application/pdf') {
+      // Pages count comes from the offscreen extractor. `truncated="true"`
+      // means we hit the budget cap before reading the whole document;
+      // `extractedPageCount` is approximated from the body length when
+      // available, but we don't try to recover it precisely here — the UI
+      // just needs the document total to render "PDF · 12 pages".
+      const pageCount = Number(attrs.pages ?? '0');
+      result.pdfs.push({
+        name,
+        pageCount,
+        extractedPageCount: pageCount,
+        truncated: attrs.truncated === 'true',
+      });
+    } else {
+      result.files.push({ name, type });
+    }
   }
   for (const m of attachBlock.matchAll(RECORDING_RE)) {
     result.recordings.push({
@@ -140,6 +177,68 @@ export function truncateForRetry<M extends { role: string }>(messages: M[]): M[]
     }
   }
   return null;
+}
+
+function replaceUserRequestInText(raw: string, newText: string): string {
+  if (USER_REQUEST_RE.test(raw)) {
+    return raw.replace(USER_REQUEST_RE, `<user-request>\n${newText}\n</user-request>`);
+  }
+  return newText;
+}
+
+/**
+ * Compute the transcript slice for editing a previous user turn and rerunning
+ * from that point. Only the visible user request text is replaced; structured
+ * context / attachment XML and non-text blocks (images) on the edited message
+ * are preserved, then everything after that user message is dropped.
+ */
+export function truncateForEditRerun<M extends { role: string }>(
+  messages: M[],
+  userMessageIndex: number,
+  newText: string,
+): M[] | null {
+  const trimmed = newText.trim();
+  if (!trimmed) return null;
+  const target = messages[userMessageIndex];
+  if (!target || target.role !== 'user') return null;
+
+  const msg = target as unknown as Message;
+  let edited: Message | null = null;
+
+  if (typeof msg.content === 'string') {
+    edited = { ...msg, content: replaceUserRequestInText(msg.content, trimmed) } as Message;
+  } else if (Array.isArray(msg.content)) {
+    let replaced = false;
+    const nextContent = (msg.content as unknown[]).map((block) => {
+      if (!block || typeof block !== 'object') return block;
+      const b = block as Record<string, unknown>;
+      if (b.type !== 'text' || typeof b.text !== 'string') return block;
+      if (!replaced && USER_REQUEST_RE.test(b.text)) {
+        replaced = true;
+        return { ...b, text: replaceUserRequestInText(b.text, trimmed) };
+      }
+      return block;
+    });
+
+    if (!replaced) {
+      const firstTextIndex = nextContent.findIndex((block) => {
+        if (!block || typeof block !== 'object') return false;
+        const b = block as Record<string, unknown>;
+        return b.type === 'text' && typeof b.text === 'string';
+      });
+      if (firstTextIndex < 0) return null;
+      const block = nextContent[firstTextIndex] as Record<string, unknown>;
+      nextContent[firstTextIndex] = { ...block, text: trimmed };
+    }
+
+    edited = { ...msg, content: nextContent as unknown as Message['content'] } as Message;
+  } else {
+    return null;
+  }
+
+  const out = messages.slice(0, userMessageIndex + 1);
+  out[userMessageIndex] = edited as unknown as M;
+  return out;
 }
 
 // ─── 消息形态规整（类型契约兜底）───

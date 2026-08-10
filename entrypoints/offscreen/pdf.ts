@@ -126,7 +126,9 @@ async function getOrLoadDocument(url: string): Promise<PDFDocumentProxy> {
     const pdfjs = await loadPdfJs();
     const bytes = await fetchPdf(url);
     const task = pdfjs.getDocument({
-      data: bytes,
+      // pdf.js v5 wants a typed-array view, not a raw ArrayBuffer —
+      // see parseBytes() for rationale. Wrapping is zero-copy.
+      data: new Uint8Array(bytes),
       // Disable pdf.js's built-in font fetching attempts (no network access
       // for sub-resources needed for text extraction).
       disableFontFace: true,
@@ -147,6 +149,26 @@ async function getOrLoadDocument(url: string): Promise<PDFDocumentProxy> {
   });
 
   return loadingPromise;
+}
+
+/** Parse a PDF from an in-memory byte buffer (no fetch, no cache). Used by
+ *  the attachment flow where the user picked a local file — we already
+ *  have the ArrayBuffer and just need text out of it. Skips the URL
+ *  cache because each upload is one-shot; caching by URL would be a no-op
+ *  anyway since there's no URL to key on. */
+async function parseBytes(bytes: ArrayBuffer): Promise<PDFDocumentProxy> {
+  const pdfjs = await loadPdfJs();
+  // pdf.js v5 rejects raw `ArrayBuffer` — it wants a typed-array view
+  // (`Uint8Array` / `Uint8ClampedArray`) per the "TypedArray, string, or
+  // array-like object" contract. Chrome's structured-clone often gives us
+  // an `ArrayBuffer` (e.g. the result of `FileReader.readAsArrayBuffer`),
+  // so we wrap it. The wrapper is a zero-copy view — no bytes copied.
+  const task = pdfjs.getDocument({
+    data: new Uint8Array(bytes),
+    disableFontFace: true,
+    verbosity: 0,
+  });
+  return task.promise;
 }
 
 // ─── Fetch ───
@@ -434,6 +456,87 @@ export async function handlePdfText(
 const SEARCH_SNIPPET_CONTEXT = 80;
 const SEARCH_DEFAULT_MAX_HITS = 50;
 const SEARCH_HARD_MAX_HITS = 500;
+
+/** Result of `pdf-extract-bytes` (attachment flow). Same shape as
+ *  `PdfTextResult` but `pageCount` is surfaced separately so the UI
+ *  can show "PDF · 12 pages" without re-querying. */
+export interface PdfBytesExtractResult {
+  pageCount: number;
+  /** Joined text for the resolved page range (or all pages when no range
+   *  given). Page boundaries marked with `\f\n=== Page N ===\n`. Same
+   *  conventions as `handlePdfText`. */
+  text: string;
+  pages: number[];
+  truncated: boolean;
+}
+
+/** Hard ceiling on extracted text characters per PDF attachment. Matches
+ *  the inline-preview cap of the `pdf` tool (20 KB default) so a single
+ *  attachment can't balloon the prompt budget. Users who want more can
+ *  ask the agent to call the `pdf` tool explicitly with `outputPath`. */
+const PDF_BYTES_DEFAULT_MAX_CHARS = 50_000;
+
+/** Extract text from a PDF the user attached (bytes already in hand —
+ *  no URL fetch, no cache). Used by the ChatInput attachment flow so a
+ *  PDF picked from disk is rendered into a text attachment the LLM can
+ *  read. Honours the same `maxChars` budget as the tool's `read` action
+ *  so a single PDF can't bloat the prompt; exceeding the budget sets
+ *  `truncated: true` and stops at the page boundary. */
+export async function handlePdfExtractBytes(
+  bytes: ArrayBuffer,
+  pageRangeSpec: string | undefined,
+  maxChars: number | undefined,
+): Promise<PdfBytesExtractResult> {
+  // Defensive: if base64 decode went wrong upstream we'd land here with
+  // a zero-length buffer; bail with a useful error rather than letting
+  // pdf.js's terse "file is empty" message bubble up.
+  if (!bytes || bytes.byteLength === 0) {
+    throw new Error('PDF attachment bytes are empty (IPC transfer failed)');
+  }
+  const doc = await parseBytes(bytes);
+  const pages = parsePageRange(pageRangeSpec, doc.numPages);
+  if (pages.length === 0) {
+    throw new Error(
+      `Page range "${pageRangeSpec}" matched no pages (document has ${doc.numPages} page(s)).`,
+    );
+  }
+
+  const limit = maxChars ?? PDF_BYTES_DEFAULT_MAX_CHARS;
+
+  const segments: string[] = [];
+  const includedPages: number[] = [];
+  let totalChars = 0;
+  let truncated = false;
+
+  for (const pageNumber of pages) {
+    const pageText = await extractPageText(doc, pageNumber);
+    const segment = (segments.length > 0 ? '\n\f\n' : '')
+      + `=== Page ${pageNumber} ===\n`
+      + pageText;
+
+    if (totalChars + segment.length > limit) {
+      const remaining = Math.max(0, limit - totalChars);
+      if (remaining > 0) {
+        segments.push(segment.slice(0, remaining));
+        includedPages.push(pageNumber);
+        totalChars += remaining;
+      }
+      truncated = true;
+      break;
+    }
+
+    segments.push(segment);
+    includedPages.push(pageNumber);
+    totalChars += segment.length;
+  }
+
+  return {
+    pageCount: doc.numPages,
+    text: segments.join(''),
+    pages: includedPages,
+    truncated,
+  };
+}
 
 export async function handlePdfSearch(
   url: string,

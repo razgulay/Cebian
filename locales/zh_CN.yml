@@ -101,6 +101,7 @@ settings:
     memory: "记忆"
     mcp: "MCP 服务器"
     pageInteraction: "页面交互"
+    appearance: "外观"
     backup: "备份与恢复"
     storage: "文件系统"
     advanced: "高级"
@@ -134,12 +135,45 @@ settings:
       xiaohongshuHandle: "一只猫头猫"
       x: "X"
       xHandle: "@maotoumao0_0"
+  debugLog:
+    title: "调试日志"
+    description: "把扩展里所有 console 输出缓存到本地环形缓冲。反馈 bug 时把这个文件导出给维护者，他们能直接看到现场发生了什么，不用你现场复演。"
+    enable:
+      label: "记录调试日志"
+      hint: "关闭后不写入环形缓冲，导出按钮也会一并禁用。"
+    verbose:
+      label: "详细模式（逐 token 事件）"
+      hint: "同时记录 LLM 流式返回的每个 token。默认关闭——默认等级已经覆盖所有 agent 边界和警告，这通常是反馈 bug 时最需要的。"
+    live:
+      label: "实时日志"
+      hint: "实时看到新条目出现，不用等导出。"
+      open: "打开实时日志"
+      close: "关闭"
+      pause: "暂停"
+      resume: "继续"
+      cleared: "日志已清空"
+      empty: "暂无条目——操作一下扩展以触发事件。"
+    export: "导出日志"
+    clear: "清空日志"
+    # $1 = 当前缓冲的条目数
+    countLabel: "已缓冲 $1 条"
+    countUnavailable: "日志不可用（无痕模式？）"
+    # $1 = 文件中包含的条目数
+    exported: "已导出 $1 条到下载文件夹"
+    exportFailed: "导出失败：$1"
+    cleared: "调试日志已清空"
+    clearFailed: "清空失败：$1"
+    empty: "调试日志为空，暂无可导出内容"
   advanced:
     title: "高级"
     compaction:
       label: "上下文压缩模型"
       hint: "对话过长时用来自动压缩历史的模型，默认与对话模型相同。"
       followMain: "与对话模型相同"
+    domSubAgent:
+      label: "DOM 子代理模型"
+      hint: "处理主对话模型委派的重页面阅读任务的便宜模型。关 = 关闭此功能。"
+      off: "关闭"
   pageInteraction:
     title: "页面交互"
     ball:
@@ -156,6 +190,19 @@ settings:
       label: "翻译目标语言"
       hint: "工具条翻译成的目标语言。"
       auto: "跟随界面语言"
+  appearance:
+    title: "外观"
+    fontSize:
+      label: "聊天字号"
+      hint: "拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 14–15 像素（步长 0.1），默认 14 像素。"
+      preview: "预览 — The quick brown fox jumps over the lazy dog."
+    fontFamily:
+      label: "聊天字体"
+      hint: "选择侧边栏聊天使用的字体。仅影响用户消息和助手回复。"
+      geist: "Geist（默认）"
+      inter: "Inter"
+      roboto: "Roboto"
+      system: "系统默认"
   instructions:
     title: "指引"
     label: "自定义指引"
@@ -166,12 +213,14 @@ settings:
     newBody: "（在此处编写你的提示词）"
     # $1 = 触发字符（“/”）
     hint: "可复用的提示模板，通过 $1 命令在聊天输入中触发。"
+    expandInline: "在输入框中展开提示词内容"
     placeholders:
       selectedText: "页面选中文本"
       pageUrl: "当前页面 URL"
       pageTitle: "当前页面标题"
       date: "当前日期"
       clipboard: "剪贴板内容"
+      input: "斜杠命令后输入的文本"
   memory:
     title: "记忆"
     enable: "启用记忆"
@@ -461,6 +510,12 @@ chat:
     recordingDownload: "下载录制 JSON"
     # $1 = 事件数量, $2 = 简短字符数（如 1.2K、3M）
     recordingHover: "$1 个事件 · 约 $2 字符"
+    # PDF 附件徽章文案。$1 = 页数
+    pdfPageCount: "$1 页"
+    # PDF 附件 tooltip（完整提取时）。$1 = 文件名, $2 = 页数
+    pdfPages: "$1 — 共 $2 页"
+    # PDF 附件 tooltip（文本被截断时）。$1 = 文件名, $2 = 总页数, $3 = 实际提取页数
+    pdfTruncated: "$1 — 提取了 $2 页中的 $3 页（文本超限截断）"
   recorder:
     start: "开始录制用户操作"
     stop: "停止录制（会随下一条消息发送）"
@@ -534,6 +589,11 @@ chat:
     errorServerUnavailable: "该 MCP server 已不可用，请到设置里重新启用该服务。"
     # $1 = 后台的原始错误描述
     errorFetchFailed: "加载交互视图失败：$1"
+  fork:
+    # Header 徽章标签，标记当前会话是另一会话的分支。
+    badgeLabel: "分叉自："
+    # 徽章里返回链接的 tooltip。
+    backTooltip: "回到原对话"
   message:
     # $1 = 输入 token 数（已格式化，如 "1.2k"），$2 = 输出 token 数（已格式化）
     tokensInOut: "↑$1 ↓$2"
@@ -543,6 +603,19 @@ chat:
     tokensInBreakdownHitWrite: "未缓存 $1 · 缓存 $2 · 写缓存 $3"
     # 最新一轮 assistant 消息左下角重试按钮的 tooltip / aria-label
     retry: "重试"
+    # 任意一轮 assistant 消息上的「从这里分叉」按钮的 tooltip / aria-label。
+    # 会开一个新会话，把到本轮 user 消息（含）的全部上下文作为起点，便于
+    # 从任意历史时刻探索「当时换一种问法会怎样」，不污染原对话。
+    fork: "从这里分叉"
+    # 每条 user 消息上铅笔按钮的 tooltip / aria-label
+    edit: "编辑并重新运行"
+  edit:
+    # 点击任意一条 user 消息上的铅笔后弹出的对话框标题
+    title: "编辑消息"
+    # 标题下方的说明文本——告知用户将从此处开始丢弃后续所有消息并重跑 agent
+    description: "编辑此消息并从此处重新运行 agent，此消息之后的所有内容将被丢弃。"
+    # 提交按钮文案
+    submit: "重新运行"
   compaction:
     # 历史压缩分割条上的标签
     divider: "此前上下文已压缩"
@@ -614,6 +687,10 @@ provider:
     apiKeyPlaceholder: "留空则不传认证"
     models: "模型列表"
     autoFetch: "自动获取"
+    showAll: "全部显示"
+    hideAll: "全部隐藏"
+    enabled: "显示"
+    hidden: "已隐藏"
     reasoning: "推理"
     image: "多模态"
     # $1 = 模型 ID
@@ -750,6 +827,19 @@ vfs:
   inlineLoadFailed: "$1 — $2"
   preview: "预览"
   viewSource: "查看源码"
+  source: "源码"
+  defaultOpen: "默认打开方式"
+  openSmart: "智能"
+  unknownFile: "未知文件类型（$1）。请下载后安全打开。"
+  previousPage: "上一页"
+  nextPage: "下一页"
+  pageNumber: "页码"
+  zoomOut: "缩小"
+  zoomIn: "放大"
+  fitWidth: "适应宽度"
+  pdfPasswordRequired: "此 PDF 需要密码。"
+  pdfWrongPassword: "密码错误，请重试。"
+  pdfLoadFailed: "PDF 预览失败：$1"
   # $1 = 路径
   pathNotFound: "路径不存在：$1"
   unknownError: "未知错误"

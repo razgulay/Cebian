@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,7 @@ import { ThinkingLevelSelector } from '@/components/chat/ThinkingLevelSelector';
 import { RecordButton } from '@/components/chat/RecordButton';
 import { MicButton } from '@/components/chat/MicButton';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { providerCredentials, customProviders as customProvidersStorage, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
+import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { startElementPicker, cancelElementPicker } from '@/lib/browser/element-picker';
@@ -21,9 +21,9 @@ import { vfs } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import { CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
 import {
-  MAX_ATTACHMENT_COUNT, MAX_IMAGE_SIZE, MAX_TEXT_FILE_SIZE,
+  MAX_ATTACHMENT_COUNT, MAX_IMAGE_SIZE, MAX_TEXT_FILE_SIZE, MAX_PDF_SIZE,
   RECORDING_MIME,
-  isImageFile, isTextFile,
+  isImageFile, isTextFile, isPdfFile,
   type Attachment,
 } from '@/lib/agent/attachments';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
@@ -36,12 +36,23 @@ import { useMobileEmulation } from '@/hooks/useMobileEmulation';
 import { downloadFile, formatDuration, formatCompactCount, formatBytes } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
+import { debugLog, withSession } from '@/lib/debug/log';
+
+/** 在窄 chip 里显示不下时，把名字截成 "开头…末尾"（保留扩展名/末尾识别符）。
+ *  短名原样返回；否则取首 3 + "…" + 末 4。chip 已经塞了图标 + meta，不缩写
+ *  的话单条附件就能把整行输入区挤满——sidebar 看不到其他附件。 */
+function abbreviateName(name: string): string {
+  if (!name) return '';
+  if (name.length <= 8) return name;
+  return name.slice(0, 3) + '…' + name.slice(-4);
+}
 
 interface ChatInputProps {
   onSend: (
     message: string,
     attachments: Attachment[] | undefined,
     expectedSessionId: string | null,
+    options?: { displayText?: string },
   ) => Promise<PromptDispatchResult>;
   onOpenSettings?: () => void;
   isAgentRunning?: boolean;
@@ -62,6 +73,10 @@ interface ChatInputProps {
  *  同时仍由 ChatInput 持有 value 状态。 */
 export interface ChatInputHandle {
   fill: (text: string) => void;
+  /** Insert text at the current cursor position (or append if caret is at end).
+   *  Used by the "Quote" feature when the user selects text in an assistant
+   *  message and clicks the floating Quote button. */
+  insertText?: (text: string) => void;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -94,6 +109,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
+  const [isExpandInline] = useStorageItem(expandPromptsInline, false);
 
   // 当前模型解析成 pi-ai Model（内置 + 自定义统一走 resolveModel）。是否支持图片 /
   // 支持哪些思考档 等能力派生共用这一次解析，避免多份内联解析各自漂移
@@ -301,6 +317,28 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [isPicking]);
 
+  // 点空白处关闭 slash 菜单：mousedown 在菜单外且不在 textarea 内 → 关闭。
+  // 用 mousedown 而非 click：1) 响应更早；2) 避免依赖 textarea 的 focus/blur
+  // 事件（输入框已经在用 onFocus 决定上下文，光标事件流不一致）。点击菜单
+  // 内部或文本框都保留菜单——用户继续打字时菜单也应当保留。
+  //
+  // 依赖 `showSlash` 而非 `isSlashMenuVisible`：后者定义在下方。`showSlash` 为
+  // true 时挂监听、false 时卸载——handler 内部还会再校验菜单 DOM 是否在屏
+  // （避免 filter 空时 listener 仍然挂着的歧义路径）。
+  useEffect(() => {
+    if (!showSlash) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (!slashMenuRef.current) return;
+      if (slashMenuRef.current.contains(target)) return;
+      if (textareaRef.current?.contains(target)) return;
+      setShowSlash(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showSlash]);
+
   const canSend = value.trim().length > 0;
 
   // Recorder integration. The captured session lands in attachments via
@@ -340,15 +378,27 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         return;
       }
       const next = [...current, recordingToAttachment(session)];
+      debugLog.info('ui', 'attachment:add', {
+        kind: 'recording',
+        eventsCount: session.events.length,
+        durationMs: session.durationMs,
+      });
       attachmentsRef.current = next;
       setAttachments(next);
     });
   }, []);
 
   const handleSend = async () => {
-    if (!canSend) return;
-    if (isDispatchingRef.current) return;
+    if (!canSend) {
+      debugLog.info('ui', 'send:rejected', { reason: 'empty' });
+      return;
+    }
+    if (isDispatchingRef.current) {
+      debugLog.info('ui', 'send:rejected', { reason: 'busy' });
+      return;
+    }
     if (!currentModel) {
+      debugLog.info('ui', 'send:rejected', { reason: 'no_model' });
       toast.error(t('chat.composer.needModel'), {
         action: onOpenSettings ? { label: t('chat.composer.goToSettings'), onClick: onOpenSettings } : undefined,
       });
@@ -365,18 +415,61 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
     // Snapshot the text BEFORE any await so a fast follow-up edit doesn't
     // leak into the outgoing message.
-    const text = outgoingText.trim();
+    let text = outgoingText.trim();
+    // `displayText` is what the user actually typed (`"/writing"` or
+    // `"/writing some user input"`). When a slash command is resolved at
+    // send-time (`!isExpandInline`), `text` gets replaced with the expanded
+    // prompt body — but the user bubble should still show the short command
+    // form, so we keep the original here and pass it through `onSend` as a
+    // separate display hint.
+    const displayText = text;
     const dispatchSessionId = sessionIdRef.current;
 
     isDispatchingRef.current = true;
     setIsDispatching(true);
 
     try {
+      // Resolve prompt at send-time if inline expansion is disabled
+      if (!isExpandInline && text.startsWith('/')) {
+        const match = text.match(/^\/([a-zA-Z0-9_-]+)(?:\s+(.*))?$/s);
+        if (match) {
+          const name = match[1];
+          const userInput = match[2] ?? '';
+
+          const allPrompts = await scanPrompts();
+          const foundPrompt = allPrompts.find((p) => p.name === name);
+          if (foundPrompt) {
+            try {
+              const raw = await vfs.readFile(`${CEBIAN_PROMPTS_DIR}/${foundPrompt.fileName}`, 'utf8');
+              const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
+              const { body } = parseFrontmatter(content);
+              const vars = await gatherTemplateVars();
+
+              // Provide prompt user input to templates via {{input}}
+              vars.input = userInput;
+
+              let replaced = replaceTemplateVars(body.trim(), vars);
+              // If the prompt template does not explicitly contain {{input}}, append user text at the end
+              if (!body.includes('{{input}}') && userInput.trim()) {
+                replaced = replaced + '\n\n' + userInput.trim();
+              }
+              debugLog.info('ui', 'slash_command:resolved', { name: foundPrompt.name });
+              text = replaced;
+            } catch {
+              debugLog.info('ui', 'send:rejected', { reason: 'slash_read_failed', name });
+              toast.error(t('chat.composer.readPromptFailed'));
+              return;
+            }
+          }
+        }
+      }
+
       if (recorder.isOwner) {
         // Pre-flight cap check: refuse to send if attachments are already
         // full — otherwise the about-to-be-delivered recording would be
         // silently dropped by the session subscription's overflow guard.
         if (attachmentsRef.current.length >= MAX_ATTACHMENT_COUNT) {
+          debugLog.info('ui', 'send:rejected', { reason: 'max_attachments' });
           toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
           return;
         }
@@ -385,12 +478,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         // subscription above before this await resolves.
         await recorder.stop();
       }
-      if (sessionIdRef.current !== dispatchSessionId) return;
+      if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
 
       const outgoing = attachmentsRef.current;
-      const result = await onSend(text, outgoing.length > 0 ? outgoing : undefined, dispatchSessionId);
+      const result = await onSend(
+        text,
+        outgoing.length > 0 ? outgoing : undefined,
+        dispatchSessionId,
+        { displayText },
+      );
       if (result.status !== 'dispatched') return;
-      if (sessionIdRef.current !== dispatchSessionId) return;
+      if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
 
       setValue('');
       setAttachments([]);
@@ -401,6 +499,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     } finally {
       isDispatchingRef.current = false;
       setIsDispatching(false);
+      // Ensure the textarea regains focus after being re-enabled
+      requestAnimationFrame(() => {
+        if (!isActiveTabMobile) {
+          textareaRef.current?.focus();
+        }
+      });
     }
   };
 
@@ -518,7 +622,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
   const handleInput = (val: string) => {
     setValue(val);
-    setShowSlash(val.startsWith('/'));
+    // Show the slash menu when the text starts with `/` (typical case) OR
+    // when the last whitespace-separated token starts with `/` — this lets
+    // users type a regular message and then `/writing` at the end to invoke
+    // a command on top of what they already wrote.
+    const lastToken = val.split(/\s/).at(-1) ?? '';
+    setShowSlash(lastToken.startsWith('/'));
     // Manual edits exit history mode — the new content becomes the draft.
     if (historyIndex !== null) setHistoryIndex(null);
   };
@@ -526,7 +635,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // 由外部（欢迎页示例卡片）填入文本并聚焦，不夺走输入框对 value 的所有权。
   const fill = useCallback((text: string) => {
     setValue(text);
-    setShowSlash(text.startsWith('/'));
+    const lastToken = text.split(/\s/).at(-1) ?? '';
+    setShowSlash(lastToken.startsWith('/'));
     setHistoryIndex(null);
     // 等 value 提交后再聚焦并把光标移到末尾，方便用户接着改。
     requestAnimationFrame(() => {
@@ -537,7 +647,31 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     });
   }, []);
 
-  useImperativeHandle(ref, () => ({ fill }), [fill]);
+  // Insert text at the current caret position (or append if caret is at end).
+  // Used by the "Quote" feature when the user selects text in an assistant
+  // message and clicks the floating Quote button. Preserves caret position
+  // so the user can keep typing right after the inserted block.
+  const insertText = useCallback((text: string) => {
+    setValue((prev) => {
+      const el = textareaRef.current;
+      if (!el) return prev + text;
+      const start = el.selectionStart ?? prev.length;
+      const end = el.selectionEnd ?? prev.length;
+      const newValue = prev.slice(0, start) + text + prev.slice(end);
+      // Restore caret right after the inserted text.
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        const caret = start + text.length;
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      });
+      return newValue;
+    });
+    setHistoryIndex(null);
+  }, []);
+
+  useImperativeHandle(ref, () => ({ fill, insertText }), [fill, insertText]);
 
   // Scan prompts when slash menu opens
   useEffect(() => {
@@ -546,7 +680,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   }, [showSlash]);
 
   // Filter prompts by typed search (after '/')
-  const slashFilter = value.startsWith('/') ? value.slice(1).toLowerCase() : '';
+  // Slash menu filter: use the last whitespace-separated token so users can
+  // type a regular message and then `/writing` at the end to filter commands.
+  const slashFilter = (() => {
+    const lastToken = value.split(/\s/).at(-1) ?? '';
+    return lastToken.startsWith('/') ? lastToken.slice(1).toLowerCase() : '';
+  })();
   const filteredPrompts = slashFilter
     ? prompts.filter((p) => p.name.toLowerCase().includes(slashFilter) || p.description.toLowerCase().includes(slashFilter))
     : prompts;
@@ -581,18 +720,30 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // Handle prompt selection from slash menu
   const handlePromptSelect = async (prompt: PromptMeta) => {
     if (isDispatchingRef.current) return;
-    try {
-      const raw = await vfs.readFile(`${CEBIAN_PROMPTS_DIR}/${prompt.fileName}`, 'utf8');
-      const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
-      const { body } = parseFrontmatter(content);
-      const vars = await gatherTemplateVars();
-      const replaced = replaceTemplateVars(body.trim(), vars);
-      if (isDispatchingRef.current) return;
-      setValue(replaced);
+    if (isExpandInline) {
+      try {
+        const raw = await vfs.readFile(`${CEBIAN_PROMPTS_DIR}/${prompt.fileName}`, 'utf8');
+        const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
+        const { body } = parseFrontmatter(content);
+        const vars = await gatherTemplateVars();
+        const replaced = replaceTemplateVars(body.trim(), vars);
+        if (isDispatchingRef.current) return;
+        setValue(replaced);
+        setShowSlash(false);
+        textareaRef.current?.focus();
+      } catch {
+        toast.error(t('chat.composer.readPromptFailed'));
+      }
+    } else {
+      // Replace only the last whitespace-separated token (the `/writing` part)
+      // with the selected command, preserving any text the user typed before it.
+      const lastTokenStart = value.search(/\S+$/);
+      const next = lastTokenStart >= 0
+        ? value.slice(0, lastTokenStart) + `/${prompt.name} `
+        : `/${prompt.name} `;
+      setValue(next);
       setShowSlash(false);
       textareaRef.current?.focus();
-    } catch {
-      toast.error(t('chat.composer.readPromptFailed'));
     }
   };
 
@@ -618,6 +769,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           } else if (attachments.length >= MAX_ATTACHMENT_COUNT) {
             toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
           } else {
+            debugLog.info('ui', 'attachment:add', { kind: 'element', mime: 'text/html', size: (att.textContent ?? '').length });
             setAttachments((prev) => [...prev, att]);
           }
           break;
@@ -660,6 +812,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       if (isDispatchingRef.current) return;
       if (!supportsImageRef.current) return;
       const base64 = dataUrl.split(',', 2)[1] ?? '';
+      debugLog.info('ui', 'attachment:add', { kind: 'screenshot', mime: 'image/jpeg', size: base64.length });
       setAttachments((prev) => [
         ...prev,
         { type: 'image', source: 'screenshot', data: base64, mimeType: 'image/jpeg' },
@@ -670,7 +823,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (isDispatchingRef.current) {
       e.target.value = '';
       return;
@@ -708,6 +861,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           const dataUrl = reader.result as string;
           const base64 = dataUrl.split(',', 2)[1] ?? '';
           const mimeType = file.type || 'image/png';
+          debugLog.info('ui', 'attachment:add', { kind: 'image-upload', mime: mimeType, size: file.size });
           setAttachments((prev) => {
             if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
             return [...prev, { type: 'image', source: 'upload', data: base64, mimeType, name: file.name }];
@@ -723,6 +877,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         const reader = new FileReader();
         reader.onload = () => {
           if (isDispatchingRef.current) return;
+          const mime = file.type || 'text/plain';
+          debugLog.info('ui', 'attachment:add', { kind: 'text-file', mime, size: file.size });
           setAttachments((prev) => {
             if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
             return [...prev, { type: 'file', content: reader.result as string, name: file.name, mimeType: file.type || 'text/plain', size: file.size }];
@@ -730,6 +886,90 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         };
         reader.onerror = () => toast.error(t('chat.composer.readFileFailed', [file.name]));
         reader.readAsText(file);
+      } else if (isPdfFile(file)) {
+        // PDF attachment: read into ArrayBuffer, send to the offscreen
+        // document for text extraction (pdfjs-dist can't run from the SW
+        // — needs DOM/OffscreenCanvas). The extracted text becomes a
+        // `<attached-file type="application/pdf">` block the LLM can read.
+        if (file.size > MAX_PDF_SIZE) {
+          toast.error(t('chat.composer.fileTooLarge', [file.name, formatBytes(MAX_PDF_SIZE)]));
+          continue;
+        }
+        // Pre-flight: an empty PDF trips pdf.js's "file is empty" error
+        // before our content-based checks run, and shows up as a noisy
+        // toast. Bail early with a clearer message.
+        if (file.size === 0) {
+          toast.error(t('chat.composer.readFileFailed', [file.name]));
+          continue;
+        }
+        // `file.arrayBuffer()` is the modern promise-based equivalent of
+        // FileReader.readAsArrayBuffer. Returns a fresh, owned ArrayBuffer
+        // we can safely structured-clone through `chrome.runtime.sendMessage`
+        // — no detach races, no buffering into a string. Wrap in
+        // `Uint8Array` at the call site so pdf.js (which v5 rejects raw
+        // ArrayBuffers) sees the typed-array view it wants.
+        let buf: ArrayBuffer;
+        try {
+          buf = await file.arrayBuffer();
+        } catch (err) {
+          toast.error(`${t('chat.composer.readFileFailed', [file.name])}: ${(err as Error).message ?? String(err)}`);
+          continue;
+        }
+        try {
+          // Lazy-create the offscreen document so the first PDF
+          // attachment pays the setup cost (the offscreen page hosts
+          // pdf.js's worker and runs the extraction).
+          const { ensureOffscreen } = await import('@/lib/tools/offscreen');
+          await ensureOffscreen();
+          // We send the PDF bytes as base64 instead of a raw ArrayBuffer.
+          // chrome.runtime.sendMessage's structured-clone path has been
+          // observed to detach or zero the source buffer in some MV3
+          // builds (offline / multi-MB / certain chromium releases),
+          // which then makes pdf.js fail with "file is empty" — and a
+          // base64 string sidesteps the issue entirely. The 4/3 size
+          // overhead is acceptable for the 50 MB cap and only matters
+          // on the IPC hop, not on disk.
+          const bytes = new Uint8Array(buf);
+          let binary = '';
+          // Chunked to avoid call-stack overflow on multi-MB buffers
+          // (String.fromCharCode.apply blows the stack past ~120 KB).
+          const CHUNK = 0x8000;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            binary += String.fromCharCode.apply(
+              null,
+              bytes.subarray(i, i + CHUNK) as unknown as number[],
+            );
+          }
+          const base64 = btoa(binary);
+          const resp = await chrome.runtime.sendMessage({
+            type: 'pdf-extract-bytes',
+            bytesBase64: base64,
+          }) as { result?: { text: string; pageCount: number; pages: number[]; truncated: boolean }; error?: string };
+          if (resp.error) throw new Error(resp.error);
+          const result = resp.result;
+          if (!result) throw new Error('PDF extraction returned no result');
+          debugLog.info('ui', 'attachment:add', {
+            kind: 'pdf',
+            mime: 'application/pdf',
+            size: file.size,
+            pageCount: result.pageCount,
+          });
+          setAttachments((prev) => {
+            if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
+            return [...prev, {
+              type: 'pdf',
+              content: result.text,
+              name: file.name,
+              mimeType: 'application/pdf',
+              size: file.size,
+              pageCount: result.pageCount,
+              extractedPageCount: result.pages.length,
+              truncated: result.truncated,
+            }];
+          });
+        } catch (err) {
+          toast.error(`${t('chat.composer.readFileFailed', [file.name])}: ${(err as Error).message ?? String(err)}`);
+        }
       } else {
         toast.error(t('chat.composer.unsupportedFileType', [file.name]));
       }
@@ -785,6 +1025,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         const dataUrl = reader.result as string;
         const base64 = dataUrl.split(',', 2)[1] ?? '';
         const mimeType = file.type || 'image/png';
+        debugLog.info('ui', 'attachment:add', { kind: 'image-paste', mime: mimeType, size: file.size });
         setAttachments((prev) => {
           if (prev.some((a) => a.type === 'image' && a.data === base64)) {
             // When the user pasted text, the image is likely a side-effect of selecting
@@ -807,19 +1048,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   };
 
   return (
-    <footer className="px-4 py-4 border-t border-border bg-background relative">
+    <footer className="px-1.5 py-1.5 bg-background relative">
       {/* Slash menu — dynamic VFS prompts */}
       {isSlashMenuVisible && (
         <div
           ref={slashMenuRef}
-          className="absolute bottom-full left-4 right-4 mb-3 bg-popover border border-border rounded-lg shadow-xl z-50 animate-in slide-in-from-bottom-1 fade-in duration-150 max-h-60 overflow-y-auto"
+          className="absolute bottom-full left-4 right-4 mb-3 bg-popover border border-border rounded-lg shadow-xl z-50 animate-in slide-in-from-bottom-1 fade-in duration-150 overflow-y-auto max-h-60"
         >
           {filteredPrompts.length === 0 ? (
-            <p className="text-xs text-muted-foreground text-center py-3 px-2.5">
+            <p className="text-[0.65rem] text-muted-foreground text-center py-2 px-2.5">
               {t('chat.composer.noPrompts')}
             </p>
           ) : (
-            <div className="py-1">
+            <div className="py-0.5">
               {filteredPrompts.map((p, idx) => {
                 const selected = idx === selectedPromptIndex;
                 return (
@@ -829,13 +1070,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                     disabled={isDispatching}
                     onClick={() => handlePromptSelect(p)}
                     onMouseMove={() => { if (!isDispatching) setSelectedPromptIndex(idx); }}
-                    className={`w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors ${selected ? 'bg-accent' : 'hover:bg-accent/50'}`}
+                    className={`w-full flex items-start gap-2 px-2.5 py-1.5 text-left transition-colors ${selected ? 'bg-accent' : 'hover:bg-accent/50'}`}
                   >
-                    <FileType className="size-4 mt-0.5 shrink-0 text-muted-foreground" />
+                    <FileType className="size-3.5 mt-px shrink-0 text-muted-foreground" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">/{p.name}</p>
+                      <p className="text-[0.78rem] font-medium truncate">/{p.name}</p>
                       {p.description && (
-                        <p className="text-xs text-muted-foreground truncate">{p.description}</p>
+                        <p className="text-[0.66rem] text-muted-foreground truncate">{p.description}</p>
                       )}
                     </div>
                   </button>
@@ -846,9 +1087,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         </div>
       )}
 
-      <div className="border border-border rounded-xl bg-card focus-within:border-border/80 focus-within:ring-2 focus-within:ring-primary/10 transition-all">
+      <div className="border border-border rounded-xl bg-card focus-within:border-border/80 focus-within:ring-1 focus-within:ring-primary/10 transition-all [border-width:0.5px]">
         {/* Top row: tools + attachments */}
-        <div className="flex items-center gap-0.5 px-2.5 pt-2.5 pb-2">
+        <div className="flex items-center gap-0.5 px-1.5 pt-0.5 pb-0 justify-end">
           {/* Tool icons */}
           <Button
             variant="ghost"
@@ -889,7 +1130,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             ref={fileInputRef}
             type="file"
             multiple
-            accept={`${supportsImage ? 'image/*,' : ''}.txt,.md,.csv,.tsv,.log,.js,.ts,.jsx,.tsx,.mjs,.cjs,.py,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.php,.sh,.bash,.sql,.yaml,.yml,.toml,.ini,.cfg,.json,.xml,.html,.htm,.css,.scss,.less,.env,.gitignore,.editorconfig`}
+            accept={`${supportsImage ? 'image/*,' : ''}.pdf,application/pdf,.txt,.md,.csv,.tsv,.log,.js,.ts,.jsx,.tsx,.mjs,.cjs,.py,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.php,.sh,.bash,.sql,.yaml,.yml,.toml,.ini,.cfg,.json,.xml,.html,.htm,.css,.scss,.less,.env,.gitignore,.editorconfig`}
             className="hidden"
             disabled={isDispatching}
             onChange={handleFileUpload}
@@ -928,8 +1169,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                           alt: att.name || t('chat.attachments.screenshot'),
                         })}
                       />
-                      <span className="truncate max-w-24">
-                        {att.name || (att.source === 'screenshot' ? t('chat.attachments.screenshot') : t('chat.attachments.image'))}
+                      <span className="truncate max-w-16">
+                        {abbreviateName(att.name || (att.source === 'screenshot' ? t('chat.attachments.screenshot') : t('chat.attachments.image')))}
                       </span>
                       <button
                         className="opacity-60 hover:opacity-100 p-0.5 rounded-sm hover:bg-foreground/10 cursor-pointer"
@@ -953,8 +1194,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                         onClick={() => downloadFile(att.name, att.json, RECORDING_MIME)}
                       >
                         <Film className="size-2.5 shrink-0" />
-                        <span className="truncate max-w-40">
-                          {att.name} · {t('chat.attachments.recordingMeta', [String(att.eventCount), formatDuration(att.durationMs)])}
+                        <span className="truncate max-w-32">
+                          {abbreviateName(att.name)} · {t('chat.attachments.recordingMeta', [String(att.eventCount), formatDuration(att.durationMs)])}
                         </span>
                       </button>
                       <button
@@ -966,23 +1207,35 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                       </button>
                     </Badge>
                   ) : (
-                    // Element / file attachment: badge chip
+                    // Element / file / pdf attachment: badge chip. PDF 走单独分支
+                    // 显示文件名 + 页数；颜色用 orange 区别于 file 的 emerald，又不会
+                    // 像之前的 red 那样被误判为错误态。所有 chip 用 abbreviateName
+                    // 把长名截成 "开头…末尾" 形式，免得挤满整行 sidebar。
                     <Badge
                       key={i}
                       variant="outline"
                       className={`shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-0.5 ${
                         att.type === 'element'
                           ? 'text-info border-info/20 bg-info/5'
-                          : 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5'
+                          : att.type === 'pdf'
+                            ? 'text-orange-400 border-orange-400/20 bg-orange-400/5'
+                            : 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5'
                       }`}
                     >
                       {att.type === 'element' && <Crosshair className="size-2.5 shrink-0" />}
-                      {att.type === 'file' && <FileText className="size-2.5 shrink-0" />}
+                      {(att.type === 'file' || att.type === 'pdf') && <FileText className="size-2.5 shrink-0" />}
 
-                      <span className="truncate max-w-24">
-                        {att.type === 'element' && att.selector}
-                        {att.type === 'file' && att.name}
+                      <span className="truncate max-w-16">
+                        {att.type === 'element' && abbreviateName(att.selector)}
+                        {att.type === 'file' && abbreviateName(att.name)}
+                        {att.type === 'pdf' && abbreviateName(att.name)}
                       </span>
+
+                      {att.type === 'pdf' && (
+                        <span className="shrink-0 text-[0.6rem] text-orange-400/70">
+                          · {t('chat.attachments.pdfPageCount', [String(att.pageCount)])}
+                        </span>
+                      )}
 
                       <button
                         className="opacity-60 hover:opacity-100 p-0.5 rounded-sm hover:bg-foreground/10 cursor-pointer"
@@ -1009,11 +1262,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           onPaste={handlePaste}
           placeholder={t('chat.composer.placeholder')}
           disabled={isDispatching}
-          className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[0.85rem] px-3 py-2 min-h-13 max-h-37.5 leading-relaxed placeholder:text-muted-foreground/50"
+          className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[length:var(--chat-font-size)] font-normal px-1.5 py-0.5 min-h-6 max-h-37.5 leading-tight placeholder:text-muted-foreground/50"
         />
 
         {/* Bottom row: actions */}
-        <div className="flex items-center justify-between px-2 pb-1.5">
+        <div className="flex items-center justify-between px-1.5 pb-0.5">
           <div className={`flex items-center gap-0.5 ${isDispatching ? 'pointer-events-none opacity-60' : ''}`}>
             <ModelSelector
               activeModel={currentModel}

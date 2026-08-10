@@ -44,3 +44,15 @@ export const TOOL_FS_SAVE_URL = 'fs_save_url' as const;
 export const TOOL_RUN_SKILL = 'run_skill' as const;
 /** Tool that calls Chrome browser APIs directly via structured parameters */
 export const TOOL_CHROME_API = 'chrome_api' as const;
+/** Tool that delegates a heavy DOM-reading task to the configured cheap sub-agent model.
+ *  When unset (the sub-agent model is null in settings), the tool is hidden from the
+ *  main agent's tool list entirely. */
+export const TOOL_DELEGATE_DOM = 'delegate_dom' as const;
+/** Read-only scrolling tool assigned exclusively to the DOM sub-agent. */
+export const TOOL_SUBAGENT_SCROLL = 'subagent_scroll' as const;
+/** Click-to-expand tool assigned exclusively to the DOM sub-agent.
+ *  Allows the sub-agent to click "Show more" / "Load more" / "Xem thêm" / etc.
+ *  buttons on the page so it can read content that would otherwise be hidden
+ *  behind an expand interaction. No user-prompt permission gate — the
+ *  sub-agent decides autonomously and the gate only allows the click action. */
+export const TOOL_SUBAGENT_CLICK = 'subagent_click' as const;

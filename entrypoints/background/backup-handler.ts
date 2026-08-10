@@ -24,6 +24,7 @@ import {
   type ApplySessionsResult,
 } from '@/lib/backup/sources/sessions';
 import { toSessionRecord, isValidSessionLike, type SessionRecord, type SessionRecordLike } from '@/lib/persistence/db';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 /** 统一把异步结果包成响应信封发回，错误转成可读字符串（页面侧据此重新抛出）。 */
 function respond<T>(
@@ -80,7 +81,16 @@ function touchBuffer(nonce: string): ApplyBuffer {
     buf = { records: [], timer: undefined as unknown as ReturnType<typeof setTimeout> };
     applyBuffers.set(nonce, buf);
   }
-  buf.timer = setTimeout(() => dropBuffer(nonce), APPLY_BUFFER_TTL_MS);
+  buf.timer = setTimeout(() => {
+    // Capture the dropped record count before tearing the buffer down.
+    // The TTL card fires when a chunk-sender silently stops mid-restore
+    // (page crashed, tab closed, network died); the count tells the
+    // user roughly how much data they lost.
+    const dropped = applyBuffers.get(nonce);
+    const droppedSeqs = dropped?.records.length ?? 0;
+    debugLog.warn('backup', 'backup:buffer:ttl_drop', { droppedSeqs });
+    dropBuffer(nonce);
+  }, APPLY_BUFFER_TTL_MS);
   return buf;
 }
 
@@ -104,7 +114,22 @@ export function registerBackupHandler(): void {
 
     // flush：把在途节流写刷落库，供页面随后直读 Dexie 采集。无 payload、无返回值。
     if (msg.type === BACKUP_FLUSH_SESSIONS) {
-      return respond<void>(() => sessionStore.flushAll(), sendResponse);
+      return respond<void>(async () => {
+        const startedAt = performance.now();
+        debugLog.info('backup', 'backup:flush:start', {});
+        let caught: unknown = undefined;
+        try {
+          await sessionStore.flushAll();
+        } catch (e) {
+          caught = e;
+          throw e;
+        } finally {
+          debugLog.info('backup', 'backup:flush:done', {
+            size: null,
+            durationMs: Math.round(performance.now() - startedAt),
+          });
+        }
+      }, sendResponse);
     }
 
     // chunk：校验并规整这一批 records，累积进对应 nonce 的缓冲。逐条 isValidSessionLike
@@ -118,6 +143,7 @@ export function registerBackupHandler(): void {
         if (!Array.isArray(msg.records)) {
           throw new Error('applyChunk: records must be an array');
         }
+        debugLog.info('backup', 'backup:chunk:received', { seq: msg.records.length });
         if (!msg.records.every(isValidSessionLike)) {
           throw new Error('applyChunk: malformed session record in payload');
         }
@@ -152,6 +178,7 @@ export function registerBackupHandler(): void {
             }
             return await sessionStore.applyAll([], msg.strategy);
           }
+          debugLog.info('backup', 'backup:commit:applied', { count: buf.records.length });
           if (buf.records.length !== msg.expectedCount) {
             throw new Error(
               `applyCommit: expected ${msg.expectedCount} records but buffered ${buf.records.length}`,
@@ -171,6 +198,7 @@ export function registerBackupHandler(): void {
       if (typeof msg.nonce !== 'string' || msg.nonce === '') {
         throw new Error('applyAbort: missing nonce');
       }
+      debugLog.info('backup', 'backup:abort:applied', {});
       dropBuffer(msg.nonce);
     }, sendResponse);
   });

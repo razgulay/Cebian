@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, memo, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import Markdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -97,23 +97,46 @@ function urlTransform(url: string): string | null | undefined {
  *
  * Returns the original href unchanged if it doesn't match either pattern.
  */
-function resolveVfsHref(href: string | undefined): string | undefined {
+const DANGEROUS_PROTOCOL_RE = /^(?:javascript|data|vbscript):/i;
+const SAFE_EXTERNAL_PROTOCOL_RE = /^(?:https?|mailto|tel):/i;
+
+function extensionUrl(page: string): string | null {
+  try {
+    return chrome.runtime.getURL(page);
+  } catch {
+    return null;
+  }
+}
+
+function vfsDocumentUrl(path: string, anchor?: string): string {
+  const base = extensionUrl('vfs.html');
+  const query = anchor ? `?anchor=${encodeURIComponent(anchor)}` : '';
+  const route = `#${encodeURI(path)}`;
+  return base ? `${base}${query}${route}` : `${query}${route}`;
+}
+
+/** Resolve a Markdown target against the directory containing a VFS source. */
+export function resolveMarkdownHref(href: string | undefined, currentVfsPath?: string): string | undefined {
   if (!href) return href;
+  href = href.trim();
+  if (DANGEROUS_PROTOCOL_RE.test(href)) return undefined;
+  if (SAFE_EXTERNAL_PROTOCOL_RE.test(href)) return href;
 
   // Case 1: bare absolute VFS hash.
-  if (href.startsWith('#/') && /^#\/(workspaces|home)\b/.test(href)) {
+  if (href.startsWith('#/')) {
     try {
-      return chrome.runtime.getURL('vfs.html') + href;
+      const { path, anchor } = splitMarkdownTarget(href.slice(1));
+      return vfsDocumentUrl(safeDecodeURIComponent(path), anchor);
     } catch {
       return href;
     }
   }
 
   // Case 2: any chrome-extension://<id>/vfs.html(?…)(#…) — force our extension id.
-  const m = href.match(/^chrome-extension:\/\/[^/]+\/vfs\.html\/?(?:\?[^#]*)?(#.*)?$/i);
+  const m = href.match(/^chrome-extension:\/\/[^/]+\/vfs\.html\/?(\?[^#]*)?(#.*)?$/i);
   if (m) {
     try {
-      return chrome.runtime.getURL('vfs.html') + (m[1] ?? '');
+      return chrome.runtime.getURL('vfs.html') + (m[1] ?? '') + (m[2] ?? '');
     } catch {
       return href;
     }
@@ -151,8 +174,67 @@ function resolveVfsHref(href: string | undefined): string | undefined {
     }
   }
 
+  // Internal route shapes above are deliberately remapped to our own origin.
+  // Every other explicit scheme is denied by default, including file:, blob:
+  // and chrome-extension: URLs targeting arbitrary extension resources.
+  if (/^[a-z][a-z\d+.-]*:/i.test(href)) return undefined;
+
+  if (href.startsWith('#')) {
+    if (!currentVfsPath) return href;
+    return vfsDocumentUrl(currentVfsPath, safeDecodeURIComponent(href.slice(1)));
+  }
+
+  if (href.startsWith('//')) return undefined;
+
+  if (currentVfsPath && href.startsWith('/')) {
+    const { path, anchor } = splitMarkdownTarget(href);
+    return vfsDocumentUrl(normalizeVfsMarkdownPath(path), anchor);
+  }
+
+  if (currentVfsPath && !/^[a-z][a-z\d+.-]*:/i.test(href)) {
+    const { path, anchor } = splitMarkdownTarget(href);
+    const pathOnly = path.split('?', 1)[0];
+    const baseDir = currentVfsPath.slice(0, currentVfsPath.lastIndexOf('/') + 1);
+    return vfsDocumentUrl(normalizeVfsMarkdownPath(baseDir + pathOnly), anchor);
+  }
+
   return href;
 }
+
+function splitMarkdownTarget(target: string): { path: string; anchor?: string } {
+  const fragmentAt = target.indexOf('#');
+  if (fragmentAt < 0) return { path: target };
+  const anchor = safeDecodeURIComponent(target.slice(fragmentAt + 1));
+  return { path: target.slice(0, fragmentAt), anchor: anchor || undefined };
+}
+
+function normalizeVfsMarkdownPath(path: string): string {
+  const segments: string[] = [];
+  for (const segment of safeDecodeURIComponent(path).split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  return '/' + segments.join('/');
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function markdownHeadingId(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s-]/gu, '')
+    .replace(/[\s-]+/g, '-');
+}
+
+const MarkdownVfsPathContext = createContext<string | undefined>(undefined);
 
 // ─── Inline VFS image rendering ───
 //
@@ -171,7 +253,7 @@ function resolveVfsHref(href: string | undefined): string | undefined {
 const VFS_INLINE_IMAGE_MAX_BYTES = 30 * 1024 * 1024;
 
 /** 判断 markdown 给出的 src 是不是我们要接管的 VFS 路径形态。 */
-const VFS_HASH_PATH_RE = /^#\/(workspaces|home)\b\//;
+const VFS_HASH_PATH_RE = /^#\/[^/]/;
 
 /**
  * 从 `#/workspaces/...` 形态的 src 抽出真正的 VFS 路径。
@@ -179,9 +261,11 @@ const VFS_HASH_PATH_RE = /^#\/(workspaces|home)\b\//;
  * `decodeURIComponent` 后再交给 VFS —— `vfs.readFile` 接的是字面路径。
  * 解码失败时退回原始 slice 结果，让 VFS 自己抛 ENOENT。
  */
-function extractVfsPath(src: string): string | null {
-  if (!VFS_HASH_PATH_RE.test(src)) return null;
-  const raw = src.slice(1);
+export function extractVfsPath(src: string): string | null {
+  const hashAt = src.indexOf('#/');
+  const hash = hashAt >= 0 ? src.slice(hashAt) : src;
+  if (!VFS_HASH_PATH_RE.test(hash)) return null;
+  const raw = hash.slice(1);
   try {
     return decodeURIComponent(raw);
   } catch {
@@ -205,7 +289,9 @@ type VfsImageState =
  * - VFS src → 读字节、生成 blob URL、内联渲染；超大文件 / 非图片 MIME 降级
  */
 function VfsImage({ src, alt, ...rest }: { src?: string; alt?: string } & Record<string, unknown>) {
-  const vfsPath = src ? extractVfsPath(src) : null;
+  const currentVfsPath = useContext(MarkdownVfsPathContext);
+  const resolvedSrc = src ? resolveMarkdownHref(src, currentVfsPath) : src;
+  const vfsPath = resolvedSrc ? extractVfsPath(resolvedSrc) : null;
   const [state, setState] = useState<VfsImageState>(
     vfsPath ? { kind: 'loading', path: vfsPath } : { kind: 'idle', path: null },
   );
@@ -267,12 +353,12 @@ function VfsImage({ src, alt, ...rest }: { src?: string; alt?: string } & Record
   if (!vfsPath) {
     return (
       <img
-        src={src}
+        src={resolvedSrc}
         alt={alt}
         role="button"
         tabIndex={0}
-        onClick={() => src && showDialog('image-preview', { src, alt })}
-        onKeyDown={(e) => e.key === 'Enter' && src && showDialog('image-preview', { src, alt })}
+        onClick={() => resolvedSrc && showDialog('image-preview', { src: resolvedSrc, alt })}
+        onKeyDown={(e) => e.key === 'Enter' && resolvedSrc && showDialog('image-preview', { src: resolvedSrc, alt })}
         {...rest}
         className="max-w-full rounded cursor-pointer hover:opacity-90 transition-opacity my-2"
       />
@@ -303,7 +389,7 @@ function VfsImage({ src, alt, ...rest }: { src?: string; alt?: string } & Record
     const limitStr = formatBytes(VFS_INLINE_IMAGE_MAX_BYTES);
     return (
       <a
-        href={resolveVfsHref('#' + vfsPath)}
+        href={resolveMarkdownHref('#' + vfsPath)}
         target="_blank"
         rel="noopener noreferrer"
         className="inline-block align-middle px-3 py-2 my-2 rounded border border-border bg-muted/40 text-xs text-info underline-offset-2 hover:underline"
@@ -370,11 +456,14 @@ const components: Components = {
   ),
 
   // External links open in new tab
-  a: ({ href, children, ...props }) => (
-    <a href={resolveVfsHref(href)} target="_blank" rel="noopener noreferrer" className="text-info underline underline-offset-2 hover:text-info/80" {...props}>
-      {children}
-    </a>
-  ),
+  a: ({ href, children, ...props }) => <MarkdownLink href={href} {...props}>{children}</MarkdownLink>,
+
+  h1: ({ node, ...props }) => <MarkdownHeading level={1} node={node as unknown as HastElement} {...props} />,
+  h2: ({ node, ...props }) => <MarkdownHeading level={2} node={node as unknown as HastElement} {...props} />,
+  h3: ({ node, ...props }) => <MarkdownHeading level={3} node={node as unknown as HastElement} {...props} />,
+  h4: ({ node, ...props }) => <MarkdownHeading level={4} node={node as unknown as HastElement} {...props} />,
+  h5: ({ node, ...props }) => <MarkdownHeading level={5} node={node as unknown as HastElement} {...props} />,
+  h6: ({ node, ...props }) => <MarkdownHeading level={6} node={node as unknown as HastElement} {...props} />,
 
   // Horizontal rule with proper spacing
   hr: (props) => (
@@ -393,7 +482,7 @@ const components: Components = {
         </div>
       );
     }
-    return <p className="my-1.5" {...props}>{children}</p>;
+    return <p className="my-1.5 text-[length:var(--chat-font-size)] leading-relaxed font-normal text-foreground" {...props}>{children}</p>;
   },
 
   // Unordered list
@@ -408,12 +497,12 @@ const components: Components = {
 
   // List item
   li: ({ children, ...props }) => (
-    <li className="text-foreground" {...props}>{children}</li>
+    <li className="text-[length:var(--chat-font-size)] leading-relaxed text-foreground font-normal" {...props}>{children}</li>
   ),
 
   // Blockquote
   blockquote: ({ children, ...props }) => (
-    <blockquote className="border-l-2 border-border pl-3 my-2 text-muted-foreground italic" {...props}>{children}</blockquote>
+    <blockquote className="border-l-2 border-primary/60 pl-3 my-2 text-muted-foreground/90 text-[length:var(--chat-font-size)] italic" {...props}>{children}</blockquote>
   ),
 
   // Code blocks with header (language + copy button).
@@ -487,25 +576,61 @@ const components: Components = {
   ),
 };
 
+function MarkdownLink({ href, children, ...props }: React.ComponentPropsWithoutRef<'a'>) {
+  const currentVfsPath = useContext(MarkdownVfsPathContext);
+  const resolved = resolveMarkdownHref(href, currentVfsPath);
+  if (!resolved) return <span className="text-muted-foreground">{children}</span>;
+  const target = markdownLinkTarget(resolved, currentVfsPath);
+  return (
+    <a href={resolved} target={target} rel={target === '_blank' ? 'noopener noreferrer' : undefined} className="text-info underline underline-offset-2 hover:text-info/80" {...props}>
+      {children}
+    </a>
+  );
+}
+
+export function markdownLinkTarget(href: string, currentVfsPath?: string): '_self' | '_blank' {
+  const base = extensionUrl('vfs.html');
+  const isAnchoredVfsUrl = (base && href.startsWith(`${base}?anchor=`)) || (!base && href.startsWith('?anchor='));
+  if (!isAnchoredVfsUrl) return '_blank';
+  if (!currentVfsPath) return '_self';
+  const hashAt = href.indexOf('#');
+  if (hashAt < 0) return '_blank';
+  return normalizeVfsMarkdownPath(href.slice(hashAt + 1)) === normalizeVfsMarkdownPath(currentVfsPath)
+    ? '_self'
+    : '_blank';
+}
+
+function MarkdownHeading({ level, node, children, ...props }: {
+  level: 1 | 2 | 3 | 4 | 5 | 6;
+  node: HastElement;
+} & React.HTMLAttributes<HTMLHeadingElement>) {
+  const Tag = `h${level}` as const;
+  return <Tag id={markdownHeadingId(hastToText(node?.children))} {...props}>{children}</Tag>;
+}
+
 interface MarkdownRendererProps {
   content: string;
   className?: string;
+  currentVfsPath?: string;
 }
 
 export const MarkdownRenderer = memo(function MarkdownRenderer({
   content,
   className,
+  currentVfsPath,
 }: MarkdownRendererProps) {
   return (
-    <div className={`max-w-none wrap-break-word ${className ?? ''}`}>
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={components}
-        urlTransform={urlTransform}
-      >
-        {content}
-      </Markdown>
-    </div>
+    <MarkdownVfsPathContext.Provider value={currentVfsPath}>
+      <div className={`max-w-none wrap-break-word ${className ?? ''}`}>
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeHighlight]}
+          components={components}
+          urlTransform={(url) => resolveMarkdownHref(url, currentVfsPath) ?? urlTransform(url)}
+        >
+          {content}
+        </Markdown>
+      </div>
+    </MarkdownVfsPathContext.Provider>
   );
 });

@@ -8,9 +8,11 @@ import {
   handlePdfInfo,
   handlePdfText,
   handlePdfSearch,
+  handlePdfExtractBytes,
   type PdfInfo,
   type PdfTextResult,
   type PdfSearchResult,
+  type PdfBytesExtractResult,
 } from './pdf';
 
 // ─── Message types ───
@@ -28,7 +30,13 @@ export type OffscreenRequest =
       regex?: boolean;
       caseInsensitive?: boolean;
       maxHits?: number;
-    };
+    }
+  /** Extract text from an in-memory PDF byte buffer for the attachment
+   *  flow (user picked a local file). Bytes are sent as a base64 string
+   *  to dodge a known chrome.runtime.sendMessage structured-clone bug
+   *  that detaches / zeroes ArrayBuffers on certain MV3 builds; the
+   *  base64 overhead is fine here (single IPC hop, 50 MB cap). */
+  | { type: 'pdf-extract-bytes'; bytesBase64: string; pageRange?: string; maxChars?: number };
 
 /** Response shape for the original handlers (html-to-markdown, crop-image)
  *  whose `result` is always a string. New PDF handlers use the typed
@@ -51,6 +59,10 @@ export interface OffscreenPdfSearchResponse {
   result?: PdfSearchResult;
   error?: string;
 }
+export interface OffscreenPdfBytesExtractResponse {
+  result?: PdfBytesExtractResult;
+  error?: string;
+}
 
 // ─── PDF error normalization ───
 // pdf.js v5 doesn't export `PasswordException` as a public symbol but
@@ -67,6 +79,20 @@ function formatPdfError(err: unknown): string {
     return err.message || String(err);
   }
   return String(err);
+}
+
+/** Decode a base64 string into a fresh ArrayBuffer. Used by the PDF
+ *  attachment flow — the sidepanel sends PDF bytes as base64 to dodge
+ *  a chrome.runtime.sendMessage structured-clone bug (see protocol
+ *  docs for `pdf-extract-bytes`). Returns a copied buffer so callers
+ *  own the memory; pdf.js will wrap it in a Uint8Array view either way. */
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const len = binary.length;
+  const buf = new ArrayBuffer(len);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < len; i++) view[i] = binary.charCodeAt(i);
+  return buf;
 }
 
 // ─── Processing functions ───
@@ -183,6 +209,13 @@ chrome.runtime.onMessage.addListener(
       })
         .then(result => sendResponse({ result } satisfies OffscreenPdfSearchResponse))
         .catch(err => sendResponse({ error: formatPdfError(err) } satisfies OffscreenPdfSearchResponse));
+      return true;
+    }
+    if (req.type === 'pdf-extract-bytes') {
+      const bytes = base64ToArrayBuffer(req.bytesBase64);
+      handlePdfExtractBytes(bytes, req.pageRange, req.maxChars)
+        .then(result => sendResponse({ result } satisfies OffscreenPdfBytesExtractResponse))
+        .catch(err => sendResponse({ error: formatPdfError(err) } satisfies OffscreenPdfBytesExtractResponse));
       return true;
     }
 

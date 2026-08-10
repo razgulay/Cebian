@@ -1,7 +1,63 @@
 import { storage } from '#imports';
+import type { WxtStorageItem } from 'wxt/utils/storage';
 // 合法档位由 pi 定义（运行时消费方），Cebian 只持久化其中一个值 → 直接复用其类型，
 // 避免与 pi-agent-core 的定义漂移（compaction / agent state 早已用其 7 档 off~max）
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
+import { debugLog, withSession } from '@/lib/debug/log';
+
+// ─── Debug-log chokepoint ───
+
+/** Wrap `storage.defineItem` so every `setValue(...)` emits a debug log entry.
+ *
+ *  Why a single chokepoint: 14+ `defineItem` consumers exist (provider creds,
+ *  model, prompt, compaction, memory, theme, font size, MCP, backup config,
+ *  ...) and each one's setter is a one-liner. Logging at each call site would
+ *  scatter `debugLog.*` calls across all settings sections; wrapping once here
+ *  covers them all uniformly with no per-section maintenance.
+ *
+ *  What we log: storage key, presence of a value, value's shape (null /
+ *  array / object / primitive). We never log the value itself — several
+ *  storage items carry secrets (apiKey, password, OAuth tokens), and
+ *  exporting the JSON debug log should not leak them.
+ *
+ *  Why re-return a typed handle instead of mutating in place: `setValue` on
+ *  the underlying WxtStorageItem is a bound method; reassigning it would
+ *  leave the original bound reference intact in callers that captured it
+ *  (e.g. `useStorageItem`). Returning a fresh wrapper keeps the substitution
+ *  invisible at every call site.
+ */
+function defineLoggedItem<T>(
+  key: `local:${string}` | `session:${string}` | `sync:${string}` | `managed:${string}`,
+  opts: { fallback: T },
+): WxtStorageItem<T, Record<string, unknown>> {
+  const item = storage.defineItem<T>(key, opts);
+  const baseSet = item.setValue.bind(item);
+  const wrapped = (value: T): Promise<void> => {
+    const shape =
+      value === null || value === undefined
+        ? (value === null ? 'null' : 'undefined')
+        : Array.isArray(value)
+          ? `array(len=${value.length})`
+          : typeof value === 'object'
+            ? `object(keys=${Object.keys(value as object).length})`
+            : typeof value;
+    // Promote a top-level sessionId if the new value happens to carry one
+    // (e.g. when settings are scoped to a session in future code paths).
+    const candidateSid =
+      value && typeof value === 'object'
+        ? (value as { sessionId?: unknown }).sessionId
+        : undefined;
+    const sessionId = typeof candidateSid === 'string' ? candidateSid : '';
+    debugLog.info('settings', 'settings:change',
+      withSession({ key, shape }, sessionId));
+    return baseSet(value);
+  };
+  // Spread preserves the rest of the WxtStorageItem shape (getValue, watch,
+  // meta, migrate, etc.) and only replaces `setValue` with the logging wrap.
+  // The generic pair is widened to `<T, Record<string, unknown>>` to satisfy
+  // WxtStorageItem's two-param signature without losing the value type.
+  return { ...item, setValue: wrapped };
+}
 
 // ─── Provider credential types ───
 
@@ -42,6 +98,12 @@ export interface CustomModelDef {
   reasoning: boolean;
   /** 模型是否支持图片输入（多模态/VLM）。缺省视为 false（纯文本）。 */
   image?: boolean;
+  /**
+   * 是否在聊天 UI 的模型下拉中显示。`false` = 隐藏，但模型配置仍保留在 settings
+   * 里（用户可重新打开）。`undefined` 视为 `true`（保持向后兼容，旧装机数据没有
+   * 这个字段时仍要显示在列表里）。
+   */
+  enabled?: boolean;
   contextWindow?: number;
   maxTokens?: number;
 }
@@ -101,7 +163,7 @@ export interface MCPServerConfig {
   updatedAt: number;
 }
 
-export const mcpServers = storage.defineItem<MCPServerConfig[]>(
+export const mcpServers = defineLoggedItem<MCPServerConfig[]>(
   'local:mcpServers',
   { fallback: [] },
 );
@@ -112,45 +174,82 @@ export type { ThinkingLevel };
 
 // ─── Storage items (WXT defineItem) ───
 
-export const providerCredentials = storage.defineItem<ProviderCredentials>(
+export const providerCredentials = defineLoggedItem<ProviderCredentials>(
   'local:providerCredentials',
   { fallback: {} },
 );
 
-export const lastSelectedModel = storage.defineItem<ModelIdentity | null>(
+export const lastSelectedModel = defineLoggedItem<ModelIdentity | null>(
   'local:activeModel',
   { fallback: null },
 );
 
 /** 上下文压缩（摘要）专用模型。`null` = 跟随对话主模型（默认）。配置一个更小更省
  *  的模型，可让后台压缩调用不必动用昂贵的主模型；解析失败时后台静默回退主模型。 */
-export const compactionModel = storage.defineItem<ModelIdentity | null>(
+export const compactionModel = defineLoggedItem<ModelIdentity | null>(
   'local:compactionModel',
   { fallback: null },
 );
 
-export const customProviders = storage.defineItem<CustomProviderConfig[]>(
+/** DOM 子代理模型（专门给 main agent 委派「读网页/截取内容」这类重活）。
+ *  `null` = 关闭此功能（main agent 看不到 `delegate_dom` 工具）。
+ *  配置一个便宜模型后，main agent 可以调用 `delegate_dom({ task })` 委派读取
+ *  任务给该模型，避免用昂贵的主模型 token 去处理大段网页文本。 */
+export const domSubAgentModel = defineLoggedItem<ModelIdentity | null>(
+  'local:domSubAgentModel',
+  { fallback: null },
+);
+
+export const customProviders = defineLoggedItem<CustomProviderConfig[]>(
   'local:customProviders',
   { fallback: [] },
 );
 
-export const lastSelectedThinkingLevel = storage.defineItem<ThinkingLevel>(
+export const lastSelectedThinkingLevel = defineLoggedItem<ThinkingLevel>(
   'local:thinkingLevel',
   { fallback: 'medium' },
 );
 
-export const themePreference = storage.defineItem<'dark' | 'light' | 'system'>(
+/**
+ * 「最近打开过的会话 id」——给悬浮球 toggle 场景使用：关闭侧边栏后 Chrome 会销毁整个
+ * sidepanel window；再次点开浮动球创建的是全新窗口 + 空 React 树（route 回到
+ * /chat/new）。把当前会话路由持久化进 storage，新窗口 mount 时读回并 navigate，
+ * 视觉上像是「折叠」而不是「重置成新对话」。
+ *
+ * 只在路由是 /chat/:id 时写入（/chat/new 不写，免得反复 toggle 后死循环在 new）；
+ * 写入与读取都在同一窗口内同步 WXT storage，没有跨窗口一致性需求。
+ */
+export const lastOpenSessionId = defineLoggedItem<string | null>(
+  'local:lastOpenSessionId',
+  { fallback: null },
+);
+
+export const themePreference = defineLoggedItem<'dark' | 'light' | 'system'>(
   'local:theme',
   { fallback: 'system' },
 );
 
-export const userInstructions = storage.defineItem<string>(
+export type VfsOpenPreference = 'smart' | 'preview' | 'source';
+
+/** Versioned independently because document renderer capabilities will grow
+ * over time and may need a migration without disturbing general settings. */
+export const vfsOpenPreferenceV1 = defineLoggedItem<VfsOpenPreference>(
+  'local:vfsOpenPreference:v1',
+  { fallback: 'smart' },
+);
+
+export const userInstructions = defineLoggedItem<string>(
   'local:userInstructions',
   { fallback: '' },
 );
 
+export const expandPromptsInline = defineLoggedItem<boolean>(
+  'local:expandPromptsInline',
+  { fallback: false },
+);
+
 /** Width of the file-tree panel inside FileWorkspace (Prompts / Skills sections). */
-export const settingsFilePanelWidth = storage.defineItem<number>(
+export const settingsFilePanelWidth = defineLoggedItem<number>(
   'local:settingsFilePanelWidth',
   { fallback: 280 },
 );
@@ -159,7 +258,7 @@ export const settingsFilePanelWidth = storage.defineItem<number>(
  * Remembers the last-visited Settings section so reopening /settings lands where the user left off.
  * Stores a relative section path such as 'prompts' | 'providers' | 'skills' | ...
  */
-export const lastSettingsSection = storage.defineItem<string>(
+export const lastSettingsSection = defineLoggedItem<string>(
   'local:lastSettingsSection',
   { fallback: 'providers' },
 );
@@ -176,7 +275,7 @@ export interface UpdateNoticeState {
   lastPromptedAt: number;
 }
 
-export const updateNoticeState = storage.defineItem<UpdateNoticeState>(
+export const updateNoticeState = defineLoggedItem<UpdateNoticeState>(
   'local:updateNoticeState',
   { fallback: { skippedVersion: null, lastPromptedAt: 0 } },
 );
@@ -187,7 +286,7 @@ export const updateNoticeState = storage.defineItem<UpdateNoticeState>(
  * 并打开对应版本的更新日志页，随即清空。`null` 表示无待展示更新。
  * 之所以经持久标记而非更新时直接开标签，是为了保证只在用户主动打开侧边栏后才弹页。
  */
-export const pendingChangelogVersion = storage.defineItem<string | null>(
+export const pendingChangelogVersion = defineLoggedItem<string | null>(
   'local:pendingChangelogVersion',
   { fallback: null },
 );
@@ -207,7 +306,7 @@ export interface WebDavConfig {
   directory: string;
 }
 
-export const webdavConfig = storage.defineItem<WebDavConfig | null>(
+export const webdavConfig = defineLoggedItem<WebDavConfig | null>(
   'local:webdavConfig',
   { fallback: null },
 );
@@ -265,13 +364,13 @@ export function resolveOrganizeSettings(s: MemorySettings): MemoryOrganizeSettin
   return { ...DEFAULT_ORGANIZE, ...s.organize };
 }
 
-export const memorySettings = storage.defineItem<MemorySettings>(
+export const memorySettings = defineLoggedItem<MemorySettings>(
   'local:memorySettings',
   { fallback: { enabled: false, organize: { ...DEFAULT_ORGANIZE } } },
 );
 
 /** 整理运行结果态（派生）。只有 organize manager 写；fallback 空对象。 */
-export const memoryOrganizeState = storage.defineItem<MemoryOrganizeState>(
+export const memoryOrganizeState = defineLoggedItem<MemoryOrganizeState>(
   'local:memoryOrganizeState',
   { fallback: {} },
 );
@@ -311,7 +410,7 @@ export function resolvePageInteractionSettings(
   return { ...DEFAULT_PAGE_INTERACTION, ...s };
 }
 
-export const pageInteractionSettings = storage.defineItem<PageInteractionSettings>(
+export const pageInteractionSettings = defineLoggedItem<PageInteractionSettings>(
   'local:pageInteractionSettings',
   { fallback: { ...DEFAULT_PAGE_INTERACTION } },
 );
@@ -331,7 +430,7 @@ export const DEFAULT_FLOATING_BALL_POSITION: FloatingBallPosition = {
   topRatio: 0.62,
 };
 
-export const floatingBallPosition = storage.defineItem<FloatingBallPosition>(
+export const floatingBallPosition = defineLoggedItem<FloatingBallPosition>(
   'local:floatingBallPosition',
   { fallback: { ...DEFAULT_FLOATING_BALL_POSITION } },
 );
@@ -347,7 +446,80 @@ export interface SidePanelHandoff {
   windowId: number;
 }
 
-export const pendingSidePanelHandoff = storage.defineItem<SidePanelHandoff | null>(
+export const pendingSidePanelHandoff = defineLoggedItem<SidePanelHandoff | null>(
   'local:pendingSidePanelHandoff',
   { fallback: null },
+);
+
+// ─── 调试日志（persistent ring buffer）───
+
+/**
+ * 调试日志设置：控制 `console.*` mirror 的写入行为。
+ *
+ * - `enabled` 总开关；关闭时既不写 IDB 也不通过 port 推送到侧边栏。
+ * - `verbose` 高频事件（每条 token 的 `event:message_update`）开关；关闭时跳过
+ *   写入/推送。`warn` / `error` 永远落盘（debug 这块的核心价值就是抓现场）。
+ *
+ * 设备本地偏好（用户什么时候想看日志），不进 config.json。`exclude`。
+ */
+export interface DebugLogSettings {
+  enabled: boolean;
+  verbose: boolean;
+}
+
+export const DEFAULT_DEBUG_LOG_SETTINGS: DebugLogSettings = {
+  enabled: true,
+  verbose: false,
+};
+
+export const debugLogSettings = defineLoggedItem<DebugLogSettings>(
+  'local:debugLogSettings',
+  { fallback: { ...DEFAULT_DEBUG_LOG_SETTINGS } },
+);
+
+// ─── Chat appearance (font size + font family) ───
+
+/**
+ * Chat font size in the sidepanel, stored as a CSS-pixel number so users can
+ * pick any value the slider supports (14–15 px in 0.1 increments). The
+ * renderer maps the px value to a CSS rem on the document root.
+ *
+ * Legacy installs stored a discrete key ('xs' | 'sm' | 'md' | 'lg' | 'xl');
+ * the hook layer migrates those on read.
+ */
+export type ChatFontSize = number;
+
+/** Slider bounds — kept in sync with the UI control in AppearanceSection. */
+export const CHAT_FONT_SIZE_MIN = 14;
+export const CHAT_FONT_SIZE_MAX = 15;
+export const CHAT_FONT_SIZE_STEP = 0.1;
+
+export const DEFAULT_CHAT_FONT_SIZE: ChatFontSize = 14;
+
+export const chatFontSize = defineLoggedItem<ChatFontSize>(
+  'local:chatFontSize',
+  { fallback: DEFAULT_CHAT_FONT_SIZE },
+);
+
+/**
+ * Chat font family in the sidepanel. Stored as a stable id (not raw CSS)
+ * so the UI shows a friendly label and the CSS layer keeps the @font-face
+ * mapping in one place. `data-chat-font="<id>"` on `:root` selects the
+ * cascade.
+ */
+export type ChatFontFamilyId = 'geist' | 'inter' | 'roboto' | 'system';
+
+export interface ChatFontFamilyOption {
+  id: ChatFontFamilyId;
+  /** Display label shown in the settings UI. */
+  label: string;
+  /** Human-readable sample text so users recognize the look. */
+  sample: string;
+}
+
+export const DEFAULT_CHAT_FONT_FAMILY: ChatFontFamilyId = 'geist';
+
+export const chatFontFamily = defineLoggedItem<ChatFontFamilyId>(
+  'local:chatFontFamily',
+  { fallback: DEFAULT_CHAT_FONT_FAMILY },
 );

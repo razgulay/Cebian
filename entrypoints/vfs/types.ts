@@ -14,10 +14,12 @@ export interface DirEntry {
 export type FileMedia =
   | { type: 'text'; content: string; size: number }
   | { type: 'markdown'; content: string; size: number }
+  | { type: 'pdf'; data: Uint8Array; size: number }
   | { type: 'image'; mime: string; size: number; url: string }
   | { type: 'video'; mime: string; size: number; url: string }
   | { type: 'audio'; mime: string; size: number; url: string }
   | { type: 'binary'; size: number }
+  | { type: 'unknown'; size: number }
   | { type: 'tooLarge'; size: number };
 
 export type ViewState =
@@ -35,4 +37,3 @@ export type ViewState =
     }
   | { kind: 'file'; path: string; media: FileMedia }
   | { kind: 'error'; path: string; message: string };
-

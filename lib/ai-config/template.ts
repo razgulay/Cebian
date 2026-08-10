@@ -16,6 +16,7 @@ export const TEMPLATE_VARIABLES = [
   { name: 'page_title', getLabel: () => t('settings.prompts.placeholders.pageTitle') },
   { name: 'date', getLabel: () => t('settings.prompts.placeholders.date') },
   { name: 'clipboard', getLabel: () => t('settings.prompts.placeholders.clipboard') },
+  { name: 'input', getLabel: () => t('settings.prompts.placeholders.input') },
 ] as const satisfies readonly { name: string; getLabel: () => string }[];
 
 export type TemplateVarName = (typeof TEMPLATE_VARIABLES)[number]['name'];

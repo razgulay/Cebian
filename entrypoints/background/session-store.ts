@@ -16,6 +16,7 @@ import type { RestoreStrategy } from '@/lib/backup/types';
 import type { ApplySessionsResult } from '@/lib/backup/sources/sessions';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { sanitizeAgentMessages } from '@/lib/agent/message-helpers';
+import { debugLog } from '@/lib/debug/log';
 
 class SessionStore {
   private writers = new Map<string, ThrottledSessionWriter>();
@@ -75,7 +76,25 @@ class SessionStore {
   /** 把全部待写的节流写立即落库。采集备份前由 flush 信号触发，确保页面随后直读 Dexie
    *  时能读到仍躺在 throttle 计时器里的在途消息。 */
   async flushAll(): Promise<void> {
+    const pendingCount = this.writers.size;
     await Promise.all([...this.writers.values()].map((w) => w.flush()));
+    if (pendingCount > 0) {
+      debugLog.info('db', 'db:writer:flush_all', { pendingCount });
+    }
+  }
+
+  /** Tear down every writer. Called from the SW lifecycle hook (onSuspend /
+   *  onShutdown — see `entrypoints/background/index.ts`) so we know whether
+   *  in-flight messages were saved before MV3 killed the worker. Without
+   *  this, silent data loss on tab close is invisible to the debug log. */
+  disposeAll(): void {
+    const count = this.writers.size;
+    for (const [id] of this.writers) {
+      this.disposeWriter(id);
+    }
+    if (count > 0) {
+      debugLog.warn('db', 'db:writer:dispose_all', { disposedCount: count, reason: 'sw_shutdown' });
+    }
   }
 
   /**
