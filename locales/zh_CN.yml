@@ -489,6 +489,8 @@ chat:
     unsupportedFileType: "不支持的文件类型：$1"
     modelNoImage: "当前模型不支持多模态输入"
     imageStripped: "已移除图片附件——当前模型不支持多模态输入"
+    quoteChips: "引用片段"
+    removeQuoteChip: "移除引用片段"
     noPrompts: "暂无 Prompt，前往 AI 配置创建"
     noMatch: "无匹配结果"
     loadMore: "再显示 $1 条"

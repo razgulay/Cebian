@@ -496,6 +496,8 @@ chat:
     unsupportedFileType: "Unsupported file type: $1"
     modelNoImage: "Current model doesn't support multimodal input"
     imageStripped: "Removed image attachments — the current model doesn't support multimodal input"
+    quoteChips: "Quoted excerpts"
+    removeQuoteChip: "Remove quoted excerpt"
     noPrompts: "No prompts yet — create one from AI config"
     noMatch: "No matches"
     loadMore: "Show $1 more"

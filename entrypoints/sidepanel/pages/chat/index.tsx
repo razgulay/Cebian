@@ -159,11 +159,19 @@ export function ChatPage({
   const inputRef = useRef<ChatInputHandle>(null);
 
   // When the user selects text in an assistant message and clicks the floating
-  // Quote button, the formatted Markdown blockquote is inserted at the current
-  // caret position in the chat input. If the input is empty, the blockquote is
-  // pasted as-is; if there's existing draft, it's appended after a newline.
+  // Quote button, the formatted `quote <text> quote` blockquote is inserted at
+  // the current caret position in the chat input AND surfaced as a small
+  // preview chip above the textarea so the user sees the excerpt in a
+  // smaller font than the main draft (a plain <textarea> can't render mixed
+  // font sizes — the chip is the workaround).
   const handleQuote = useCallback((text: string) => {
-    inputRef.current?.insertText?.(text);
+    const handle = inputRef.current;
+    if (!handle) return;
+    if (handle.insertQuote) {
+      handle.insertQuote(text);
+    } else {
+      handle.insertText?.(text);
+    }
   }, []);
 
   // ─── Agent port (all agent/session logic via background) ───

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -80,6 +80,14 @@ export interface ChatInputHandle {
    *  Used by the "Quote" feature when the user selects text in an assistant
    *  message and clicks the floating Quote button. */
   insertText?: (text: string) => void;
+  /** Same as `insertText` but ALSO surfaces the inserted text as a small
+   *  styled chip above the textarea. Used by the Quote feature: the chip
+   *  gives the user a visual preview of the quoted excerpt in a smaller
+   *  font than the main input (a plain `<textarea>` can't render mixed
+   *  font sizes — see QuoteChip for the rationale). The chip itself does
+   *  not affect what gets submitted; the raw `quote <text> quote` text
+   *  is also inserted into the textarea and ships with the message. */
+  insertQuote?: (text: string) => void;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -91,6 +99,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const [prompts, setPrompts] = useState<PromptMeta[]>([]);
   const [selectedPromptIndex, setSelectedPromptIndex] = useState(0);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Quote chips: preview pills rendered above the textarea when the user
+  // clicks the floating Quote button. The textarea itself is plain text and
+  // can't render mixed font sizes, so the chip gives the user the smaller
+  // visual hierarchy they asked for without forcing a contentEditable
+  // refactor. Each chip is removed individually via its X button.
+  const [quoteChips, setQuoteChips] = useState<{ id: string; text: string }[]>([]);
   // Mirror of `attachments` for synchronous reads after an await. The
   // recorder's `subscribeSession` callback fires synchronously when the
   // BG delivers a session, but React state isn't flushed by the time
@@ -499,6 +513,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       setShowSlash(false);
       setHistoryIndex(null);
       setDraft('');
+      setQuoteChips([]);
     } finally {
       isDispatchingRef.current = false;
       setIsDispatching(false);
@@ -518,6 +533,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   useEffect(() => {
     setHistoryIndex(null);
     setDraft('');
+    setQuoteChips([]);
     interimSuffixRef.current = '';
     speech.stop();
   }, [sessionId, speech.stop]);
@@ -674,7 +690,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setHistoryIndex(null);
   }, []);
 
-  useImperativeHandle(ref, () => ({ fill, insertText }), [fill, insertText]);
+  // Same as insertText, plus records a chip so the user sees a smaller-font
+  // preview pill above the textarea. The chip is keyed by a monotonic id so
+  // successive quotes stack; the chip text mirrors what `insertText` writes
+  // into the textarea (so what the user sees in the chip == what gets sent).
+  const insertQuote = useCallback((text: string) => {
+    insertText(text);
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    setQuoteChips((prev) => [...prev, { id, text }]);
+  }, [insertText]);
+
+  useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
 
   // Scan prompts when slash menu opens
   useEffect(() => {
@@ -1270,6 +1296,40 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             </>
           )}
         </div>
+
+        {/* Quote chips — preview pills rendered in a smaller font above the
+            textarea. Each chip represents one Quote click. Removing a chip
+            (X button) does NOT remove the corresponding text from the
+            textarea; the chip is purely a visual aid. */}
+        {quoteChips.length > 0 && (
+          <div
+            role="list"
+            aria-label={t('chat.composer.quoteChips')}
+            className="flex flex-col gap-1 px-1.5 pt-1.5 pb-0 border-b border-border/40"
+          >
+            {quoteChips.map((chip) => (
+              <div
+                key={chip.id}
+                role="listitem"
+                className="group flex items-start gap-1.5 rounded-md bg-muted/60 px-1.5 py-1 text-[0.72rem] leading-snug text-muted-foreground"
+              >
+                <QuoteIcon size={11} className="shrink-0 mt-px opacity-60" />
+                <pre className="flex-1 min-w-0 whitespace-pre-wrap break-words font-sans m-0 p-0">
+                  {chip.text.trimEnd()}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => setQuoteChips((prev) => prev.filter((c) => c.id !== chip.id))}
+                  title={t('chat.composer.removeQuoteChip')}
+                  aria-label={t('chat.composer.removeQuoteChip')}
+                  className="shrink-0 -mr-0.5 -mt-0.5 p-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-background/60 transition-colors"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Textarea */}
         <textarea
