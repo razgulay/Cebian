@@ -39,18 +39,20 @@ export interface SelectionQuoteButtonProps {
 }
 
 /** Wrap a free-form user selection as a visible quoted block. The user's
- *  requested format is the literal word `quote` framing the selected text:
+ *  requested format is the literal word `quote` framing the selected text
+ *  with angle brackets:
  *
- *      quote "Th\u1EF1c ch\u1EA5t b\u1ED9 nh\u1EDB trong h\u1EC7 th\u1ED1ng" quote
+ *      quote <Th\u1EF1c ch\u1EA5t b\u1ED9 nh\u1EDB trong h\u1EC7 th\u1ED1ng> quote
  *
- *  The literal word is preferred over a graphical marker (a previous version
- *  used `\u258E` LEFT VERTICAL BLOCK characters, which rendered as solid
- *  black bars in the chat input's monospace font and visually dominated the
- *  excerpt). Markdown treats all of this as plain text \u2014 no italic / bold
- *  markers, since `rehypeRaw` is not enabled and curly quote marks interfere
- *  with `*` / `_` italic parsing anyway.
- *  A single trailing newline keeps the quoted block close to whatever the
- *  user types next instead of being separated by a blank line. */
+ *  The literal word is preferred over a graphical marker (an earlier version
+ *  used `\u258E` block characters, which rendered as solid black bars in
+ *  the chat input's monospace font and visually dominated the excerpt;
+ *  a later version used Unicode curly quotes `\u201C \u201D`, which the user
+ *  found too noisy when the excerpt already contains its own punctuation).
+ *  Markdown treats all of this as plain text \u2014 no italic / bold markers,
+ *  since `rehypeRaw` is not enabled. A single trailing newline keeps the
+ *  quoted block close to whatever the user types next instead of being
+ *  separated by a blank line. */
 function formatBlockquote(raw: string): string {
   const trimmed = raw.replace(/\s+$/g, '');
   if (!trimmed) return '';
@@ -58,7 +60,7 @@ function formatBlockquote(raw: string): string {
     .split('\n')
     .map((line) => line.replace(/^\s*>?\s?/, ''));
   if (lines.length === 1) {
-    return `quote \u201C${lines[0]}\u201D quote\n`;
+    return `quote <${lines[0]}> quote\n`;
   }
   // Multi-line: keep the `quote \u2026 quote` framing visible at the top/bottom
   // edges so it's obvious even when the selection spans many lines.
