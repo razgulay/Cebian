@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -55,6 +55,9 @@ interface ChatInputProps {
     options?: { displayText?: string },
   ) => Promise<PromptDispatchResult>;
   onOpenSettings?: () => void;
+  /** 跳转到「文件系统」设置页（独立的快捷入口 — 放在工具栏左侧、靠近 pick element，
+   *  因为用户访问频次比一般设置项高）。 */
+  onOpenStorage?: () => void;
   isAgentRunning?: boolean;
   onCancel?: () => void;
   /** User-message texts already sent in this session, oldest first. */
@@ -80,7 +83,7 @@ export interface ChatInputHandle {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
-  { onSend, onOpenSettings, isAgentRunning, onCancel, userHistory, sessionId, model: currentModel, thinkingLevel: currentThinkingLevel, onModelChange, onThinkingChange },
+  { onSend, onOpenSettings, onOpenStorage, isAgentRunning, onCancel, userHistory, sessionId, model: currentModel, thinkingLevel: currentThinkingLevel, onModelChange, onThinkingChange },
   ref,
 ) {
   const [value, setValue] = useState('');
@@ -1090,6 +1093,22 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       <div className="border border-border rounded-xl bg-card focus-within:border-border/80 focus-within:ring-1 focus-within:ring-primary/10 transition-all [border-width:0.5px]">
         {/* Top row: tools + attachments */}
         <div className="flex items-center gap-0.5 px-1.5 pt-0.5 pb-0 justify-end">
+          {/* Storage shortcut — pulled out of Settings nav (high-traffic entry).
+              Same row as pick/record tool icons, leading position. Clicking
+              during an active picker is safe: ChatInput's unmount cleanup
+              calls cancelElementPicker(). */}
+          {onOpenStorage && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title={t('chat.composer.openStorage')}
+              onClick={onOpenStorage}
+              disabled={isDispatching}
+              className="size-7"
+            >
+              <HardDrive className="size-3.5" />
+            </Button>
+          )}
           {/* Tool icons */}
           <Button
             variant="ghost"

@@ -462,6 +462,7 @@ chat:
     placeholder: "輸入 / 查看命令…"
     pickElement: "選擇元素"
     cancelPick: "取消選擇"
+    openStorage: "檔案系統"
     screenshot: "螢幕截圖"
     uploadFile: "上傳檔案"
     mobileMode: "行動裝置模式"
@@ -488,6 +489,7 @@ chat:
     imageStripped: "已移除圖片附件——當前模型不支援多模態輸入"
     noPrompts: "尚無 Prompt，前往 AI 設定建立"
     noMatch: "無相符結果"
+    loadMore: "再顯示 $1 條"
     iframeEnterHint: "⏎ 點擊進入"
     # 語音輸入（本地優先、雲端兜底的語音辨識）
     voiceStart: "語音輸入"

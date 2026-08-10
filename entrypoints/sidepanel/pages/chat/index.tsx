@@ -65,12 +65,14 @@ import { t } from '@/lib/i18n';
 
 export function ChatPage({
   onOpenSettings,
+  onOpenStorage,
   onTitleChange,
   onForkedFromChange,
   pendingScrollToIndex,
   onPendingScrollConsumed,
 }: {
   onOpenSettings?: () => void;
+  onOpenStorage?: () => void;
   onTitleChange?: (title: string) => void;
   /** Push fork identity (source + branched-at index) up to App so the Header
    *  badge can render it. `forkedAtIndex` is the index in the source's
@@ -924,6 +926,7 @@ useLayoutEffect(() => {
         onCancel={cancel}
         isAgentRunning={effectiveRunning}
         onOpenSettings={onOpenSettings}
+        onOpenStorage={onOpenStorage}
         userHistory={userHistory}
         sessionId={isNewChat ? activeSessionId : routeSessionId ?? null}
         model={turnModel}

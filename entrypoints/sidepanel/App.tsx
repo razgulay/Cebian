@@ -261,6 +261,13 @@ function App() {
     navigate(lastChatPathRef.current, { replace: true });
   }, [navigate, location.pathname]);
 
+  // Chat 工具栏「文件系统」快捷入口 — 直接跳到 /settings/storage，省掉进 Settings
+  // 再点 nav 的两级跳转（用户访问频次高）。
+  const handleOpenStorage = useCallback(() => {
+    debugLog.info('ui', 'app:open_storage', { fromPath: location.pathname });
+    navigate('/settings/storage');
+  }, [navigate, location.pathname]);
+
   if (!themeReady || !restored) return null;
 
   return (
@@ -281,7 +288,7 @@ function App() {
         )}
 
         <Routes>
-          <Route path="/chat/:sessionId?" element={<ChatPage onOpenSettings={() => navigate('/settings')} onTitleChange={setChatTitle} onForkedFromChange={setChatForkedFrom} pendingScrollToIndex={pendingScrollToIndex} onPendingScrollConsumed={clearPendingScrollToIndex} />} />
+          <Route path="/chat/:sessionId?" element={<ChatPage onOpenSettings={() => navigate('/settings')} onOpenStorage={handleOpenStorage} onTitleChange={setChatTitle} onForkedFromChange={setChatForkedFrom} pendingScrollToIndex={pendingScrollToIndex} onPendingScrollConsumed={clearPendingScrollToIndex} />} />
           <Route
             path="/settings/*"
             element={

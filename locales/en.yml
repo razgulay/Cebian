@@ -472,6 +472,7 @@ chat:
     screenshot: "Screenshot"
     uploadFile: "Upload file"
     mobileMode: "Mobile mode"
+    openStorage: "Filesystem"
     needModel: "Please select an AI model first"
     goToSettings: "Go to settings"
     readPromptFailed: "Failed to read prompt"
