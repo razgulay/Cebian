@@ -440,6 +440,13 @@ export function installConsoleMirror(source: string): void {
       // [debug-log] prefix would loop forever — skip those.
       const first = args[0];
       if (typeof first === 'string' && first.startsWith('[debug-log]')) return;
+      // [wxt] is wxt-framework internal logs (HMR, dev-server connection, ...).
+      // We always run a production build and have no dev server, so the
+      // `Failed to connect` / `Connecting to` lines are pure noise — but they
+      // still fire at every SW boot and fill the ring buffer with identical
+      // entries. Skip the whole `[wxt]` namespace; if wxt ever logs something
+      // genuinely useful, it goes through `debugLog.*` explicitly anyway.
+      if (typeof first === 'string' && first.startsWith('[wxt]')) return;
       const text = stringifyArgs(args);
       const extra = args.length > 1 ? args.slice(1) : undefined;
       // Reuse emit() so the noisy/verbose filter and live fan-out are

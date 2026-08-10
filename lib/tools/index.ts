@@ -22,6 +22,7 @@ import { SessionToolContext } from './session-context';
 import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
@@ -89,11 +90,28 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
 ): Promise<AgentTool<any>[]> {
+  // Cold-start profiling: MCP discovery and the lazy delegate_dom import are
+  // the two async paths in this function. Log each so we can see which one
+  // dominates when `createSessionTools` is slow on a fresh session. Pure
+  // instrumentation — no behavior change. Remove once we've measured enough
+  // sessions to confirm nothing is unexpectedly heavy.
+  const mcpStart = Date.now();
   const mcpTools = await discoverMCPTools();
+  debugLog.info('tool', 'tool:init:mcp',
+    withSession({
+      durationMs: Date.now() - mcpStart,
+      toolCount: mcpTools.length,
+    }, ctx.sessionId));
+
   const runSkill = createSessionRunSkillTool(ctx.sessionId);
   const base = [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
   // Always include delegate_dom — checks the sub-agent model at runtime.
+  const delegateStart = Date.now();
   const { delegateDomTool } = await import('./delegate-dom');
+  debugLog.info('tool', 'tool:init:delegate-dom',
+    withSession({
+      durationMs: Date.now() - delegateStart,
+    }, ctx.sessionId));
   base.push(delegateDomTool);
   return base;
 }
@@ -109,6 +127,7 @@ export async function createSessionTools(sessionId: string): Promise<{
   tools: AgentTool<any>[];
   ctx: SessionToolContext;
 }> {
+  const totalStart = Date.now();
   const ctx = new SessionToolContext(sessionId);
 
   // Register interactive tools (each gets its own bridge)
@@ -116,6 +135,15 @@ export async function createSessionTools(sessionId: string): Promise<{
   ctx.register(TOOL_ASK_USER, askUserBridge, askUserTool);
 
   const tools = await buildSessionToolArray(ctx);
+
+  // Final cold-start total. Pairs with the per-phase markers in
+  // buildSessionToolArray so we can attribute the time to MCP discovery vs
+  // delegate_dom import vs everything else (register + map + push).
+  debugLog.info('tool', 'tool:init:total',
+    withSession({
+      durationMs: Date.now() - totalStart,
+      totalCount: tools.length,
+    }, sessionId));
 
   return { tools, ctx };
 }
