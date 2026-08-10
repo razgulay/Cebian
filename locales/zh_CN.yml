@@ -38,6 +38,8 @@ common:
   copy: "复制"
   copied: "已复制"
   copyFailed: "复制失败"
+  cut: "剪切"
+  paste: "粘贴"
   speak: "朗读"
   stopSpeaking: "停止朗读"
   # $1 = 代码语言名（如 "Ts"、"Python"）
@@ -850,6 +852,40 @@ vfs:
   untitledSession: "未命名会话"
   # $1 = 格式化后的日期
   workspaceCreated: "创建于 $1"
+  # 目录列表上方的工具栏按钮
+  action:
+    newFile: "新建文件"
+    newFolder: "新建文件夹"
+    paste: "粘贴到这里"
+    # $1 = 操作（"复制" / "剪切"），$2 = 条目名 —— 用于工具栏上 paste 按钮的副标题，提示剪贴板里是什么
+    pasteHint: "$1 → $2"
+  # 内联新建/重命名输入框的占位文本。$1 = 类型（"文件" 或 "文件夹"）
+  prompt:
+    newName: "输入$1名"
+  # 删除等危险操作前的确认弹窗
+  confirm:
+    # $1 = 文件名
+    deleteFile: "删除「$1」？此操作无法撤销。"
+    # $1 = 文件夹名
+    deleteFolder: "删除「$1」及其全部内容？此操作无法撤销。"
+  # 操作成功后的 toast 提示
+  toast:
+    # $1 = 类型（"文件" / "文件夹"），$2 = 名称
+    created: "$1「$2」已创建"
+    # $1 = 新名称
+    renamed: "已重命名为「$1」"
+    # $1 = 已删除条目名
+    deleted: "「$1」已删除"
+    # $1 = 已粘贴条目名
+    pasted: "「$1」已粘贴"
+    # $1 = 名字，$2 = 原因（如"名称已存在"）
+    createFailed: "创建失败：$1 — $2"
+    renameFailed: "重命名失败：$1 — $2"
+    deleteFailed: "删除失败：$1 — $2"
+    # $1 = 源名，$2 = 原因
+    pasteFailed: "粘贴失败：$1 — $2"
+    # $1 = 源名 —— 粘贴目标是源自身或其子目录（仅对 cut/移动有意义；否则会空操作或把源改坏）
+    pasteSelf: "无法将「$1」粘贴到自身内"
 
 # ─── 独立授权页（entrypoints/user-permission）───
 permission:

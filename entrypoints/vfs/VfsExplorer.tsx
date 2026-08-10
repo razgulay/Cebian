@@ -7,6 +7,8 @@ import { themePreference, vfsOpenPreferenceV1 } from '@/lib/persistence/storage'
 import { downloadFile } from '@/lib/utils';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from '@/components/ui/sonner';
+import { ConfirmOutlet } from '@/components/dialogs/confirm-outlet';
+import { showConfirm } from '@/lib/ui/dialog';
 import { t } from '@/lib/i18n';
 import { applyTheme, resolveTheme } from './lib/theme';
 import { MAX_PREVIEW_BYTES, classifyFile, decodePreviewText, fileExtension, getHashPath, getRequestedAnchor, isWorkspacesRoot, navigateTo, workspaceUuidOf } from './lib/path-utils';
@@ -44,6 +46,19 @@ export function VfsExplorer({
   // The handler captures its target path from the closure at click time, so
   // the in-flight task is independent of subsequent view changes.
   const [isDownloading, setIsDownloading] = useState(false);
+
+  // Clipboard state for copy/cut + paste. Persists across directory
+  // navigations so users can copy in `/a`, navigate to `/b`, paste there.
+  // `null` = nothing queued; `op` controls whether paste does a copyFile
+  // (`copy`) or copyFile + rm (`cut`).
+  const [clipboard, setClipboard] = useState<{ path: string; op: 'copy' | 'cut' } | null>(null);
+
+  // `version` is incremented whenever the explorer needs to re-render the
+  // current view because the VFS changed externally. Wired into the loadPath
+  // effect's deps below. Mutations triggered by DirView (create/rename/delete)
+  // emit `vfs.onChange` events which also bump this; we keep both paths so
+  // unrelated contexts (e.g. an agent writing from the BG SW) still refresh.
+  const [version, setVersion] = useState(0);
 
   // ── Theme sync ──
   useEffect(() => {
@@ -205,7 +220,7 @@ export function VfsExplorer({
       revokeBlobUrl();
       window.removeEventListener('hashchange', loadPath);
     };
-  }, [themeReady]);
+  }, [themeReady, version]);
 
   useEffect(() => {
     if (view.kind !== 'file' || view.media.type !== 'markdown') return;
@@ -216,6 +231,152 @@ export function VfsExplorer({
     });
     return () => cancelAnimationFrame(frame);
   }, [view]);
+
+  // ── VFS change listener ──
+  //
+  // External VFS mutations (BG SW writes, agent tool calls, broadcast events
+  // from other contexts) must refresh the explorer. Local mutations from
+  // the DirView callbacks below ALSO call setVersion, so this listener
+  // path is mainly for the cross-context case.
+  //
+  // We only bump when the change touches the currently-viewed path or its
+  // descendants so unrelated changes don't churn the explorer.
+  //
+  // The dep is the currently-viewed path string. Re-subscribing on each path
+  // change is intentional: a new closure captures the latest `myPath` so
+  // path comparisons stay correct without resorting to refs.
+  const viewedPath = view.kind !== 'loading' && view.kind !== 'error' ? view.path : getHashPath();
+  useEffect(() => {
+    return vfs.onChange((event) => {
+      const base = viewedPath === '/' ? '/' : viewedPath + '/';
+      const affects =
+        event.path === viewedPath ||
+        event.path.startsWith(base) ||
+        ('oldPath' in event && event.oldPath.startsWith(base));
+      if (affects) setVersion((v) => v + 1);
+    });
+  }, [viewedPath]);
+
+  // ── Mutation handlers ──
+  //
+  // All handlers derive the affected paths from the currently-viewed dir
+  // (which we read fresh from the hash, not from `view`, so a stale closure
+  // can't fire a mutation against the wrong parent). Errors are surfaced as
+  // a toast; success toasts use the `vfs.toast.*` keys.
+
+  function currentDir(): string {
+    // The `view` may have flipped to `file` while the toolbar/kebab is hidden
+    // in that branch anyway, but mutations are only fired from the dir UI so
+    // we still want a sane parent path. Reading the hash directly keeps the
+    // handler usable from event callbacks that would otherwise capture a
+    // stale closure of `view`.
+    return getHashPath();
+  }
+
+  async function handleCreateFile(name: string): Promise<void> {
+    const dir = currentDir();
+    const fullPath = dir === '/' ? `/${name}` : `${dir}/${name}`;
+    try {
+      await vfs.writeFile(fullPath, '');
+      toast.success(t('vfs.toast.created', [t('common.newFile'), name]));
+    } catch (err: any) {
+      toast.error(t('vfs.toast.createFailed', [name, err?.message ?? '']));
+    }
+  }
+
+  async function handleCreateFolder(name: string): Promise<void> {
+    const dir = currentDir();
+    const fullPath = dir === '/' ? `/${name}` : `${dir}/${name}`;
+    try {
+      await vfs.mkdir(fullPath);
+      toast.success(t('vfs.toast.created', [t('common.newFolder'), name]));
+    } catch (err: any) {
+      toast.error(t('vfs.toast.createFailed', [name, err?.message ?? '']));
+    }
+  }
+
+  async function handleRename(oldName: string, newName: string, _isDir: boolean): Promise<void> {
+    const dir = currentDir();
+    const oldPath = dir === '/' ? `/${oldName}` : `${dir}/${oldName}`;
+    const newPath = dir === '/' ? `/${newName}` : `${dir}/${newName}`;
+    try {
+      await vfs.rename(oldPath, newPath);
+      toast.success(t('vfs.toast.renamed', [newName]));
+    } catch (err: any) {
+      toast.error(t('vfs.toast.renameFailed', [oldName, err?.message ?? '']));
+    }
+  }
+
+  async function handleDelete(name: string, isDir: boolean): Promise<void> {
+    const dir = currentDir();
+    const fullPath = dir === '/' ? `/${name}` : `${dir}/${name}`;
+    const confirmOptions = isDir
+      ? {
+          title: t('common.delete'),
+          description: t('vfs.confirm.deleteFolder', [name]),
+          destructive: true,
+          confirmText: t('common.delete'),
+        }
+      : {
+          title: t('common.delete'),
+          description: t('vfs.confirm.deleteFile', [name]),
+          destructive: true,
+          confirmText: t('common.delete'),
+        };
+    const ok = await showConfirm(confirmOptions);
+    if (!ok) return;
+    try {
+      // rm with recursive covers both files and folders (folders need
+      // recursive to descend before rmdir; files are removed by unlink).
+      await vfs.rm(fullPath, { recursive: true });
+      toast.success(t('vfs.toast.deleted', [name]));
+    } catch (err: any) {
+      toast.error(t('vfs.toast.deleteFailed', [name, err?.message ?? '']));
+    }
+  }
+
+  function handleCopy(name: string): void {
+    const dir = currentDir();
+    const fullPath = dir === '/' ? `/${name}` : `${dir}/${name}`;
+    setClipboard({ path: fullPath, op: 'copy' });
+  }
+
+  function handleCut(name: string): void {
+    const dir = currentDir();
+    const fullPath = dir === '/' ? `/${name}` : `${dir}/${name}`;
+    setClipboard({ path: fullPath, op: 'cut' });
+  }
+
+  async function handlePaste(): Promise<void> {
+    if (!clipboard) return;
+    const targetDir = currentDir();
+    const srcPath = clipboard.path;
+    const srcName = srcPath.split('/').pop() ?? '';
+    // Refuse to paste into the source itself or a descendant of it for
+    // `cut` — would either no-op (copy of self) or blow away the source mid-
+    // rename. Descendant check covers nested pastes; paste into an unrelated
+    // sibling of the source folder is fine.
+    if (clipboard.op === 'cut') {
+      const normTarget = targetDir;
+      if (normTarget === srcPath || normTarget.startsWith(srcPath === '/' ? '/' : srcPath + '/')) {
+        toast.error(t('vfs.toast.pasteSelf', [srcName]));
+        return;
+      }
+    }
+    const destPath = targetDir === '/' ? `/${srcName}` : `${targetDir}/${srcName}`;
+    try {
+      await vfs.copyFile(srcPath, destPath);
+      if (clipboard.op === 'cut') {
+        await vfs.rm(srcPath, { recursive: true });
+        // Cut is a one-shot move — clear the buffer so a subsequent paste
+        // doesn't keep dragging the same source.
+        setClipboard(null);
+      }
+      toast.success(t('vfs.toast.pasted', [srcName]));
+    } catch (err: any) {
+      toast.error(t('vfs.toast.pasteFailed', [srcName, err?.message ?? '']));
+    }
+  }
 
   // ── Download (file or zipped folder) ──
   //
@@ -337,6 +498,18 @@ export function VfsExplorer({
                 entries={view.entries}
                 workspaceLabels={view.workspaceLabels}
                 workspaceRow={view.workspaceRow}
+                onCreateFile={(name) => { void handleCreateFile(name); }}
+                onCreateFolder={(name) => { void handleCreateFolder(name); }}
+                onRename={(oldName, newName, isDir) => { void handleRename(oldName, newName, isDir); }}
+                onDelete={(name, isDir) => { void handleDelete(name, isDir); }}
+                onCopy={handleCopy}
+                onCut={handleCut}
+                onPaste={() => { void handlePaste(); }}
+                canPaste={!!clipboard}
+                clipboardSummary={clipboard ? t('vfs.action.pasteHint', [
+                  t(clipboard.op === 'copy' ? 'common.copy' : 'common.cut'),
+                  clipboard.path.split('/').pop() ?? '',
+                ]) : null}
               />
             )}
 
@@ -361,6 +534,13 @@ export function VfsExplorer({
           </div>
         </main>
         <Toaster theme={resolveTheme(theme)} />
+        {/* The sidepanel mount already provides a ConfirmOutlet via
+         *  `entrypoints/sidepanel/App.tsx`. In standalone `vfs.html` we own
+         *  the document ourselves and need to provide our own — otherwise
+         *  `showConfirm()` fails closed and the delete dialog silently
+         *  resolves to false. `pathname.endsWith('sidepanel.html')` is the
+         *  same host discriminator StorageSection uses. */}
+        {window.location.pathname.endsWith('sidepanel.html') ? null : <ConfirmOutlet />}
       </div>
     </TooltipProvider>
   );

@@ -38,6 +38,8 @@ common:
   copy: "複製"
   copied: "已複製"
   copyFailed: "複製失敗"
+  cut: "剪下"
+  paste: "貼上"
   speak: "朗讀"
   stopSpeaking: "停止朗讀"
   # $1 = 程式碼語言名（如 "Ts"、"Python"）
@@ -849,6 +851,40 @@ vfs:
   untitledSession: "未命名對話"
   # $1 = 格式化後的日期
   workspaceCreated: "建立於 $1"
+  # 目錄列表上方的工具列按鈕
+  action:
+    newFile: "新增檔案"
+    newFolder: "新增資料夾"
+    paste: "貼到這裡"
+    # $1 = 動作（「複製」/「剪下」），$2 = 項目名稱 —— 用於工具列上 paste 按鈕的副標題，提示剪貼簿裡是什麼
+    pasteHint: "$1 → $2"
+  # 內聯新增/重新命名輸入框的佔位文字。$1 = 類型（"檔案" 或 "資料夾"）
+  prompt:
+    newName: "輸入$1名稱"
+  # 刪除等危險操作前的確認對話框
+  confirm:
+    # $1 = 檔案名
+    deleteFile: "刪除「$1」？此操作無法復原。"
+    # $1 = 資料夾名
+    deleteFolder: "刪除「$1」及其所有內容？此操作無法復原。"
+  # 操作成功後的 toast 提示
+  toast:
+    # $1 = 類型（"檔案" / "資料夾"），$2 = 名稱
+    created: "$1「$2」已建立"
+    # $1 = 新名稱
+    renamed: "已重新命名為「$1」"
+    # $1 = 已刪除項目名
+    deleted: "「$1」已刪除"
+    # $1 = 已貼上項目名
+    pasted: "「$1」已貼上"
+    # $1 = 名稱，$2 = 原因（如「名稱已存在」）
+    createFailed: "建立失敗：$1 — $2"
+    renameFailed: "重新命名失敗：$1 — $2"
+    deleteFailed: "刪除失敗：$1 — $2"
+    # $1 = 來源名，$2 = 原因
+    pasteFailed: "貼上失敗：$1 — $2"
+    # $1 = 來源名 —— 貼上目標是來源本身或其子目錄（僅對 cut/移動有意義；否則會空操作或把來源改壞）
+    pasteSelf: "無法將「$1」貼到本身內"
 
 # ─── 獨立授權頁（entrypoints/user-permission）───
 permission:

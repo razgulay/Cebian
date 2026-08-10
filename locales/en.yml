@@ -39,6 +39,8 @@ common:
   copy: "Copy"
   copied: "Copied"
   copyFailed: "Copy failed"
+  cut: "Cut"
+  paste: "Paste"
   speak: "Read aloud"
   stopSpeaking: "Stop reading aloud"
   # $1 = code language label (e.g. "Ts", "Python")
@@ -868,6 +870,43 @@ vfs:
   untitledSession: "Untitled conversation"
   # $1 = formatted date
   workspaceCreated: "Created $1"
+  # Toolbar buttons above the dir listing
+  action:
+    newFile: "New file"
+    newFolder: "New folder"
+    paste: "Paste here"
+    # $1 = verb ("copy" or "cut"), $2 = entry name — shown on the toolbar's
+    # paste button while a clipboard payload exists, indicating what's queued.
+    pasteHint: "$1 → $2"
+  # Inline create/rename form placeholder text. $1 = entry type ("file" or "folder")
+  prompt:
+    newName: "Enter $1 name"
+  # Confirmation dialogs surfaced before destructive actions
+  confirm:
+    # $1 = file name
+    deleteFile: "Delete \"$1\"? This cannot be undone."
+    # $1 = folder name
+    deleteFolder: "Delete \"$1\" and everything inside? This cannot be undone."
+  # Toast messages after a successful mutation
+  toast:
+    # $1 = type ("file" or "folder"), $2 = name
+    created: "$1 \"$2\" created"
+    # $1 = new name
+    renamed: "Renamed to \"$1\""
+    # $1 = deleted entry name
+    deleted: "Deleted \"$1\""
+    # $1 = pasted entry name
+    pasted: "Pasted \"$1\""
+    # $1 = original name, $2 = reason (e.g. "name already exists")
+    createFailed: "Couldn't create: $1 — $2"
+    renameFailed: "Couldn't rename: $1 — $2"
+    deleteFailed: "Couldn't delete: $1 — $2"
+    # $1 = source name, $2 = reason
+    pasteFailed: "Couldn't paste $1 — $2"
+    # $1 = source name — paste target was the source itself or a descendant of
+    # it (only relevant for cut/move, where this would either no-op or
+    # blow away the source mid-rename).
+    pasteSelf: "Can't paste \"$1\" into itself"
 
 # ─── Standalone user-permission page (entrypoints/user-permission) ───
 permission:
