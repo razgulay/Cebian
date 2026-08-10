@@ -848,8 +848,9 @@ vfs:
   unknownError: "未知錯誤"
   # 工作區目錄還在、但對應對話已被刪除。$1 = 短 id
   # 工作區目錄對應的對話已被刪除：目錄仍在磁碟，但已無法從任何對話存取。
-  # $1 = 短 id（UUID 前 8 位，即目錄名）。
-  unknownSession: "孤立工作區 · $1"
+  # 直接顯示目錄名作為標題，不加「孤立工作區」前綴——僅靠灰字 + tooltip 表達狀態。
+  # $1 = 短 id（目錄名前 8 位）。
+  unknownSession: "$1"
   unknownSessionTooltip: "已刪除對話留下的工作區目錄，可直接刪除。"
   untitledSession: "未命名對話"
   # $1 = 格式化後的日期

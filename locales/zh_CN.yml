@@ -849,8 +849,9 @@ vfs:
   unknownError: "未知错误"
   # 工作区目录还在、但对应会话已被删除。$1 = 短 id
   # 工作区目录对应的会话已被删除：目录仍在磁盘，但已无法从任何会话访问。
-  # $1 = 短 id（UUID 前 8 位，即目录名）。
-  unknownSession: "孤立工作区 · $1"
+  # 直接显示目录名作为标题，不加「孤立工作区」前缀——仅靠灰字 + tooltip 表达状态。
+  # $1 = 短 id（目录名前 8 位）。
+  unknownSession: "$1"
   unknownSessionTooltip: "已删除会话留下的工作区目录，可直接删除。"
   untitledSession: "未命名会话"
   # $1 = 格式化后的日期
