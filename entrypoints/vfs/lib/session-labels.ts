@@ -27,20 +27,31 @@ export async function resolveWorkspaceLabels(
  *  孤儿目录 → 「未知会话 · 短ID」、无日期。 */
 /** 工作区目录的列表项标签。已知会话 → 标题（空标题回落「未命名会话」）+ 最后活动日期 +
  *  完整 UUID（列表第二行以灰字展示，即真实目录名，便于区分同名会话 / 复制引用）；
- *  孤儿目录 → 直接展示完整目录名作为标题、无第二行。`isOrphan` 让 DirRow 给标题加
- *  tooltip 解释「这是已删除会话的残留目录」+ 用 muted 颜色与正常目录视觉区分。 */
+ *  孤儿目录 → 直接展示完整目录名作为标题；无 Dexie `updatedAt` 时回退到目录自身的
+ *  `mtimeMs`（文件系统最后修改时间）作为日期，给用户至少一个时间锚点。`isOrphan`
+ *  让 DirRow 给标题加 tooltip 解释「这是已删除会话的残留目录」+ 用 muted 颜色与正常
+ *  目录视觉区分。 */
 export function formatWorkspaceEntry(
   uuid: string,
   row: SessionLabelRow | undefined,
+  fallbackMtimeMs?: number,
 ): { title: string; dateLabel: string; uuid: string; isOrphan: boolean } {
   if (!row) {
+    // Title is the full directory name (not the 8-char shortId) — the user
+    // only sees this short snippet per row and the short id "baobinht" is
+    // less informative than "baobinththuan". uuid stays empty so we don't
+    // re-render the same string on a redundant second line.
+    //
+    // Date fallback: orphan dirs have no Dexie row to derive updatedAt from.
+    // Show the directory's filesystem mtime so the row isn't completely
+    // blank in the date column — users can at least tell which orphan is
+    // stale vs recent and decide what to delete.
+    const mtime = typeof fallbackMtimeMs === 'number' && Number.isFinite(fallbackMtimeMs)
+      ? fallbackMtimeMs
+      : null;
     return {
-      // Title is the full directory name (not the 8-char shortId) — the user
-      // only sees this short snippet per row and the short id "baobinht" is
-      // less informative than "baobinththuan". uuid stays empty so we don't
-      // re-render the same string on a redundant second line.
       title: uuid,
-      dateLabel: '',
+      dateLabel: mtime !== null ? formatDate(mtime) : '',
       uuid: '',
       isOrphan: true,
     };

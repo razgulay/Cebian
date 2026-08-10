@@ -106,12 +106,23 @@ export function VfsExplorer() {
         if (st.isDirectory()) {
           const names = await vfs.readdir(p);
           if (myId !== loadIdRef.current) return;
+          // 工作区根：收集每个子目录的 mtime——孤儿目录没有会话表里的
+          // updatedAt，用文件系统 mtime 作为「最后活动」fallback。其他路径
+          // 不需要 mtime，忽略。
+          const collectMtime = isWorkspacesRoot(p);
           const entries = await Promise.all(
             names.map(async (name) => {
               const childPath = p === '/' ? `/${name}` : `${p}/${name}`;
               try {
                 const childStat = await vfs.stat(childPath);
-                return { name, isDir: childStat.isDirectory(), size: childStat.size };
+                let mtimeMs: number | undefined;
+                if (collectMtime && childStat.isDirectory()) {
+                  // lightning-fs Stat exposes mtimeMs (verified in the bundle).
+                  // Cast keeps the lightning-fs type ↔ DOM-lib stat shape
+                  // mismatch local — `mtimeMs` is the documented field.
+                  mtimeMs = (childStat as { mtimeMs?: number }).mtimeMs;
+                }
+                return { name, isDir: childStat.isDirectory(), size: childStat.size, mtimeMs };
               } catch {
                 return { name, isDir: false, size: 0 };
               }

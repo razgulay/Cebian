@@ -149,7 +149,7 @@ export function DirView({
             const FileGlyph = pickFileIcon(ext);
             // 工作区根下的目录用会话标签替代裸 UUID 显示。
             const wsLabel = workspaceLabels && entry.isDir
-              ? formatWorkspaceEntry(entry.name, workspaceLabels.get(entry.name))
+              ? formatWorkspaceEntry(entry.name, workspaceLabels.get(entry.name), entry.mtimeMs)
               : null;
             const displayName = wsLabel ? wsLabel.title : entry.name;
             const isRenaming = renaming === entry.name;
