@@ -40,10 +40,14 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
 
   const shadow = host.attachShadow({ mode: 'closed' });
 
-  // Inject crosshair cursor into page (removed on cleanup)
+  // Inject crosshair cursor into page (removed on cleanup).
+  // Use the `html` selector with `!important` to win against any page-level
+  // cursor rules — `html` has higher specificity than `*` (sort of), and
+  // `!important` on the most-specific selector is the strongest override
+  // short of an inline style on the same element.
   const cursorStyle = document.createElement('style');
   cursorStyle.id = 'cebian-picker-cursor';
-  cursorStyle.textContent = '*, *::before, *::after { cursor: crosshair !important; }';
+  cursorStyle.textContent = 'html, html *, html *::before, html *::after { cursor: crosshair !important; }';
   document.head.appendChild(cursorStyle);
 
   // ── Shadow DOM UI ──
@@ -512,13 +516,51 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
       cleanupPicker();
     }
 
+    /** Wheel handler — drives page scroll programmatically during drag.
+     *  We intentionally do NOT rely on the browser's default wheel → scroll
+     *  behavior because:
+     *  1. Pages that registered wheel listeners with `passive: false` and
+     *     called `preventDefault()` (e.g. maps, scroll-jacking sites) will
+     *     eat the scroll entirely — auto-scroll at the viewport edges becomes
+     *     the only way to drag past the fold on those pages.
+     *  2. The marquee overlay sits at z-index above all page content, so
+     *     wheel events would normally be captured before reaching the page
+     *     anyway. Calling scrollBy ourselves keeps the behavior identical
+     *     across pages, regardless of their wheel handler strategy.
+     *  deltaMode 0 = pixels, 1 = lines, 2 = pages. We normalize to pixels
+     *  using a sensible default line height (~16px). */
+    function onRegionWheel(e: WheelEvent) {
+      if (!dragStart) return; // only intercept during drag
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      let dy = e.deltaY;
+      let dx = e.deltaX;
+      const LINE_PX = 16;
+      const PAGE_PX = window.innerHeight * 0.9;
+      if (e.deltaMode === 1) { dy *= LINE_PX; dx *= LINE_PX; }
+      else if (e.deltaMode === 2) { dy *= PAGE_PX; dx *= PAGE_PX; }
+      if (dx !== 0 || dy !== 0) {
+        window.scrollBy(dx, dy);
+        // Update marquee to reflect the new viewport position.
+        if (lastCursor) {
+          dragEnd = { x: lastCursor.x + window.scrollX, y: lastCursor.y + window.scrollY };
+        }
+        renderRegionBox();
+      }
+    }
+
     // Region mode uses mousedown/move/up instead of click. The overlay still
-    // absorbs the events so page-level handlers don't see them. Wheel events
-    // are NOT blocked here — the user needs the scroll wheel to extend the
-    // selection past the current viewport.
+    // absorbs the events so page-level handlers don't see them.
+    //
+    // Wheel events: during an active drag we drive scroll programmatically
+    // (onRegionWheel) so the user can extend the selection past the fold
+    // even on pages that block native scroll. Outside a drag, wheel passes
+    // through naturally (no listener attached) so the user can scroll freely
+    // before starting a selection.
     overlay.addEventListener('mousedown', onRegionMouseDown);
     overlay.addEventListener('mousemove', onRegionMouseMove);
     overlay.addEventListener('mouseup', onRegionMouseUp);
+    overlay.addEventListener('wheel', onRegionWheel, { passive: false });
     overlay.addEventListener('contextmenu', onBlockEvent);
     overlay.addEventListener('touchmove', onBlockEvent, { passive: false });
     // Replace the click handler that's still attached from click mode setup.
