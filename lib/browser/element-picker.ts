@@ -35,20 +35,31 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
   // known limitation of any shadow-DOM-based inspector.
   const host = document.createElement('div');
   host.id = 'cebian-picker-host';
-  host.style.cssText = 'all:initial !important;position:fixed !important;inset:0 !important;pointer-events:auto !important;z-index:2147483647 !important;';
+  host.style.cssText = 'all:initial !important;position:fixed !important;inset:0 !important;pointer-events:auto !important;z-index:2147483647 !important;cursor:crosshair !important;';
   document.documentElement.appendChild(host);
 
   const shadow = host.attachShadow({ mode: 'closed' });
 
-  // Inject crosshair cursor into page (removed on cleanup).
-  // Use the `html` selector with `!important` to win against any page-level
-  // cursor rules — `html` has higher specificity than `*` (sort of), and
-  // `!important` on the most-specific selector is the strongest override
-  // short of an inline style on the same element.
+  // Inject crosshair cursor into the page (removed on cleanup).
+  //
+  // CSS cascade priority, from weakest to strongest:
+  //   1. stylesheet rule (e.g. `*, html * { cursor: crosshair !important }`)
+  //   2. inline style
+  //   3. inline style with !important
+  //   4. inline style with !important on document.documentElement
+  //
+  // Some pages set cursor via inline `style="cursor: ... !important"` on
+  // body or html, which beats descendant selectors in (1). And pages that
+  // use `cursor: url(...)` with `!important` win by specificity alone in (1).
+  // To bypass both, we apply inline `cursor: crosshair !important` directly
+  // on `documentElement` — this is the strongest cursor override the page
+  // allows short of OS-level scheme overrides.
   const cursorStyle = document.createElement('style');
   cursorStyle.id = 'cebian-picker-cursor';
   cursorStyle.textContent = 'html, html *, html *::before, html *::after { cursor: crosshair !important; }';
   document.head.appendChild(cursorStyle);
+  // Belt-and-suspenders: also set inline on the root.
+  document.documentElement.style.setProperty('cursor', 'crosshair', 'important');
 
   // ── Shadow DOM UI ──
   const style = document.createElement('style');
@@ -578,6 +589,7 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
       scrollRafId = null;
     }
     try { cursorStyle.remove(); } catch { /* detached */ }
+    try { document.documentElement.style.removeProperty('cursor'); } catch { /* detached */ }
     try { host.remove(); } catch { /* detached */ }
   }
 
