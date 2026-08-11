@@ -516,6 +516,30 @@ chat:
     voiceAudioCapture: "No microphone was found, or it couldn't be accessed."
     voiceNetworkFailed: "Couldn't reach the speech recognition service. Check your network and try again."
     voiceFailed: "Voice input failed. Please try again."
+    mentionAdd: "Add context"
+    removeMentionChip: "Remove mention"
+    mentionChips: "Mentions"
+    sectionSkills: "Skills"
+    sectionPrompts: "Prompts"
+    sectionFolders: "Folders"
+    sectionTabs: "Add tabs"
+    noSkills: "No skills yet — create one from AI config"
+    noPromptsMention: "No prompts yet — create one from AI config"
+    noFolders: "No folders available"
+    # $1 = mention name
+    mentionReadFailed: "Couldn't read mention — dropped: $1"
+    tabsNotReady: "Tab mention ships in a follow-up"
+  mention:
+    builtinSkill:
+      funFactsName: "Fun facts"
+      funFactsBody: |
+        Sprinkle 1-2 surprising or delightful facts into every reply — historical trivia, science oddities, language etymology, etc. Keep them short (one sentence each). Always cite the source if you know it; otherwise hedge with "apparently" / "reportedly". Don't force facts into serious or emotional requests — read the room.
+      hypeItUpName: "Hype it up!"
+      hypeItUpBody: |
+        Respond with high-energy enthusiasm. Use celebratory emojis sparingly (1-3 max), exclamations, and punchy short sentences. Mirror the user's excitement level — if they're chill, dial back to ~60% hype; if they're hyped, match them. Avoid corporate-sounding cheerfulness. Be genuine, be excited, be YOU on a great day.
+      explainInCharacterName: "Explain something in character"
+      explainInCharacterBody: |
+        Adopt a memorable persona for the explanation — a grizzled sea captain, a 1920s noir detective, a time-traveling historian, etc. Pick the persona that best fits the topic. Stay in character throughout: vocabulary, metaphors, mannerisms, all consistent. Briefly introduce the character on first use ("Right then, gather 'round — Captain Marlow here…"), then commit fully. End the explanation in-character too.
   attachments:
     image: "Image"
     screenshot: "Screenshot"

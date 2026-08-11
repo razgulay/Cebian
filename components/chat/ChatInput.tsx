@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,7 @@ import { ModelSelector } from '@/components/chat/ModelSelector';
 import { ThinkingLevelSelector } from '@/components/chat/ThinkingLevelSelector';
 import { RecordButton } from '@/components/chat/RecordButton';
 import { MicButton } from '@/components/chat/MicButton';
+import { MentionPopover } from '@/components/chat/MentionPopover';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
@@ -26,6 +27,7 @@ import {
   isImageFile, isTextFile, isPdfFile,
   type Attachment,
 } from '@/lib/agent/attachments';
+import { resolveMentions, type MentionChip, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { useRecorder } from '@/hooks/useRecorder';
@@ -105,6 +107,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // visual hierarchy they asked for without forcing a contentEditable
   // refactor. Each chip is removed individually via its X button.
   const [quoteChips, setQuoteChips] = useState<{ id: string; text: string }[]>([]);
+  // Mention chips: prompt/skill/VFS-directory references attached via the
+  // [+] button. Like Quote chips, the chip is the source of truth — the
+  // textarea stays clean and the chip's content ships to the LLM at send
+  // time via the mention resolver (see handleSend). Each chip is removed
+  // individually via its X button.
+  const [mentions, setMentions] = useState<MentionChip[]>([]);
   // Mirror of `attachments` for synchronous reads after an await. The
   // recorder's `subscribeSession` callback fires synchronously when the
   // BG delivers a session, but React state isn't flushed by the time
@@ -359,7 +367,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSlash]);
 
-  const canSend = value.trim().length > 0 || quoteChips.length > 0;
+  const canSend = value.trim().length > 0 || quoteChips.length > 0 || mentions.length > 0;
 
   // Recorder integration. The captured session lands in attachments via
   // the channel subscription below — NOT via `recorder.stop()`'s return
@@ -499,11 +507,44 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         text = text.length > 0 ? `${quoted}\n\n${text}` : quoted;
       }
 
+      // Resolve mention chips (prompt/skill/dir) into attachments. Each chip
+      // is a self-contained reference; the resolver reads the VFS file (or
+      // uses the built-in body for starter skills) and produces a typed
+      // attachment. Chips whose file can't be read are silently dropped and
+      // a single aggregated toast warns the user. The resolved attachments
+      // ride along with image/file/element/recording attachments inside
+      // `<attachments>…</attachments>`.
+      const mentionChips = mentionsRef.current;
+      const resolvedMentions: ResolvedMentionAttachment[] = [];
+      const failedNames: string[] = [];
+      if (mentionChips.length > 0) {
+        const settled = await Promise.allSettled(
+          mentionChips.map((chip) => resolveMentions([chip]).then((r) => ({ chip, r }))),
+        );
+        for (let i = 0; i < settled.length; i++) {
+          const outcome = settled[i];
+          if (outcome.status === 'rejected' || outcome.value.r.length === 0) {
+            const chip = mentionChips[i];
+            failedNames.push(chip.kind === 'vfs-dir' ? chip.label : chip.name);
+          } else {
+            resolvedMentions.push(outcome.value.r[0]);
+          }
+        }
+        if (failedNames.length > 0) {
+          toast.warning(
+            t('chat.composer.mentionReadFailed', [failedNames.join(', ')]),
+          );
+        }
+      }
+
       if (recorder.isOwner) {
         // Pre-flight cap check: refuse to send if attachments are already
         // full — otherwise the about-to-be-delivered recording would be
         // silently dropped by the session subscription's overflow guard.
-        if (attachmentsRef.current.length >= MAX_ATTACHMENT_COUNT) {
+        // Count mentions toward the same cap — they're attachments too.
+        const totalAttachmentCount =
+          attachmentsRef.current.length + resolvedMentions.length;
+        if (totalAttachmentCount > MAX_ATTACHMENT_COUNT) {
           debugLog.info('ui', 'send:rejected', { reason: 'max_attachments' });
           toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
           return;
@@ -515,7 +556,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
       if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
 
-      const outgoing = attachmentsRef.current;
+      const outgoing: Attachment[] = [
+        ...attachmentsRef.current,
+        ...resolvedMentions,
+      ];
       const result = await onSend(
         text,
         outgoing.length > 0 ? outgoing : undefined,
@@ -533,6 +577,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       setDraft('');
       setQuoteChips([]);
       quoteChipsRef.current = [];
+      setMentions([]);
+      mentionsRef.current = [];
     } finally {
       isDispatchingRef.current = false;
       setIsDispatching(false);
@@ -554,6 +600,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setDraft('');
     setQuoteChips([]);
     quoteChipsRef.current = [];
+    setMentions([]);
+    mentionsRef.current = [];
     interimSuffixRef.current = '';
     speech.stop();
   }, [sessionId, speech.stop]);
@@ -714,6 +762,31 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // chips list drives the outgoing message at send-time, so we need to
   // read the post-update value without waiting for a React flush.
   const quoteChipsRef = useRef<{ id: string; text: string }[]>([]);
+
+  // Mirror of `mentions` for the same reason — handleSend reads from the
+  // ref to avoid a stale state read after async attachment building.
+  const mentionsRef = useRef<MentionChip[]>([]);
+
+  // Add a mention chip picked from the MentionPopover. The popover passes
+  // the chip directly via onSelect; we dedupe by chip-id (the popover
+  // stamps a unique id per pick so duplicates within one popover open are
+  // impossible, but cross-open duplicates are valid — e.g. two copies of
+  // the same prompt body).
+  const addMention = useCallback((chip: MentionChip) => {
+    setMentions((prev) => {
+      const next = [...prev, chip];
+      mentionsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const removeMention = useCallback((id: string) => {
+    setMentions((prev) => {
+      const next = prev.filter((m) => m.id !== id);
+      mentionsRef.current = next;
+      return next;
+    });
+  }, []);
 
   // Records a quote as a chip above the textarea (the chip becomes the
   // source of truth — the textarea stays clean). The chip text is what
@@ -1441,6 +1514,44 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
         )}
 
+        {/* Mention chips — compact pills for prompt/skill/VFS-directory
+            references attached via the [+] button. Each chip shows only the
+            reference name (the content lives in VFS / locales and is shipped
+            to the LLM at send-time by the resolver). Removing a chip is
+            purely visual; it just deletes the chip and prevents the content
+            from being sent. */}
+        {mentions.length > 0 && (
+          <div
+            role="list"
+            aria-label={t('chat.composer.mentionChips')}
+            className="flex flex-wrap gap-1 px-1.5 pt-1.5 pb-0 border-b border-border/40"
+          >
+            {mentions.map((m) => (
+              <div
+                key={m.id}
+                role="listitem"
+                className="group flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-[0.7rem] leading-snug text-primary"
+              >
+                {m.kind === 'prompt' && <FileText size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'skill' && <Sparkles size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'vfs-dir' && <Folder size={11} className="shrink-0 opacity-70" />}
+                <span className="truncate max-w-32">
+                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'skill' ? m.name : m.label}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeMention(m.id)}
+                  title={t('chat.composer.removeMentionChip')}
+                  aria-label={t('chat.composer.removeMentionChip')}
+                  className="shrink-0 -mr-0.5 p-0.5 rounded text-primary/60 hover:text-primary hover:bg-primary/20 transition-colors"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Textarea */}
         <textarea
           ref={textareaRef}
@@ -1474,6 +1585,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
 
           <div className="flex items-center gap-1">
+            <MentionPopover disabled={isDispatching} onSelect={addMention} />
             {speech.supported && (
               <MicButton
                 state={speech.state}

@@ -1,5 +1,5 @@
 import type { ImageContent } from '@earendil-works/pi-ai';
-import { escapeXml } from '@/lib/utils';
+import { escapeXml, formatBytes } from '@/lib/utils';
 import { RECORDING_SCHEMA_COMMENT } from '@/lib/recorder/schema-doc';
 
 // ─── Attachment types ───
@@ -79,7 +79,51 @@ export interface RecordingAttachment {
   truncatedAttachment?: boolean;
 }
 
-export type Attachment = ImageAttachment | TextFileAttachment | PdfTextAttachment | ElementAttachment | RecordingAttachment;
+/** Mention of a user-defined prompt file (`~/.cebian/prompts/<name>.md`).
+ *  The full body is shipped to the LLM inside `<attached-prompt>`, so the
+ *  model sees the prompt as if the user had typed it in (minus any
+ *  `{{template}}` placeholders, which are NOT expanded here — the user
+ *  controls the chip, the chip is the source of truth). */
+export interface PromptMentionAttachment {
+  type: 'mention-prompt';
+  name: string;
+  body: string;
+  sourcePath: string;
+}
+
+/** Mention of a user skill (`~/.cebian/skills/<name>/SKILL.md`) or a
+ *  built-in starter skill shipped via locales. The full body is shipped
+ *  to the LLM inside `<attached-skill>` — the agent already has the skill
+ *  index in its system prompt, so the inline body simply confirms which
+ *  skill was selected and pins down its rules for this turn. */
+export interface SkillMentionAttachment {
+  type: 'mention-skill';
+  name: string;
+  body: string;
+  sourcePath: string;
+}
+
+/** Mention of a VFS directory. The LLM receives a one-level-deep listing
+ *  of children (file name + size; directory name + `/`) inside
+ *  `<attached-directory>`. The agent can `fs_read_file` any of the listed
+ *  files later if it needs the content — the listing is just a hint that
+ *  this folder is in scope for the request. */
+export interface DirectoryMentionAttachment {
+  type: 'mention-directory';
+  path: string;
+  label: string;
+  entries: { name: string; kind: 'file' | 'dir'; size?: number }[];
+}
+
+export type Attachment =
+  | ImageAttachment
+  | TextFileAttachment
+  | PdfTextAttachment
+  | ElementAttachment
+  | RecordingAttachment
+  | PromptMentionAttachment
+  | SkillMentionAttachment
+  | DirectoryMentionAttachment;
 
 /** MIME type for serialized recording JSON. Used for both the agent-prompt
  *  envelope and browser downloads of recording attachments. */
@@ -201,6 +245,34 @@ export function buildTextPrefix(attachments: Attachment[]): string {
       // parsing. Body is plain readable JSON for the agent (no base64).
       blocks.push(
         `<recording name="${escapeXml(a.name, { forAttribute: true })}" mime="${RECORDING_MIME}" event-count="${a.eventCount}" duration-ms="${a.durationMs}"${truncAttr}>\n${escapeXml(a.json)}\n</recording>`,
+      );
+    }
+
+    if (a.type === 'mention-prompt') {
+      // Body is escaped wholesale — prompt bodies can contain `<`, `>`, `&`,
+      // and arbitrary markdown the LLM must see verbatim.
+      blocks.push(
+        `<attached-prompt name="${escapeXml(a.name, { forAttribute: true })}" path="${escapeXml(a.sourcePath, { forAttribute: true })}">\n${escapeXml(a.body)}\n</attached-prompt>`,
+      );
+    }
+
+    if (a.type === 'mention-skill') {
+      blocks.push(
+        `<attached-skill name="${escapeXml(a.name, { forAttribute: true })}" path="${escapeXml(a.sourcePath, { forAttribute: true })}">\n${escapeXml(a.body)}\n</attached-skill>`,
+      );
+    }
+
+    if (a.type === 'mention-directory') {
+      // One-level listing: each child rendered on its own line with kind and
+      // optional size. Kept compact so a large directory doesn't blow the
+      // prompt budget — the agent can `fs_list` deeper if it needs to.
+      const lines = a.entries.map((e) => {
+        if (e.kind === 'dir') return `  - ${e.name}/`;
+        const size = typeof e.size === 'number' ? ` (${formatBytes(e.size)})` : '';
+        return `  - ${e.name}${size}`;
+      });
+      blocks.push(
+        `<attached-directory path="${escapeXml(a.path, { forAttribute: true })}" label="${escapeXml(a.label, { forAttribute: true })}" count="${a.entries.length}">\n${lines.join('\n')}\n</attached-directory>`,
       );
     }
   }

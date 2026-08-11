@@ -509,6 +509,30 @@ chat:
     voiceAudioCapture: "找不到麥克風，或無法存取。"
     voiceNetworkFailed: "語音辨識服務連線失敗，請檢查網路後重試。"
     voiceFailed: "語音輸入失敗，請重試。"
+    mentionAdd: "加入上下文"
+    removeMentionChip: "移除上下文"
+    mentionChips: "已引用的上下文"
+    sectionSkills: "技能"
+    sectionPrompts: "提示詞"
+    sectionFolders: "資料夾"
+    sectionTabs: "加入分頁"
+    noSkills: "尚無技能——請至 AI 設定中建立"
+    noPromptsMention: "尚無提示詞——請至 AI 設定中建立"
+    noFolders: "沒有可用的資料夾"
+    # $1 = 上下文名稱
+    mentionReadFailed: "無法讀取上下文——已略過：$1"
+    tabsNotReady: "分頁引用將於後續版本提供"
+  mention:
+    builtinSkill:
+      funFactsName: "趣味冷知識"
+      funFactsBody: |
+        每則回覆中點綴 1-2 條出人意料或令人會心一笑的冷知識——歷史軼聞、科學趣談、詞語掌故等。保持一句話長度。知道出處就引註；不知道就加上「據說」「相傳」等詞。嚴肅或情緒化的話題不要硬塞。
+      hypeItUpName: "氣氛拉滿！"
+      hypeItUpBody: |
+        用高能量、熱烈的語氣回應。節制使用慶祝 emoji（最多 1-3 個）、驚嘆號、簡潔短句。配合使用者情緒——對方冷靜就降到 60%，對方也嗨就跟上。避免「客服式」熱情。要真誠、要興奮、要拿出狀態最好的一天。
+      explainInCharacterName: "角色扮演講解"
+      explainInCharacterBody: |
+        為講解設定一個鮮明的角色——滄桑的老船長、一九二零年代黑色電影偵探、穿越時空的歷史學家等，挑最貼合主題的那個。始終保持角色一致：用詞、比喻、腔調全部到位。第一次出現時簡短介紹角色（「諸位且聽——老船長馬洛在此……」），然後全情投入，結尾也要留在角色裡。
   attachments:
     image: "圖片"
     screenshot: "螢幕截圖"

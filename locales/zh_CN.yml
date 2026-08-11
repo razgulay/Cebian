@@ -509,6 +509,30 @@ chat:
     voiceAudioCapture: "没有找到麦克风，或无法访问。"
     voiceNetworkFailed: "语音识别服务连接失败，请检查网络后重试。"
     voiceFailed: "语音输入失败，请重试。"
+    mentionAdd: "添加上下文"
+    removeMentionChip: "移除上下文"
+    mentionChips: "已引用的上下文"
+    sectionSkills: "技能"
+    sectionPrompts: "提示词"
+    sectionFolders: "文件夹"
+    sectionTabs: "添加标签页"
+    noSkills: "暂无技能——请到 AI 配置中创建"
+    noPromptsMention: "暂无提示词——请到 AI 配置中创建"
+    noFolders: "暂无可用文件夹"
+    # $1 = 上下文名称
+    mentionReadFailed: "无法读取上下文——已丢弃：$1"
+    tabsNotReady: "标签页引用将在后续版本提供"
+  mention:
+    builtinSkill:
+      funFactsName: "趣味冷知识"
+      funFactsBody: |
+        每条回复中点缀 1-2 条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
+      hypeItUpName: "气氛拉满！"
+      hypeItUpBody: |
+        用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到 60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
+      explainInCharacterName: "角色扮演讲解"
+      explainInCharacterBody: |
+        为讲解设定一个鲜明的角色——沧桑的老船长、二十年代黑色电影侦探、穿越时空的历史学家等，挑最贴合主题的那个。贯穿始终保持角色一致：用词、比喻、腔调全部到位。第一次出现时简短引入角色（"诸位且听——老船长马洛在此……"），然后全情投入，结尾也要留在角色里。
   attachments:
     image: "图片"
     screenshot: "截图"
