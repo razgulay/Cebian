@@ -525,7 +525,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           const outcome = settled[i];
           if (outcome.status === 'rejected' || outcome.value.r.length === 0) {
             const chip = mentionChips[i];
-            failedNames.push(chip.kind === 'vfs-dir' ? chip.label : chip.name);
+            const failedName = chip.kind === 'vfs-dir' || chip.kind === 'vfs-file'
+              ? chip.label
+              : chip.name;
+            failedNames.push(failedName);
           } else {
             resolvedMentions.push(outcome.value.r[0]);
           }
@@ -1535,8 +1538,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 {m.kind === 'prompt' && <FileText size={11} className="shrink-0 opacity-70" />}
                 {m.kind === 'skill' && <Sparkles size={11} className="shrink-0 opacity-70" />}
                 {m.kind === 'vfs-dir' && <Folder size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'vfs-file' && <FileText size={11} className="shrink-0 opacity-70" />}
                 <span className="truncate max-w-32">
-                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'skill' ? m.name : m.label}
+                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'vfs-file' ? m.label : m.kind === 'vfs-dir' ? m.label : m.name}
                 </span>
                 <button
                   type="button"

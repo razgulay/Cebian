@@ -115,6 +115,21 @@ export interface DirectoryMentionAttachment {
   entries: { name: string; kind: 'file' | 'dir'; size?: number }[];
 }
 
+/** Mention of a single VFS file. Resolved at send-time by reading the file
+ *  via `vfs.readFile`. The LLM receives the file's text content inside
+ *  `<attached-file>` (the same envelope used by regular file attachments),
+ *  so the agent can `fs_read_file` it again later if needed. Sized the
+ *  same as a regular text-file attachment — large files (over
+ *  `MAX_TEXT_FILE_SIZE`) get truncated to keep prompt budget in check. */
+export interface FileMentionAttachment {
+  type: 'mention-file';
+  name: string;
+  content: string;
+  sourcePath: string;
+  mimeType: string;
+  truncated: boolean;
+}
+
 export type Attachment =
   | ImageAttachment
   | TextFileAttachment
@@ -123,7 +138,8 @@ export type Attachment =
   | RecordingAttachment
   | PromptMentionAttachment
   | SkillMentionAttachment
-  | DirectoryMentionAttachment;
+  | DirectoryMentionAttachment
+  | FileMentionAttachment;
 
 /** MIME type for serialized recording JSON. Used for both the agent-prompt
  *  envelope and browser downloads of recording attachments. */
@@ -273,6 +289,15 @@ export function buildTextPrefix(attachments: Attachment[]): string {
       });
       blocks.push(
         `<attached-directory path="${escapeXml(a.path, { forAttribute: true })}" label="${escapeXml(a.label, { forAttribute: true })}" count="${a.entries.length}">\n${lines.join('\n')}\n</attached-directory>`,
+      );
+    }
+
+    if (a.type === 'mention-file') {
+      // Same envelope as regular file attachments so the agent can treat it
+      // identically. `truncated` flag tells the agent the body was cut off.
+      const truncAttr = a.truncated ? ' truncated="true"' : '';
+      blocks.push(
+        `<attached-file name="${escapeXml(a.name, { forAttribute: true })}" type="${escapeXml(a.mimeType, { forAttribute: true })}" path="${escapeXml(a.sourcePath, { forAttribute: true })}"${truncAttr}>\n${escapeXml(a.content)}\n</attached-file>`,
       );
     }
   }

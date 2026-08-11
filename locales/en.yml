@@ -526,6 +526,10 @@ chat:
     noSkills: "No skills yet — create one from AI config"
     noPromptsMention: "No prompts yet — create one from AI config"
     noFolders: "No folders available"
+    folderBack: "Back"
+    folderPin: "Mention this folder"
+    folderEmpty: "Empty folder"
+    loading: "Loading…"
     # $1 = mention name
     mentionReadFailed: "Couldn't read mention — dropped: $1"
     tabsNotReady: "Tab mention ships in a follow-up"

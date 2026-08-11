@@ -9,6 +9,7 @@ import { vfs } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import type {
   DirectoryMentionAttachment,
+  FileMentionAttachment,
   PromptMentionAttachment,
   SkillMentionAttachment,
 } from '@/lib/agent/attachments';
@@ -16,12 +17,14 @@ import type {
 export type MentionChip =
   | { kind: 'prompt'; id: string; name: string; fileName: string }
   | { kind: 'skill'; id: string; name: string; filePath: string; body: string; isBuiltIn: boolean }
-  | { kind: 'vfs-dir'; id: string; path: string; label: string };
+  | { kind: 'vfs-dir'; id: string; path: string; label: string }
+  | { kind: 'vfs-file'; id: string; path: string; label: string; size?: number };
 
 export type ResolvedMentionAttachment =
   | PromptMentionAttachment
   | SkillMentionAttachment
-  | DirectoryMentionAttachment;
+  | DirectoryMentionAttachment
+  | FileMentionAttachment;
 
 /** Read a UTF-8 VFS file as a string. lightning-fs returns either string
  *  (utf8) or Uint8Array depending on the encoding flag; normalize both. */
@@ -51,6 +54,37 @@ const MAX_INLINE_BODY = 100 * 1024;
 function truncateBody(body: string, cap = MAX_INLINE_BODY): string {
   if (body.length <= cap) return body;
   return body.slice(0, cap) + '\n…[truncated]';
+}
+
+/** Tiny extension → MIME map for the few kinds we actually send through
+ *  mention-file. Falls back to `text/plain` so the LLM still sees the
+ *  content even when the extension is unfamiliar — better than dropping
+ *  the file silently. */
+function guessMimeType(path: string): string {
+  const ext = path.toLowerCase().match(/\.([^./\\]+)$/)?.[1] ?? '';
+  switch (ext) {
+    case 'md':    return 'text/markdown';
+    case 'txt':   return 'text/plain';
+    case 'json':  return 'application/json';
+    case 'xml':   return 'application/xml';
+    case 'html':
+    case 'htm':   return 'text/html';
+    case 'css':   return 'text/css';
+    case 'js':
+    case 'mjs':
+    case 'cjs':   return 'application/javascript';
+    case 'ts':
+    case 'tsx':
+    case 'jsx':   return 'text/plain'; // not a real MIME — TSX isn't standard
+    case 'py':    return 'text/x-python';
+    case 'yaml':
+    case 'yml':   return 'application/yaml';
+    case 'csv':   return 'text/csv';
+    case 'log':   return 'text/plain';
+    case 'sh':
+    case 'bash':  return 'text/x-shellscript';
+    default:      return 'text/plain';
+  }
 }
 
 /** Resolve a single mention chip to an attachment. Returns null when the
@@ -114,6 +148,27 @@ export async function resolveMentionToAttachment(
         path: chip.path,
         label: chip.label,
         entries,
+      };
+    }
+
+    if (chip.kind === 'vfs-file') {
+      const raw = await readUtf8(chip.path);
+      // Heuristic: strip frontmatter if the file looks like markdown
+      // (starts with `---\n`). Frontmatter is YAML metadata, not content —
+      // sending it would confuse the LLM.
+      const looksMarkdown = raw.startsWith('---\n') || raw.startsWith('---\r\n');
+      const body = looksMarkdown
+        ? stripFrontmatter(raw)
+        : raw.trim();
+      const truncated = body.length > MAX_INLINE_BODY;
+      const content = truncated ? truncateBody(body) : body;
+      return {
+        type: 'mention-file',
+        name: chip.label.split('/').pop() ?? chip.label,
+        content,
+        sourcePath: chip.path,
+        mimeType: guessMimeType(chip.path),
+        truncated,
       };
     }
   } catch (err) {

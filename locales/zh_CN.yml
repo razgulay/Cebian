@@ -519,6 +519,10 @@ chat:
     noSkills: "暂无技能——请到 AI 配置中创建"
     noPromptsMention: "暂无提示词——请到 AI 配置中创建"
     noFolders: "暂无可用文件夹"
+    folderBack: "返回上一级"
+    folderPin: "引用此文件夹"
+    folderEmpty: "空文件夹"
+    loading: "加载中…"
     # $1 = 上下文名称
     mentionReadFailed: "无法读取上下文——已丢弃：$1"
     tabsNotReady: "标签页引用将在后续版本提供"

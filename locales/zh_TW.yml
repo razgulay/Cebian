@@ -519,6 +519,10 @@ chat:
     noSkills: "尚無技能——請至 AI 設定中建立"
     noPromptsMention: "尚無提示詞——請至 AI 設定中建立"
     noFolders: "沒有可用的資料夾"
+    folderBack: "返回上一層"
+    folderPin: "引用此資料夾"
+    folderEmpty: "空資料夾"
+    loading: "載入中…"
     # $1 = 上下文名稱
     mentionReadFailed: "無法讀取上下文——已略過：$1"
     tabsNotReady: "分頁引用將於後續版本提供"
