@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -112,6 +112,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // can read the post-stop attachment list without waiting for a render.
   const attachmentsRef = useRef<Attachment[]>([]);
   const [isPicking, setIsPicking] = useState(false);
+  // Region-pick mode is mutually exclusive with click-pick — the toggle
+  // buttons in the toolbar cancel the other when activated.
+  const [isPickingRegion, setIsPickingRegion] = useState(false);
   // History navigation: null = editing the current draft; otherwise points
   // into `userHistory`. `draft` stashes whatever the user had typed before
   // entering history mode so we can restore it on ↓-past-end.
@@ -814,6 +817,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       switch (result.status) {
         case 'ok': {
           const att = result.attachment;
+          // Click mode only ever returns ElementAttachment; defensive guard
+          // keeps the narrower field access legal under the union return type.
+          if (att.type !== 'element') break;
           // Deduplicate: same selector + same frameId
           const isDuplicate = attachments.some(
             (a) => a.type === 'element' && a.selector === att.selector && a.frameId === att.frameId,
@@ -846,6 +852,65 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       console.error('[Element Picker]', err);
     } finally {
       setIsPicking(false);
+      textareaRef.current?.focus();
+    }
+  };
+
+  // Region-pick handler: drag a rectangle on the page; release fires a real
+  // screenshot of the rectangle via the picker, returned as an ImageAttachment
+  // with `source: 'region-select'`. Mutually exclusive with click-pick — if
+  // the user has click-pick running, cancel it first.
+  const handlePickRegion = async () => {
+    if (isDispatchingRef.current) return;
+    if (isPickingRegion) {
+      cancelElementPicker();
+      return;
+    }
+    if (isPicking) cancelElementPicker();
+    if (!supportsImage) {
+      toast.warning(t('chat.composer.modelNoImage'));
+      return;
+    }
+    if (attachments.length >= MAX_ATTACHMENT_COUNT) {
+      toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
+      return;
+    }
+    setIsPickingRegion(true);
+    try {
+      const result = await startElementPicker({ mode: 'region' });
+      if (isDispatchingRef.current) return;
+      switch (result.status) {
+        case 'ok': {
+          if (result.attachment.type !== 'image') {
+            // Defensive — picker always returns an image in region mode.
+            return;
+          }
+          debugLog.info('ui', 'attachment:add', {
+            kind: 'region-select',
+            mime: result.attachment.mimeType,
+            size: result.attachment.data.length,
+          });
+          setAttachments((prev) => [...prev, result.attachment as Attachment]);
+          break;
+        }
+        case 'cancelled':
+          break;
+        case 'error':
+          if (result.reason === 'unsupported-page') {
+            toast.warning(t('chat.composer.elementPickUnsupported'));
+          } else if (result.reason === 'navigation') {
+            toast.warning(t('chat.composer.elementPickNavigated'));
+          } else {
+            toast.error(t('chat.composer.regionPickFailed'));
+            if (result.message) console.error('[Region Picker]', result.message);
+          }
+          break;
+      }
+    } catch (err) {
+      toast.error(t('chat.composer.regionPickFailed'));
+      console.error('[Region Picker]', err);
+    } finally {
+      setIsPickingRegion(false);
       textareaRef.current?.focus();
     }
   };
@@ -1171,6 +1236,16 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           >
             <MousePointer2 className="size-3.5" />
           </Button>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            title={isPickingRegion ? t('chat.composer.cancelRegionPick') : t('chat.composer.pickRegion')}
+            onClick={handlePickRegion}
+            disabled={isDispatching || !supportsImage}
+            className={`size-7 ${isPickingRegion ? 'bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary' : ''}`}
+          >
+            <Crop className="size-3.5" />
+          </Button>
           <RecordButton disabled={isDispatching} />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1232,15 +1307,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                     >
                       <img
                         src={`data:${att.mimeType};base64,${att.data}`}
-                        alt={att.name || t('chat.attachments.screenshot')}
+                        alt={att.name || (att.source === 'region-select' ? t('chat.attachments.region') : t('chat.attachments.screenshot'))}
                         className="h-3.5 w-5 rounded-sm object-cover cursor-pointer"
                         onClick={() => showDialog('image-preview', {
                           src: `data:${att.mimeType};base64,${att.data}`,
-                          alt: att.name || t('chat.attachments.screenshot'),
+                          alt: att.name || (att.source === 'region-select' ? t('chat.attachments.region') : t('chat.attachments.screenshot')),
                         })}
                       />
                       <span className="truncate max-w-16">
-                        {abbreviateName(att.name || (att.source === 'screenshot' ? t('chat.attachments.screenshot') : t('chat.attachments.image')))}
+                        {abbreviateName(att.name || (att.source === 'screenshot'
+                          ? t('chat.attachments.screenshot')
+                          : att.source === 'region-select'
+                          ? t('chat.attachments.region')
+                          : t('chat.attachments.image')))}
                       </span>
                       <button
                         className="opacity-60 hover:opacity-100 p-0.5 rounded-sm hover:bg-foreground/10 cursor-pointer"

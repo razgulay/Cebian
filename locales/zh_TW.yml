@@ -464,6 +464,9 @@ chat:
     placeholder: "輸入 / 查看命令…"
     pickElement: "選擇元素"
     cancelPick: "取消選擇"
+    pickRegion: "裁切區域"
+    cancelRegionPick: "取消裁切"
+    regionPickFailed: "區域截圖失敗"
     openStorage: "檔案系統"
     screenshot: "螢幕截圖"
     uploadFile: "上傳檔案"
@@ -509,6 +512,7 @@ chat:
   attachments:
     image: "圖片"
     screenshot: "螢幕截圖"
+    region: "區域"
     imageAlt: "附件圖片"
     # $1 = 事件數量, $2 = 時長 (M:SS)
     recordingMeta: "$1 個事件 · $2"

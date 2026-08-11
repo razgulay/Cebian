@@ -6,7 +6,12 @@ import { RECORDING_SCHEMA_COMMENT } from '@/lib/recorder/schema-doc';
 
 export interface ImageAttachment {
   type: 'image';
-  source: 'screenshot' | 'upload' | 'paste';
+  /** How the image was produced.
+   *  - 'screenshot'    — full viewport via the chat toolbar Camera button
+   *  - 'upload'        — file picked from disk
+   *  - 'paste'         — pasted from clipboard
+   *  - 'region-select' — drag-to-crop rectangle from the region picker */
+  source: 'screenshot' | 'upload' | 'paste' | 'region-select';
   data: string;          // base64 without data: prefix
   mimeType: string;
   name?: string;
