@@ -18,25 +18,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## 1.4.2 - 2026-08-11
+
 ### 变更 / Changed
 
-- 升级核心 AI 引擎 pi-ai / pi-agent-core 至 0.80.10，跟进上游模型目录更新（新增 Kimi K3 系列可选模型、调整 xAI/Grok 目录），并带来一批服务商健壮性修复（Kimi、Cloudflare、OpenAI Codex 等）
+- 升级核心 AI 引擎 pi-ai / pi-agent-core 至 0.84.1，跟进上游模型目录更新（新增 Claude Opus 5、Kimi K3 系列与 Qwen Token Plan Individual 等可选模型，调整 xAI/Grok 目录，思考档位收窄为服务商已验证支持的档位），并带来一批服务商健壮性修复：OAuth 登录与刷新现在能正确响应取消且不会因请求卡住而长期占用凭证锁，工具参数的可空联合类型不再把 `null` 错转成其它值，同时修复 Anthropic 首个内容块丢失、Google / Gemini 工具调用回放、OpenAI Codex 跨账号复用连接等问题
 - 思考档选择器现在按当前模型动态显示它真正支持的档位：不支持的档位不再出现（如无法关闭思考的模型不再显示「关闭」），支持的模型会多出「极高 / 最大」两档；已选档位超过所换模型上限时会自动夹到该模型的可用档并按此发送，让显示与实际生效保持一致
 
-- Upgraded the core AI engine (pi-ai / pi-agent-core) to 0.80.10, picking up upstream model-catalog refreshes (new selectable Kimi K3 models and an adjusted xAI/Grok catalog) and a batch of provider robustness fixes (Kimi, Cloudflare, OpenAI Codex, etc.)
+- Upgraded the core AI engine (pi-ai / pi-agent-core) to 0.84.1, picking up upstream model-catalog refreshes (new selectable Claude Opus 5, Kimi K3, and Qwen Token Plan Individual models, an adjusted xAI/Grok catalog, and thinking levels narrowed to those the provider has verified) and a batch of provider robustness fixes: OAuth login and refresh now honor cancellation without stalled requests holding the credential lock indefinitely, nullable tool-argument unions no longer coerce `null` into another value, and Anthropic initial content blocks, Google/Gemini tool-call replay, and OpenAI Codex cross-account connection reuse are handled correctly
 - The thinking-level selector now adapts to the current model, showing only the levels it actually supports — unsupported ones no longer appear (e.g. a model that can't turn thinking off no longer shows "Off"), and models that support them gain "Extra High" and "Max"; a chosen level that exceeds a newly selected model's ceiling is clamped to that model's available range and sent accordingly, so what you see matches what runs
 
 ### 修复 / Fixed
 
 - 录制结束后不再把完整录制内容（含页面 URL、输入值与操作轨迹）打印到浏览器控制台，避免敏感信息进入日志
+- 加固了页面内容注入提示词结构的防护：网页标题、URL、页面元信息与选中文本中伪造的 `<memories>`、`<user_profile>` 结构标签此前不会被清除，可能让 AI 把网页伪造的内容误当作你的记忆或个人档案；现在会一并剥除
 - 修复 AI 在同一轮里连续弹出两个提问表单时、后一个会顶掉前一个的问题；现在这类提问会依次逐个进行
 - 修复在设置的文件编辑器里切换文件时、上一个文件在自动保存间隔内的未保存改动会丢失的问题；现在切走前会先把待存内容落盘
 - 修复部分对话反复报错「Cannot read properties of null (reading 'length')」、导致无法继续发送的问题：个别模型返回或旧版本遗留的历史消息可能带上非法的空字段，现在会在发送前自动规整，不再整轮崩溃 ([#43](https://github.com/maotoumao/Cebian/issues/43))
+- 修复记忆整理在「指定了整理专用模型、但该模型或其服务商后来被删除」时永久不再运行的问题；由于自动整理是后台静默任务，此前这种情况没有任何提示。现在会退回使用当前对话模型
+- 修复大型会话备份恢复期间后台休眠可能中断分块缓冲或数据库写入的问题；恢复过程现在会持续保活，并拒绝重复提交同一批恢复数据
 
 - A finished recording no longer dumps its full contents (page URLs, typed values, and action traces) to the browser console, keeping sensitive data out of logs
+- Hardened the defense against web pages injecting prompt structure: forged `<memories>` and `<user_profile>` tags in page titles, URLs, page metadata, and selected text were previously left intact, which could make the assistant treat page-supplied content as your memories or profile; they are now stripped as well
 - Fixed a case where the assistant popping up two question forms in the same turn would cancel the first; such prompts now run one at a time
 - Fixed unsaved edits to the previous file being lost when switching files in the settings file editor within the auto-save window; pending changes are now flushed before switching away
 - Fixed conversations repeatedly failing to send with "Cannot read properties of null (reading 'length')": certain model responses or history left over from older versions could carry an invalid empty field on a message, which is now normalized before sending so the turn no longer crashes ([#43](https://github.com/maotoumao/Cebian/issues/43))
+- Fixed memory organization silently never running again once its dedicated model — or that model's provider — had been deleted; because automatic organization is a background task, this failure was invisible. It now falls back to the current chat model
+- Fixed background suspension interrupting chunk buffering or database writes during large session-backup restores; restore operations now stay alive until completion and reject duplicate submissions of the same restore batch
 
 ## 1.4.1 - 2026-07-14
 

@@ -24,7 +24,7 @@ import {
   type ApplySessionsResult,
 } from '@/lib/backup/sources/sessions';
 import { toSessionRecord, isValidSessionLike, type SessionRecord, type SessionRecordLike } from '@/lib/persistence/db';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
 
 /** 统一把异步结果包成响应信封发回，错误转成可读字符串（页面侧据此重新抛出）。 */
 function respond<T>(
@@ -62,6 +62,8 @@ interface ApplyBuffer {
 const APPLY_BUFFER_TTL_MS = 60_000;
 
 const applyBuffers = new Map<string, ApplyBuffer>();
+const committingNonces = new Set<string>();
+const consumedNonces = new Set<string>();
 
 /** 丢弃某 nonce 的缓冲并清掉其 TTL 计时器（commit 成功、abort、或超时时调用）。 */
 function dropBuffer(nonce: string): void {
@@ -69,6 +71,16 @@ function dropBuffer(nonce: string): void {
   if (!buf) return;
   clearTimeout(buf.timer);
   applyBuffers.delete(nonce);
+  releaseKeepAlive();
+}
+
+/** 原子取走待提交缓冲并停掉 TTL。缓冲持有的 keepalive token 由 commit 的 finally 释放。 */
+function takeBuffer(nonce: string): ApplyBuffer | undefined {
+  const buf = applyBuffers.get(nonce);
+  if (!buf) return undefined;
+  clearTimeout(buf.timer);
+  applyBuffers.delete(nonce);
+  return buf;
 }
 
 /** 取得（或新建）某 nonce 的缓冲，并重置其 TTL 计时器。每收到一个 chunk 都刷新存活窗口，
@@ -80,17 +92,9 @@ function touchBuffer(nonce: string): ApplyBuffer {
   } else {
     buf = { records: [], timer: undefined as unknown as ReturnType<typeof setTimeout> };
     applyBuffers.set(nonce, buf);
+    acquireKeepAlive();
   }
-  buf.timer = setTimeout(() => {
-    // Capture the dropped record count before tearing the buffer down.
-    // The TTL card fires when a chunk-sender silently stops mid-restore
-    // (page crashed, tab closed, network died); the count tells the
-    // user roughly how much data they lost.
-    const dropped = applyBuffers.get(nonce);
-    const droppedSeqs = dropped?.records.length ?? 0;
-    debugLog.warn('backup', 'backup:buffer:ttl_drop', { droppedSeqs });
-    dropBuffer(nonce);
-  }, APPLY_BUFFER_TTL_MS);
+  buf.timer = setTimeout(() => dropBuffer(nonce), APPLY_BUFFER_TTL_MS);
   return buf;
 }
 
@@ -114,22 +118,7 @@ export function registerBackupHandler(): void {
 
     // flush：把在途节流写刷落库，供页面随后直读 Dexie 采集。无 payload、无返回值。
     if (msg.type === BACKUP_FLUSH_SESSIONS) {
-      return respond<void>(async () => {
-        const startedAt = performance.now();
-        debugLog.info('backup', 'backup:flush:start', {});
-        let caught: unknown = undefined;
-        try {
-          await sessionStore.flushAll();
-        } catch (e) {
-          caught = e;
-          throw e;
-        } finally {
-          debugLog.info('backup', 'backup:flush:done', {
-            size: null,
-            durationMs: Math.round(performance.now() - startedAt),
-          });
-        }
-      }, sendResponse);
+      return respond<void>(() => sessionStore.flushAll(), sendResponse);
     }
 
     // chunk：校验并规整这一批 records，累积进对应 nonce 的缓冲。逐条 isValidSessionLike
@@ -143,9 +132,14 @@ export function registerBackupHandler(): void {
         if (!Array.isArray(msg.records)) {
           throw new Error('applyChunk: records must be an array');
         }
-        debugLog.info('backup', 'backup:chunk:received', { seq: msg.records.length });
         if (!msg.records.every(isValidSessionLike)) {
           throw new Error('applyChunk: malformed session record in payload');
+        }
+        if (committingNonces.has(msg.nonce)) {
+          throw new Error('applyChunk: nonce is already committing');
+        }
+        if (consumedNonces.has(msg.nonce)) {
+          throw new Error('applyChunk: nonce has already been consumed');
         }
         const buf = touchBuffer(msg.nonce);
         for (const r of msg.records as SessionRecordLike[]) {
@@ -165,9 +159,19 @@ export function registerBackupHandler(): void {
         if (typeof msg.expectedCount !== 'number' || !Number.isInteger(msg.expectedCount) || msg.expectedCount < 0) {
           throw new Error(`applyCommit: invalid expectedCount ${String(msg.expectedCount)}`);
         }
+        if (committingNonces.has(msg.nonce)) {
+          throw new Error('applyCommit: nonce is already committing');
+        }
+        if (consumedNonces.has(msg.nonce)) {
+          throw new Error('applyCommit: nonce has already been consumed');
+        }
         // 空恢复（expectedCount === 0）时页面不发任何 chunk，故无缓冲——这是合法的：
         // 替换模式下用空集 applyAll 会清空本地会话。非空却无缓冲才是错误（过期 / 已提交）。
-        const buf = applyBuffers.get(msg.nonce);
+        committingNonces.add(msg.nonce);
+        // SW 重启会自然清空集合；同一生命周期内永久保留，避免旧空 replace commit 被重放。
+        consumedNonces.add(msg.nonce);
+        const buf = takeBuffer(msg.nonce);
+        acquireKeepAlive();
         try {
           if (msg.strategy !== 'merge' && msg.strategy !== 'replace') {
             throw new Error(`applyCommit: invalid strategy ${String(msg.strategy)}`);
@@ -178,7 +182,6 @@ export function registerBackupHandler(): void {
             }
             return await sessionStore.applyAll([], msg.strategy);
           }
-          debugLog.info('backup', 'backup:commit:applied', { count: buf.records.length });
           if (buf.records.length !== msg.expectedCount) {
             throw new Error(
               `applyCommit: expected ${msg.expectedCount} records but buffered ${buf.records.length}`,
@@ -186,8 +189,11 @@ export function registerBackupHandler(): void {
           }
           return await sessionStore.applyAll(buf.records, msg.strategy);
         } finally {
-          // 仅在确有缓冲时清理（空恢复路径压根没建缓冲）。成功失败都丢弃。
-          if (buf) dropBuffer(msg.nonce);
+          // takeBuffer 已把缓冲移出共享表；这里只释放它持有的 token，不按 nonce 再查表，
+          // 避免误伤等待期间同名的新缓冲。
+          if (buf) releaseKeepAlive();
+          releaseKeepAlive();
+          committingNonces.delete(msg.nonce);
         }
       }, sendResponse);
     }
@@ -198,7 +204,6 @@ export function registerBackupHandler(): void {
       if (typeof msg.nonce !== 'string' || msg.nonce === '') {
         throw new Error('applyAbort: missing nonce');
       }
-      debugLog.info('backup', 'backup:abort:applied', {});
       dropBuffer(msg.nonce);
     }, sendResponse);
   });

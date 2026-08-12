@@ -1,5 +1,5 @@
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { getModels, type BuiltinProvider } from '@earendil-works/pi-ai/compat';
+import { getBuiltinModels, type BuiltinProvider } from '@earendil-works/pi-ai/providers/all';
 import type {
   ModelIdentity,
   ProviderCredentials,
@@ -12,7 +12,7 @@ import { getCopilotBaseUrl } from '@/lib/providers/oauth';
  * 把一个模型身份（provider key + modelId）解析成可用的 pi-ai 运行时 `Model`。
  *
  * 纯函数：所有外部状态（凭据、自定义 provider 列表）都作参数传入，不读存储、不碰
- * 平台 API，因此可独立单测。读存储 + 全局兜底那一层留给调用方（见 agent-manager 的
+ * 平台 API，因此可独立单测。读存储 + 全局兜底那一层留给调用方（见 session-manager 的
  * `resolveSessionModel`）。
  *
  * 解析不出（未知内置 provider / 自定义模型查无 / modelId 不存在）时返回 null，由调用
@@ -30,7 +30,7 @@ export function resolveModel(
     model = findCustomModel(customProviders, identity.provider, identity.modelId) ?? undefined;
   } else {
     try {
-      const models = getModels(identity.provider as BuiltinProvider) as Model<Api>[];
+      const models = getBuiltinModels(identity.provider as BuiltinProvider) as Model<Api>[];
       model = models.find((m) => m.id === identity.modelId);
     } catch {
       return null;
