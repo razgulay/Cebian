@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createDelegateDomTool } from './delegate-dom';
 
 vi.mock('@/entrypoints/background/dom-sub-agent-runner', () => ({
@@ -17,6 +17,13 @@ vi.mock('@/entrypoints/background/dom-sub-agent-runner', () => ({
 }));
 
 describe('createDelegateDomTool — delegate_dom 工具', () => {
+  // Reset mock.calls between tests so `mock.calls[0]` reads from THIS test's
+  // call, not from a previous test that ran earlier in the file. Without this,
+  // vitest's file-shuffle order can expose call history from sibling tests.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   const tool = createDelegateDomTool();
 
   it('task 为空时返回错误 content', async () => {
@@ -61,11 +68,14 @@ describe('createDelegateDomTool — delegate_dom 工具', () => {
   it('不传 tabId 时也能正常调用（runner 用 chrome.tabs.query 兜底）', async () => {
     await tool.execute('call-1', { task: 'list products' }, new AbortController().signal);
     const { runDomSubAgent } = await import('@/entrypoints/background/dom-sub-agent-runner');
-    expect(runDomSubAgent).toHaveBeenCalledWith(
+    // Assert on the most recent call (this test's only call) — `mock.calls[0]`
+    // would be ambiguous across tests even with `clearAllMocks` because
+    // `import()` returns the same cached module whose mock counter increments
+    // globally; reading the last call sidesteps the index dependency.
+    expect(runDomSubAgent).toHaveBeenLastCalledWith(
       expect.objectContaining({ task: 'list products' }),
     );
-    // tabId 应该是不存在或者 undefined
-    const callArgs = (runDomSubAgent as any).mock.calls[0][0];
+    const callArgs = (runDomSubAgent as any).mock.calls.at(-1)[0];
     expect(callArgs.tabId).toBeUndefined();
   });
 

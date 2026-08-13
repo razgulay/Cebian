@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock the storage helpers so resolveDomSubAgent can read a synthetic model.
 vi.mock('@/lib/persistence/storage', () => ({
@@ -7,40 +7,28 @@ vi.mock('@/lib/persistence/storage', () => ({
   customProviders: { getValue: vi.fn(async () => []) },
 }));
 
-// Mock createDomSubAgent to capture the complexity passed on each attempt.
-const createdAgents: Array<{ complexity?: 'simple' | 'complex'; tabId?: number }> = [];
-vi.mock('./dom-sub-agent', () => ({
-  createDomSubAgent: vi.fn(async (_model, options) => {
-    createdAgents.push(options);
-    return {
-      agent: {
-        state: { messages: [] },
-        prompt: async () => {},
-        abort: () => {},
-      } as any,
-      tabId: options.tabId ?? null,
-    } as any;
-  }),
+// Hoist the cross-test mutable state so it lives outside any test body and is
+// reset in beforeEach. Before this refactor, the state lived at module scope
+// with no reset between tests — which made the suite depend on the test file
+// running alone or in a specific order. (`vi.mock` factories are hoisted by
+// vitest, but the closures they create over `createdAgents` / `promptsByAttempt`
+// / `currentAttempt` captured whichever instance existed at module load time.)
+const testState = vi.hoisted(() => ({
+  createdAgents: [] as Array<{ complexity?: 'simple' | 'complex'; tabId?: number }>,
+  promptsByAttempt: [] as Array<{ attempt: number; returnEmpty: boolean }>,
+  currentAttempt: 0,
 }));
 
-// Mock the keep-alive helpers so they don't run setInterval in tests.
-vi.mock('./lifecycle/keepalive', () => ({
-  acquireKeepAlive: vi.fn(),
-  releaseKeepAlive: vi.fn(),
-}));
-
-// Mock the agent.prompt to return empty on first attempt, non-empty on retry.
-// We do this by swapping the create of the agent per attempt.
-const promptsByAttempt: Array<{ attempt: number; returnEmpty: boolean }> = [];
-let currentAttempt = 0;
+// Mock createDomSubAgent so each attempt creates a fresh agent whose state
+// matches the prompt the test wants that attempt to "respond" with.
 vi.mock('./dom-sub-agent', async () => {
   const real = await vi.importActual<typeof import('./dom-sub-agent')>('./dom-sub-agent');
   return {
     ...real,
     createDomSubAgent: vi.fn(async (_model, options) => {
-      createdAgents.push(options);
-      const attempt = ++currentAttempt;
-      const wantEmpty = promptsByAttempt[attempt - 1]?.returnEmpty ?? false;
+      testState.createdAgents.push(options);
+      const attempt = ++testState.currentAttempt;
+      const wantEmpty = testState.promptsByAttempt[attempt - 1]?.returnEmpty ?? false;
       return {
         agent: {
           state: {
@@ -63,17 +51,29 @@ vi.mock('./dom-sub-agent', async () => {
   };
 });
 
+// Mock the keep-alive helpers so they don't run setInterval in tests.
+vi.mock('./lifecycle/keepalive', () => ({
+  acquireKeepAlive: vi.fn(),
+  releaseKeepAlive: vi.fn(),
+}));
+
 import { runDomSubAgent } from './dom-sub-agent-runner';
 
 describe('runDomSubAgent — auto-escalation simple → complex', () => {
-  it('attempt 1 uses caller\'s complexity, attempt 2 escalates to "complex"', async () => {
-    createdAgents.length = 0;
-    promptsByAttempt.length = 0;
-    currentAttempt = 0;
+  // Reset shared state between tests. The mock factory's `vi.fn` counter is
+  // cleared by vi.clearAllMocks() — but our `createdAgents` / `promptsByAttempt`
+  // / `currentAttempt` are plain arrays + number, so reset them manually.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    testState.createdAgents.length = 0;
+    testState.promptsByAttempt.length = 0;
+    testState.currentAttempt = 0;
+  });
 
+  it('attempt 1 uses caller\'s complexity, attempt 2 escalates to "complex"', async () => {
     // attempt 1: empty response. attempt 2: success.
-    promptsByAttempt.push({ attempt: 1, returnEmpty: true });
-    promptsByAttempt.push({ attempt: 2, returnEmpty: false });
+    testState.promptsByAttempt.push({ attempt: 1, returnEmpty: true });
+    testState.promptsByAttempt.push({ attempt: 2, returnEmpty: false });
 
     const result = await runDomSubAgent({
       task: 'extract the table',
@@ -86,21 +86,17 @@ describe('runDomSubAgent — auto-escalation simple → complex', () => {
     expect(result.tabId).toBe(73278874);
 
     // Verify the escalation pattern
-    expect(createdAgents.length).toBe(2);
-    expect(createdAgents[0].complexity).toBe('simple');
-    expect(createdAgents[1].complexity).toBe('complex');
+    expect(testState.createdAgents.length).toBe(2);
+    expect(testState.createdAgents[0].complexity).toBe('simple');
+    expect(testState.createdAgents[1].complexity).toBe('complex');
     // tabId is forwarded on both attempts
-    expect(createdAgents[0].tabId).toBe(73278874);
-    expect(createdAgents[1].tabId).toBe(73278874);
+    expect(testState.createdAgents[0].tabId).toBe(73278874);
+    expect(testState.createdAgents[1].tabId).toBe(73278874);
   });
 
   it('caller already passed "complex" — first attempt uses complex, retry stays complex', async () => {
-    createdAgents.length = 0;
-    promptsByAttempt.length = 0;
-    currentAttempt = 0;
-
-    promptsByAttempt.push({ attempt: 1, returnEmpty: true });
-    promptsByAttempt.push({ attempt: 2, returnEmpty: false });
+    testState.promptsByAttempt.push({ attempt: 1, returnEmpty: true });
+    testState.promptsByAttempt.push({ attempt: 2, returnEmpty: false });
 
     const result = await runDomSubAgent({
       task: 'extract the table',
@@ -109,17 +105,13 @@ describe('runDomSubAgent — auto-escalation simple → complex', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(createdAgents.length).toBe(2);
-    expect(createdAgents[0].complexity).toBe('complex');
-    expect(createdAgents[1].complexity).toBe('complex');
+    expect(testState.createdAgents.length).toBe(2);
+    expect(testState.createdAgents[0].complexity).toBe('complex');
+    expect(testState.createdAgents[1].complexity).toBe('complex');
   });
 
   it('succeeds on first attempt — no escalation triggered', async () => {
-    createdAgents.length = 0;
-    promptsByAttempt.length = 0;
-    currentAttempt = 0;
-
-    promptsByAttempt.push({ attempt: 1, returnEmpty: false });
+    testState.promptsByAttempt.push({ attempt: 1, returnEmpty: false });
 
     const result = await runDomSubAgent({
       task: 'extract the table',
@@ -129,7 +121,7 @@ describe('runDomSubAgent — auto-escalation simple → complex', () => {
 
     expect(result.ok).toBe(true);
     // Only one attempt was made since the first succeeded
-    expect(createdAgents.length).toBe(1);
-    expect(createdAgents[0].complexity).toBe('simple');
+    expect(testState.createdAgents.length).toBe(1);
+    expect(testState.createdAgents[0].complexity).toBe('simple');
   });
 });
