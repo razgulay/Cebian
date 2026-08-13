@@ -420,7 +420,7 @@ export function installDevPicker(): void {
   document.documentElement.setAttribute(PICKER_MARK, '1');
 }
 
-export function uninstallDevPicker(): void {
+function uninstallDevPicker(): void {
   cleanup?.();
   cleanup = null;
   installed = false;

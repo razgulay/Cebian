@@ -26,7 +26,7 @@ import { resolveModel } from '@/lib/providers/resolve-model';
 import { acquireKeepAlive, releaseKeepAlive } from './lifecycle/keepalive';
 import { createDomSubAgent } from './dom-sub-agent';
 import { getAssistantText } from '@/lib/agent/message-helpers';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { debugLog } from '@/lib/debug/log';
 
 /** 子代理返回给主代理的文本上限（~10 KB）。超出则截断并标注。 */
 const MAX_RESULT_CHARS = 10_000;

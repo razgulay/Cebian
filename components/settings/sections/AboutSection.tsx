@@ -14,7 +14,6 @@ import { getInstallGuideUrl } from '@/lib/site-links';
 import { downloadDebugLog } from '@/lib/debug/export';
 import { clearEntries, readAllEntries } from '@/lib/debug/log';
 import { debugLogSettings, DEFAULT_DEBUG_LOG_SETTINGS } from '@/lib/persistence/storage';
-import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 
 type SocialKey = 'wechat' | 'bilibili' | 'xiaohongshu' | 'x';

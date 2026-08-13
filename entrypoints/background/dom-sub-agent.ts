@@ -33,7 +33,7 @@ import { inspectTool } from '@/lib/tools/inspect';
 import { executeJsTool } from '@/lib/tools/execute-js';
 import { subagentScrollTool } from '@/lib/tools/subagent-scroll';
 import { subagentClickTool } from '@/lib/tools/subagent-click';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { debugLog } from '@/lib/debug/log';
 
 /** 子代理专用工具集：只读 + scroll + click-to-expand。最小提权。 */
 export const DOM_SUB_AGENT_TOOLS = [

@@ -50,7 +50,7 @@ describe('collectStorage', () => {
     await mcpServers.setValue([bearerServer('s1', 'mcp-secret')]);
     await providerCredentials.setValue({ openai: { authType: 'apiKey', apiKey: 'sk-x', verified: true } });
 
-    const { config, credentials } = await collectStorage({ settings: true, credentials: true });
+    const { config } = await collectStorage({ settings: true, credentials: true });
 
     expect(config![SK.activeModel]).toEqual({ provider: 'openai', modelId: 'gpt' });
     expect(config![SK.userInstructions]).toBe('hi');

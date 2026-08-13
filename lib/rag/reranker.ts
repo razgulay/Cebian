@@ -26,6 +26,8 @@ export interface RerankInput {
   documents: (string | { text: string; [key: string]: unknown })[];
   /** Number of results to return. Must be ≤ documents.length. */
   topN: number;
+  /** Optional cancellation signal — aborts the in-flight HTTP call. */
+  signal?: AbortSignal;
 }
 
 export interface RerankResult {
@@ -95,6 +97,7 @@ export class CohereCompatReranker implements Reranker {
         documents: docTexts,
         top_n: Math.min(input.topN, docTexts.length),
       }),
+      signal: input.signal,
     });
     if (!resp.ok) {
       const detail = await readErrorBody(resp);

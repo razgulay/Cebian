@@ -38,7 +38,7 @@ import { isValidSessionId } from '@/lib/utils';
 const AGENT_GRACE_PERIOD_MS = 60_000;
 
 export default defineBackground(() => {
-  console.log('Cebian background started', { id: browser.runtime.id });
+  // 后台启动 banner 仅做一次性状态指示；如需排查时确认 SW 已起来，由 console 镜像进入 IDB log。
 
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })

@@ -208,14 +208,6 @@
   background: var(--muted-foreground);
 }
 
-/* Spinner animation for tool cards */
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-.animate-spin-slow {
-  animation: spin 1s linear infinite;
-}
-
 /* 语音输入听写中的脉冲光环：比默认 animate-ping 更小更柔、更慢，
    只轻微扩散并淡出，不会大幅缩放抢眼。 */
 @keyframes mic-pulse-ring {

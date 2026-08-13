@@ -14,7 +14,7 @@ import type { MatchPattern } from './url-pattern';
 import { parseBgFetchPatterns } from './url-pattern';
 import { handleBgFetch } from './bg-fetch';
 import { parsePermission, grantsChromeNamespace, grantsPageExec } from './permissions';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { debugLog } from '@/lib/debug/log';
 
 // ─── Pending run requests ───
 

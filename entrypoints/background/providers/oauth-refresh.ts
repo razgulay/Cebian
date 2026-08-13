@@ -23,7 +23,6 @@ export function setupOAuthRefresh() {
         const refreshed = await refreshOAuthCredential(provider, cred as OAuthCredential);
         next[provider] = refreshed;
         updated = true;
-        console.log(`[OAuth Refresh] ${provider}: token refreshed`);
       } catch (err) {
         console.error(`[OAuth Refresh] ${provider}:`, err);
         next[provider] = { ...(cred as OAuthCredential), verified: false };

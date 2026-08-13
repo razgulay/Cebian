@@ -1,7 +1,7 @@
-import { Bot, ChevronRight, FileText, Film, Folder, FoldVertical, Lightbulb, CheckCircle, Crosshair, Pencil, ShieldAlert, FileType, Sparkles, Zap } from 'lucide-react';
-import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
-import { Button } from '@/components/ui/button';
+import { Bot, ChevronRight, FileText, Film, Folder, FoldVertical, Lightbulb, Crosshair, Pencil, ShieldAlert, FileType, Sparkles, Zap } from 'lucide-react';
+import { useState, useRef, useMemo, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { MessageMetaRow, type MessageMetaProps } from '@/components/chat/MessageMetaRow';
@@ -546,38 +546,5 @@ export function PermissionRequestBlock({
         />
       </div>
     </div>
-  );
-}
-
-/* ─── Execution Success ─── */
-export function ExecutionResult({
-  message,
-  actions,
-}: {
-  message: string;
-  actions?: { label: string; primary?: boolean; onClick?: () => void }[];
-}) {
-  return (
-    <>
-      <p className="text-success text-[0.85rem] flex items-center gap-1.5 mt-3">
-        <CheckCircle className="size-3.5" />
-        {message}
-      </p>
-      {actions && actions.length > 0 && (
-        <div className="flex gap-2 mt-2">
-          {actions.map((a) => (
-            <Button
-              key={a.label}
-              variant={a.primary ? 'default' : 'outline'}
-              size="sm"
-              className="text-xs h-7"
-              onClick={a.onClick}
-            >
-              {a.label}
-            </Button>
-          ))}
-        </div>
-      )}
-    </>
   );
 }

@@ -121,7 +121,6 @@ export async function getValidOAuthToken(
         .then(async (refreshed) => {
           const creds = await providerCredentials.getValue();
           await providerCredentials.setValue({ ...creds, [provider]: refreshed });
-          console.log(`[OAuth] ${provider}: on-demand refresh succeeded`);
           return refreshed;
         })
         .finally(() => inflightRefresh.delete(provider));

@@ -13,8 +13,9 @@ export interface Embedder {
    *  poisoning the collection with wrong-dim vectors. */
   readonly dim: number;
   /** Embed one or more strings. Returns one vector per input string,
-   *  same order. Empty input → empty output. */
-  embed(texts: string[]): Promise<number[][]>;
+   *  same order. Empty input → empty output. Pass `signal` to abort
+   *  mid-flight (e.g. when the indexer is cancelled). */
+  embed(texts: string[], signal?: AbortSignal): Promise<number[][]>;
 }
 
 export interface EmbedderConfig {
@@ -34,7 +35,7 @@ export class OpenAICompatEmbedder implements Embedder {
   get model(): string { return this.config.model; }
   get dim(): number { return this.config.dim; }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     if (texts.length === 0) return [];
     const base = this.config.baseUrl.replace(/\/+$/, '');
     const url = `${base}/embeddings`;
@@ -46,6 +47,7 @@ export class OpenAICompatEmbedder implements Embedder {
       method: 'POST',
       headers,
       body: JSON.stringify({ model: this.config.model, input: texts }),
+      signal,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');

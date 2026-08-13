@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -39,7 +39,7 @@ import { useMobileEmulation } from '@/hooks/useMobileEmulation';
 import { downloadFile, formatDuration, formatCompactCount, formatBytes } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { debugLog } from '@/lib/debug/log';
 
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
@@ -1138,13 +1138,18 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // Filter prompts by typed search (after '/')
   // Slash menu filter: use the last whitespace-separated token so users can
   // type a regular message and then `/writing` at the end to filter commands.
-  const slashFilter = (() => {
+  const slashFilter = useMemo(() => {
     const lastToken = value.split(/\s/).at(-1) ?? '';
     return lastToken.startsWith('/') ? lastToken.slice(1).toLowerCase() : '';
-  })();
-  const filteredPrompts = slashFilter
-    ? prompts.filter((p) => p.name.toLowerCase().includes(slashFilter) || p.description.toLowerCase().includes(slashFilter))
-    : prompts;
+  }, [value]);
+  const filteredPrompts = useMemo(() => {
+    if (!slashFilter) return prompts;
+    return prompts.filter(
+      (p) =>
+        p.name.toLowerCase().includes(slashFilter) ||
+        p.description.toLowerCase().includes(slashFilter),
+    );
+  }, [slashFilter, prompts]);
 
   // Menu hides when the user has typed a search term that matches nothing —
   // in that case Enter falls through to send the literal `/xxx` text.

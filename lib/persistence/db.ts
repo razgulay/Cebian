@@ -202,7 +202,7 @@ export async function updateSessionMessages(
   }
 }
 
-export async function updateSessionTitle(id: string, title: string): Promise<void> {
+async function updateSessionTitle(id: string, title: string): Promise<void> {
   debugLog.info('db', 'db:session:update_title', withSession({ titleLen: title.length }, id));
   await db.sessions.update(id, { title, updatedAt: Date.now() });
 }

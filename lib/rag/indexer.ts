@@ -122,7 +122,7 @@ export async function indexCollection(opts: IndexOptions): Promise<IndexResult> 
     throwIfCancelled();
     const batchEnd = Math.min(i + EMBED_BATCH, chunks.length);
     const texts = chunks.slice(i, batchEnd).map((c) => c.content);
-    const batch = await embedder.embed(texts);
+    const batch = await embedder.embed(texts, signal);
     for (let j = 0; j < batch.length; j++) {
       embeddings[i + j] = batch[j]!;
     }

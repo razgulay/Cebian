@@ -54,7 +54,7 @@ function serializeYaml(data: Record<string, unknown>, indent = 0): string {
 /**
  * Serialize data + body back into a frontmatter Markdown string.
  */
-export function serializeFrontmatter(data: Record<string, unknown>, body: string): string {
+function serializeFrontmatter(data: Record<string, unknown>, body: string): string {
   const yaml = serializeYaml(data);
   return `---\n${yaml}\n---\n${body}`;
 }

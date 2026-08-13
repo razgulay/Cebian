@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { SettingsLayout } from '@/components/settings/SettingsLayout';

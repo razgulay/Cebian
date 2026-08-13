@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Pause, Play, Trash2, Filter, Download, Activity, Search, X, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useLiveLog } from '@/hooks/useLiveLog';

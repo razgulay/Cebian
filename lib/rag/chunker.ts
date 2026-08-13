@@ -95,14 +95,20 @@ export async function extractPdfTextFromFile(
   const bytes = new Uint8Array(buf);
   // Chunked base64 — see ChatInput.tsx for the same trick (avoids
   // String.fromCharCode.apply blowing the stack on multi-MB buffers).
-  let binary = '';
+  // Push each chunk into an array and join once at the end: `binary += ...`
+  // is O(n²) on the intermediate string length (each concat allocates a fresh
+  // string), so a 10 MB PDF would otherwise spend most of its budget in GC.
+  const parts: string[] = [];
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode.apply(
-      null,
-      bytes.subarray(i, i + CHUNK) as unknown as number[],
+    parts.push(
+      String.fromCharCode.apply(
+        null,
+        bytes.subarray(i, i + CHUNK) as unknown as number[],
+      ),
     );
   }
+  const binary = parts.join('');
   const base64 = btoa(binary);
   const resp = (await chrome.runtime.sendMessage({
     type: 'pdf-extract-bytes',

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
 // Mock the storage helpers so resolveDomSubAgent can read a synthetic model.
-const fakeModel = { provider: 'openai', id: 'gpt-4o-mini', api: 'openai-completions' } as any;
 vi.mock('@/lib/persistence/storage', () => ({
   domSubAgentModel: { getValue: vi.fn(async () => ({ provider: 'openai', modelId: 'gpt-4o-mini' })) },
   providerCredentials: { getValue: vi.fn(async () => ({})) },

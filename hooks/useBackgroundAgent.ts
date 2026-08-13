@@ -8,6 +8,7 @@ import type { SessionRecord } from '@/lib/persistence/db';
 import type { Attachment } from '@/lib/agent/attachments';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { truncateForRetry, truncateForEditRerun } from '@/lib/agent/message-helpers';
+import { rewriteLastUserMessage } from '@/lib/agent/rewrite-last-user-message';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
@@ -16,96 +17,10 @@ import { debugLog, withSession } from '@/lib/debug/log';
 
 // ─── Helpers ───
 
-/** `[DIRECTIVE — ATTACHED PROMPT/SKILL: "name"]` opening tag — hybrid injection
- *  adds one or more of these above the user's typed text. The rewrite needs to
- *  know the prefix exists so it can preserve the directive while still
- *  shortening the user-typed portion. */
-const DIRECTIVE_OPEN_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL):/;
-const DIRECTIVE_USER_SEP = '\n\n---\n\n';
-
-const USER_REQUEST_CLOSE = '</user-request>';
-
-/**
- * Rewrite the last user message's text content in a messages array.
- * Used by every broadcast handler that replaces local state — the BG stores
- * the expanded prompt body for slash commands like `/writing`, but the user
- * bubble should show the short command form. Returns the same array reference
- * if no rewrite is needed (no user message present).
- *
- * For hybrid injection (mention prompt/skill), the text sent to the LLM is
- * `[DIRECTIVE — …] + "\n\n---\n\n" + userText`. We must keep the directive
- * prefix here so the bubble's `extractInlineDirectives` can still parse and
- * render the chip — replacing the whole text with `displayText` (just the
- * user-typed text) would wipe the directive and the chip would silently
- * disappear from the live bubble. Only the user-typed suffix between the
- * last `\n\n---\n\n` and the trailing `\n</user-request>` gets replaced.
- * Slash-command text doesn't carry the directive marker, so it falls
- * through to the original whole-text replacement.
- *
- * Why preserve the close tag: when the BG-stored message is wrapped in
- * `<user-request>...</user-request>`, the inner skill body can itself
- * contain `<user-request>` placeholder tags. `extractLastUserRequest`
- * (in message-helpers) finds the BG wrapper by matching the FIRST
- * `<user-request>` against the LAST `</user-request>` — if we drop the
- * trailing close during rewrite, the last close latches onto an inner
- * skill-body tag and `extractLastUserRequest` returns the directive body
- * instead of the rewritten user text, making the bubble render the raw
- * `<reminder-instructions>`, `<context>`, `<user-request>` template tags
- * (the user-reported regression on this exact path).
- */
-function rewriteLastUserMessage(messages: AgentMessage[], displayText: string): AgentMessage[] {
-  let lastUserIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if ((messages[i] as any).role === 'user') {
-      lastUserIdx = i;
-      break;
-    }
-  }
-  if (lastUserIdx < 0) return messages;
-  const m: any = messages[lastUserIdx];
-  const rewritten: any[] = m.content.map((b: any) => {
-    if (b?.type !== 'text') return b;
-    const text: string = b.text;
-    const hasDirective = DIRECTIVE_OPEN_RE.test(text);
-    if (hasDirective) {
-      // Text carries the directive. Preserve it so the bubble can parse
-      // and render the chip. Replace only the user-typed segment between
-      // the last `\n\n---\n\n` and the BG wrapper's `\n</user-request>`
-      // close — preserving the close keeps `extractLastUserRequest` from
-      // latching onto an inner skill-body close tag.
-      if (text.includes(DIRECTIVE_USER_SEP)) {
-        const lastSep = text.lastIndexOf(DIRECTIVE_USER_SEP);
-        // Find the BG wrapper's `\n</user-request>` close AFTER the
-        // separator — the inner skill-body `</user-request>` (placeholder)
-        // sits inside the directive block, so searching backwards from
-        // `lastSep` would latch onto the placeholder's close, not the
-        // outer wrapper's.
-        const closeIdx = text.indexOf(USER_REQUEST_CLOSE, lastSep);
-        if (closeIdx > lastSep) {
-          // User-text segment lives between the separator and the close.
-          // Preserve the trailing `\n` before the close so the wrapper
-          // stays well-formed.
-          const beforeUser = text.slice(0, lastSep + DIRECTIVE_USER_SEP.length);
-          const afterUser = text.slice(closeIdx - 1); // includes the leading '\n'
-          return { ...b, text: beforeUser + displayText + afterUser };
-        }
-        // No close after the separator — fall back to whole-suffix
-        // replacement (defensive: the BG's wrapper got truncated
-        // somewhere upstream; better to clobber than to keep the old
-        // expanded body).
-        const prefix = text.slice(0, lastSep + DIRECTIVE_USER_SEP.length);
-        return { ...b, text: prefix + displayText };
-      }
-      // No separator — the text IS the directive (user typed nothing).
-      // Keep the directive as-is so the bubble still renders the chip.
-      return b;
-    }
-    return { ...b, text: displayText };
-  });
-  const out = [...messages];
-  out[lastUserIdx] = { ...m, content: rewritten };
-  return out;
-}
+// `rewriteLastUserMessage` lives in `@/lib/agent/rewrite-last-user-message`
+// (extracted so its behavior is unit-testable directly rather than via a
+// local copy hidden inside the hook's test file). The directive / separator
+// constants and rationale comments are kept there.
 
 // ─── State ───
 

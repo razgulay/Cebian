@@ -9,9 +9,10 @@ import { UpdateNoticeOutlet } from '@/components/dialogs/update-notice-outlet';
 import { Header } from '@/components/layout/Header';
 import { HistoryPanel } from '@/components/layout/HistoryPanel';
 import { useStorageItem } from '@/hooks/useStorageItem';
+import { useApplyThemePreference, resolveTheme } from '@/hooks/useApplyThemePreference';
 import { useChangelogOnUpdate } from '@/hooks/useChangelogOnUpdate';
 import { useChatFontSize } from '@/hooks/useChatFontSize';
-import { themePreference, lastOpenSessionId } from '@/lib/persistence/storage';
+import { lastOpenSessionId } from '@/lib/persistence/storage';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { ChatPage } from './pages/chat';
 import { useSidePanelToggle } from './useSidePanelToggle';
@@ -25,19 +26,8 @@ const SettingsRoutes = lazy(() =>
   import('./pages/settings').then(m => ({ default: m.SettingsRoutes })),
 );
 
-/** Resolve 'system' to the actual theme based on OS preference (defaults to 'light'). */
-function resolveTheme(pref: 'dark' | 'light' | 'system'): 'dark' | 'light' {
-  if (pref !== 'system') return pref;
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-function applyTheme(resolved: 'dark' | 'light') {
-  document.documentElement.setAttribute('data-theme', resolved);
-}
-
 function App() {
-  const [theme, setTheme] = useStorageItem(themePreference, 'system');
-  const [themeReady, setThemeReady] = useState(false);
+  const [theme, themeReady, setTheme] = useApplyThemePreference();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chatTitle, setChatTitle] = useState('');
   // Source identity snapshot for the currently-viewed chat. Drives the
@@ -152,29 +142,6 @@ function App() {
 
   // 侧边栏打开后，若后台在升级时留了「待展示更新日志」标记，则打开更新日志页。
   useChangelogOnUpdate();
-
-  // Load theme from storage before first render
-  useEffect(() => {
-    themePreference.getValue().then((val) => {
-      applyTheme(resolveTheme(val ?? 'system'));
-      setThemeReady(true);
-    });
-  }, []);
-
-  // Sync theme changes after initial load
-  useEffect(() => {
-    if (!themeReady) return;
-    applyTheme(resolveTheme(theme));
-  }, [theme, themeReady]);
-
-  // Listen for OS theme changes when in 'system' mode
-  useEffect(() => {
-    if (theme !== 'system') return;
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = (e: MediaQueryListEvent) => applyTheme(e.matches ? 'dark' : 'light');
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, [theme]);
 
   const toggleTheme = () => {
     const next = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';

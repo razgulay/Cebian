@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { createDomReadOnlyGate, withDefaultTabId } from './dom-sub-agent';
 
 describe('createDomReadOnlyGate — 只读门禁', () => {
@@ -120,22 +120,6 @@ describe('withDefaultTabId — 工具 tabId 自动注入', () => {
 });
 
 describe('delegate_dom — tabId 参数转发到子代理', () => {
-  // 简单 stub：检查 receive 到的 args 是否包含主代理传过来的 tabId
-  function makeCapturingTool() {
-    const captured: any[] = [];
-    const tool = {
-      name: 'capture',
-      label: 'capture',
-      description: 'capture',
-      parameters: {} as any,
-      async execute(_id: string, args: any) {
-        captured.push(args);
-        return { content: [{ type: 'text', text: 'ok' }], details: {} };
-      },
-    } as any;
-    return { tool, captured };
-  }
-
   it('主代理不传 tabId 时，runner 仍调用工具（tabId 由 withDefaultTabId 注入）', async () => {
     // 这个测试聚焦 delegate_dom 的 tabId 转发逻辑：主代理不传 tabId
     // 时 execute 仍能跑通。tabId 的注入验证见 withDefaultTabId 区块。

@@ -3,14 +3,14 @@ import { toast } from 'sonner';
 import { Download, Loader2 } from 'lucide-react';
 import { vfs } from '@/lib/persistence/vfs';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { themePreference, vfsOpenPreferenceV1 } from '@/lib/persistence/storage';
+import { useApplyThemePreference, resolveTheme } from '@/hooks/useApplyThemePreference';
+import { vfsOpenPreferenceV1 } from '@/lib/persistence/storage';
 import { downloadFile } from '@/lib/utils';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from '@/components/ui/sonner';
 import { ConfirmOutlet } from '@/components/dialogs/confirm-outlet';
 import { showConfirm } from '@/lib/ui/dialog';
 import { t } from '@/lib/i18n';
-import { applyTheme, resolveTheme } from './lib/theme';
 import { MAX_PREVIEW_BYTES, classifyFile, decodePreviewText, fileExtension, getHashPath, getRequestedAnchor, isWorkspacesRoot, navigateTo, workspaceUuidOf } from './lib/path-utils';
 import { mimeFor } from '@/lib/content/mime';
 import { zipDirectory, zipNameFor } from './lib/download';
@@ -21,9 +21,8 @@ import { FileView } from './ui/FileView';
 import type { FileMedia, ViewState } from './types';
 
 export function VfsExplorer() {
-  const [theme] = useStorageItem(themePreference, 'system');
+  const [theme, themeReady] = useApplyThemePreference();
   const [openPreference, setOpenPreference] = useStorageItem(vfsOpenPreferenceV1, 'smart');
-  const [themeReady, setThemeReady] = useState(false);
   const [view, setView] = useState<ViewState>({ kind: 'loading' });
   // Global busy flag for the download button. Kept outside `view` because a
   // download started on `/prompts` MUST keep running even if the user
@@ -45,41 +44,6 @@ export function VfsExplorer() {
   // unrelated contexts (e.g. an agent writing from the BG SW) still refresh.
   const [version, setVersion] = useState(0);
 
-  // ── Theme sync ──
-  useEffect(() => {
-    themePreference.getValue().then((val) => {
-      applyTheme(resolveTheme(val ?? 'system'));
-      setThemeReady(true);
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!themeReady) return;
-    applyTheme(resolveTheme(theme));
-  }, [theme, themeReady]);
-
-  useEffect(() => {
-    if (theme !== 'system') return;
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const handler = (e: MediaQueryListEvent) => applyTheme(e.matches ? 'dark' : 'light');
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
-  }, [theme]);
-
-  // ── Load path from hash ──
-  //
-  // Two pieces of cross-call state live in refs:
-  //
-  // 1. `loadIdRef` — every call to loadPath() captures a monotonically
-  //    increasing id at entry and re-checks it after each await. A rapid
-  //    sequence of hashchange events (or a hashchange that fires while a
-  //    previous load is still resolving) would otherwise let a stale
-  //    setView win the race. The old `let stale` flag only flipped on
-  //    effect unmount, so it could not protect against this.
-  //
-  // 2. `blobUrlRef` — image/video/audio media is exposed as `URL.createObjectURL`.
-  //    We revoke the previous URL before issuing a new one (and on unmount)
-  //    to keep memory bounded across many navigations.
   const loadIdRef = useRef(0);
   const blobUrlRef = useRef<string | null>(null);
 

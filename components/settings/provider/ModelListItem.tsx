@@ -80,7 +80,7 @@ export function ModelListItem({ model, onToggleEnabled, onToggleReasoning, onTog
             className="py-0 px-1 flex-none gap-0 hover:no-underline [&>svg]:size-3.5"
           />
         </div>
-        {/* Row 2: 3 toggles — Show / Reasoning / Multimodal. flex-wrap 兜底窄屏不溢出 */}
+        {/* Row 2: 3 toggles — Show / Reasoning / Multimodal. flex-wrap guards narrow screens from overflow */}
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1">
             <Label htmlFor={enabledId} className="text-[0.6rem] text-muted-foreground">{t('provider.form.enabled')}</Label>

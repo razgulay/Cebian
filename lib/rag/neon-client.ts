@@ -59,11 +59,13 @@ export async function testConnection(connectionString: string): Promise<Connecti
     return { ok: false, pgvector: false, version: '', error: 'Connection string is empty' };
   }
   try {
-    const versionRows = await query<{ version: string }>(connectionString, 'SELECT version()');
-    const extRows = await query<{ extname: string }>(
-      connectionString,
-      "SELECT extname FROM pg_extension WHERE extname = 'vector'",
-    );
+    const [versionRows, extRows] = await Promise.all([
+      query<{ version: string }>(connectionString, 'SELECT version()'),
+      query<{ extname: string }>(
+        connectionString,
+        "SELECT extname FROM pg_extension WHERE extname = 'vector'",
+      ),
+    ]);
     if (extRows.length > 0) {
       return {
         ok: true,

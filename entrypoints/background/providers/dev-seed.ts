@@ -85,8 +85,6 @@ export async function seedDevStorage(): Promise<void> {
       models: [{ modelId, name: modelName, reasoning }],
     },
   ]);
-
-  console.log(`[dev-seed] Seeded provider "${providerName}" (id=${PROVIDER_ID}) from .env.local`);
 }
 
 

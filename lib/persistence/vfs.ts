@@ -11,7 +11,7 @@
  */
 import FS from '@isomorphic-git/lightning-fs';
 import { CEBIAN_HOME, WORKSPACES_ROOT } from './vfs-paths';
-import { debugLog, withSession } from '@/lib/debug/log';
+import { debugLog } from '@/lib/debug/log';
 
 // Lazy-initialized singleton — defers IndexedDB connection until first use.
 let _pfs: FS.PromisifiedFS | null = null;

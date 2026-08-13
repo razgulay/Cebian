@@ -160,6 +160,22 @@ Cebian 与 pi 的 coding-agent 架构同位（都是 agent-core 之上的应用�
 **不在拆分那一刻之前改名** —— 现在的 `SessionManager` 同时兼任 runtime 与 session 两职，
 改成任一名字都是撒谎。
 
+### 5. Slash command chip trong bubble (UX consistency với mention chip)
+
+Hiện tại bubble render 2 kiểu:
+- **Mention chip** (`@english`): directive `[DIRECTIVE — ATTACHED PROMPT: "english"]` prepend vào text, bubble parser `stripDirectives` + chip parser render chip + user text.
+- **Slash command** (`/english`): expand toàn bộ prompt body vào message, bubble chỉ thấy raw `/english xin chào`.
+
+Mục tiêu: `/<command>` cũng render chip như mention chip. Áp dụng cho **tất cả** slash command đã đăng ký trong command registry.
+
+Cần làm:
+1. Slash command expansion đổi từ「replace toàn bộ text bằng expanded prompt body」sang「prepend directive `[DIRECTIVE — ATTACHED COMMAND: "<id>"]`」 — directive body chứa expanded prompt thay vì user text.
+2. Bubble chip renderer nhận diện directive mới (variant `COMMAND:` bên cạnh `PROMPT:` / `SKILL:`), render đúng chip label.
+3. `rewriteLastUserMessage` đã handle generic directive prefix (đã extract trong cleanup round 5) — chỉ cần slash command path produce đúng directive format.
+4. Regression test: gõ `/english xin chào` → bubble show chip "english" + text "xin chào"; BG gửi LLM full expanded prompt body như cũ.
+
+**Không làm trong cleanup hiện tại** — đây là feature change (slash expansion path + bubble renderer), đụng UX. Đợi cleanup `cleanup/deep-project-cleanup` xong hết rồi làm 1 task riêng, branch mới.
+
 ### 6. `lib/agent/` 改名（用户暂缓）
 
 搬走 `system-prompt` / `page-context` 后，`lib/agent/` 只剩 attachments / compaction /

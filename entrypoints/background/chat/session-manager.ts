@@ -662,7 +662,6 @@ class SessionManager {
       // corrupt the phase machine. Silently dropping matches `retry()`'s
       // phase-guard pattern; the in-flight work's broadcasts reconcile every
       // viewing window to the correct state.
-      console.debug('[session-manager] prompt: phase busy, ignored', sessionId, agentSession.phase);
       return;
     }
 
@@ -1026,7 +1025,6 @@ class SessionManager {
       // streaming (`running`). Silent no-op so the duplicate window doesn't
       // see a misleading toast — the in-flight run's broadcasts reconcile
       // every viewing window to the correct state.
-      console.debug('[session-manager] retry: phase not idle, ignored', sessionId, agentSession.phase);
       return;
     }
 
@@ -1186,7 +1184,6 @@ class SessionManager {
       // Concurrent edit-and-rerun while a retry is preparing or the agent
       // is mid-stream. Silent no-op matches `retry`'s policy — the
       // in-flight run reconciles viewers.
-      console.debug('[session-manager] editAndRerun: phase not idle, ignored', sessionId, agentSession.phase);
       return;
     }
 

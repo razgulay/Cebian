@@ -196,17 +196,35 @@ export function RagSection() {
     if (!settings.neonConnectionString) return;
     (async () => {
       const stored = await ragCollections.getValue();
-      for (const c of stored) {
-        try {
+      // Fan out all collection-count probes in parallel — the previous
+      // `for...of` + `await` made each round trip sequential, so an N-collection
+      // refresh cost N× RTT on the network. `Promise.allSettled` keeps partial
+      // failures contained (one bad collection doesn't poison the others) and
+      // collapses N updates into a single `setCollections` call.
+      const settled = await Promise.allSettled(
+        stored.map(async (c) => {
           const live = await countCollectionChunks(settings.neonConnectionString, c.name);
-          if (!cancelled && live !== c.chunkCount) {
-            const next = stored.map((p) => (p.name === c.name ? { ...p, chunkCount: live } : p));
-            setCollections(next);
-          }
-        } catch (err) {
-          debugLog.warn('rag', 'count-chunks-failed', { collection: c.name, error: String(err) });
+          return { name: c.name, live };
+        }),
+      );
+      if (cancelled) return;
+      const updates = new Map<string, number>();
+      settled.forEach((r, i) => {
+        const c = stored[i];
+        if (!c) return;
+        if (r.status === 'fulfilled') {
+          if (r.value.live !== c.chunkCount) updates.set(c.name, r.value.live);
+        } else {
+          debugLog.warn('rag', 'count-chunks-failed', {
+            collection: c.name,
+            error: String(r.reason),
+          });
         }
-      }
+      });
+      if (updates.size === 0) return;
+      setCollections(
+        stored.map((p) => (updates.has(p.name) ? { ...p, chunkCount: updates.get(p.name)! } : p)),
+      );
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -825,7 +843,6 @@ function NewCollectionDialog({
   const progressLabel = (() => {
     if (!progress) return null;
     const { phase, done, total, currentFile } = progress;
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
     switch (phase) {
       case 'reading':
         return t('settings.rag.progressReading', [
@@ -840,7 +857,6 @@ function NewCollectionDialog({
       case 'inserting':
         return t('settings.rag.progressInserting', [String(done), String(total)]);
     }
-    return `${pct}%`;
   })();
 
   // Render the folder picker button. Shows the active folder name (or
