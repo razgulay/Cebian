@@ -19,12 +19,41 @@ import type { OffscreenResponse } from '@/entrypoints/offscreen/main';
  * callers select it via `startElementPicker({ mode })`. */
 type PickerMode = 'click' | 'region';
 
+// Cursor for the picker overlay. Uses the EXACT `MousePointer2` SVG path from
+// `lucide-react` (the same icon rendered by the "Pick element" button in the
+// composer) — single-path arrow with tail, no custom re-drawing. Visual
+// identity stays in sync with the toolbar trigger so the picker reads as
+// "the same tool, now active in the page".
+//   * 16x16 display with the lucide-native 24x24 viewBox: the browser scales
+//     the path down 2/3, giving a cursor 1/3 smaller than the native lucide
+//     size while keeping the path's proportions and stroke quality.
+//   * Outline-only — `fill="none"`, `stroke="#f97316"` (Cebian brand orange
+//     from assets/tailwind.css `--primary`). Matches lucide's stroke-first
+//     aesthetic and reads as a clean line drawing, not a chunky stamp.
+//   * Hotspot (3, 3) ≈ the path's start point (4.037, 4.688) projected from
+//     24x24 → 16x16, ≈ the actual tip of the arrow.
+//   * `crosshair` is the fallback if the data: URL fails.
+//   * The full declaration is `cursor:<value>`; we keep it as a constant
+//     INSIDE `createPickerInPage` because `chrome.scripting.executeScript`
+//     only serializes the function body — outer constants are not in scope
+//     at the injection site.
 function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click') {
+  const PICKER_CURSOR_VALUE =
+    'url("data:image/svg+xml;base64,' +
+    btoa(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" ' +
+        'fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+        // Exact lucide-react MousePointer2 path (lucide v0.x source).
+        '<path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"/>' +
+      '</svg>',
+    ) +
+    '") 3 3, crosshair';
+  const PICKER_CURSOR_DECL = `cursor:${PICKER_CURSOR_VALUE}`;
+
   // Guard: prevent double injection. Also clean up any orphaned remnants from
   // a crashed previous session so we never end up with a stale cursor style.
   if (document.getElementById('cebian-picker-host')) return;
   document.getElementById('cebian-picker-cursor')?.remove();
-
   // ── Shadow DOM host ──
   // The host has pointer-events:auto with a full-viewport overlay inside the
   // shadow root. Hit-testing stops at the overlay so page element-level
@@ -35,15 +64,18 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
   // known limitation of any shadow-DOM-based inspector.
   const host = document.createElement('div');
   host.id = 'cebian-picker-host';
-  host.style.cssText = 'all:initial !important;position:fixed !important;inset:0 !important;pointer-events:auto !important;z-index:2147483647 !important;cursor:crosshair !important;';
+  host.style.cssText =
+    'all:initial !important;position:fixed !important;inset:0 !important;' +
+    'pointer-events:auto !important;z-index:2147483647 !important;' +
+    PICKER_CURSOR_DECL + ' !important;';
   document.documentElement.appendChild(host);
 
   const shadow = host.attachShadow({ mode: 'closed' });
 
-  // Inject crosshair cursor into the page (removed on cleanup).
+  // Inject picker cursor into the page (removed on cleanup).
   //
   // CSS cascade priority, from weakest to strongest:
-  //   1. stylesheet rule (e.g. `*, html * { cursor: crosshair !important }`)
+  //   1. stylesheet rule (e.g. `*, html * { cursor: <X> !important }`)
   //   2. inline style
   //   3. inline style with !important
   //   4. inline style with !important on document.documentElement
@@ -51,15 +83,15 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
   // Some pages set cursor via inline `style="cursor: ... !important"` on
   // body or html, which beats descendant selectors in (1). And pages that
   // use `cursor: url(...)` with `!important` win by specificity alone in (1).
-  // To bypass both, we apply inline `cursor: crosshair !important` directly
+  // To bypass both, we apply inline `cursor: <X> !important` directly
   // on `documentElement` — this is the strongest cursor override the page
   // allows short of OS-level scheme overrides.
   const cursorStyle = document.createElement('style');
   cursorStyle.id = 'cebian-picker-cursor';
-  cursorStyle.textContent = 'html, html *, html *::before, html *::after { cursor: crosshair !important; }';
+  cursorStyle.textContent = `html, html *, html *::before, html *::after { ${PICKER_CURSOR_DECL} !important; }`;
   document.head.appendChild(cursorStyle);
   // Belt-and-suspenders: also set inline on the root.
-  document.documentElement.style.setProperty('cursor', 'crosshair', 'important');
+  document.documentElement.style.setProperty('cursor', PICKER_CURSOR_VALUE, 'important');
 
   // ── Shadow DOM UI ──
   const style = document.createElement('style');

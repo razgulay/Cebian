@@ -86,6 +86,14 @@ interface ChatInputProps {
   thinkingLevel: ThinkingLevel;
   onModelChange: (model: ModelIdentity) => void;
   onThinkingChange: (level: ThinkingLevel) => void;
+  /** When set, the textarea pre-fills with this value on mount (used by
+   *  the edit flow to seed the composer with the previous user message).
+   *  Lazy initializer — only read on first render, subsequent prop
+   *  changes don't clobber the user's edits. */
+  initialValue?: string;
+  /** When provided, pressing Escape inside the textarea calls this
+   *  callback. Used by the edit flow to cancel without committing. */
+  onCancelEdit?: () => void;
 }
 
 /** 暴露给父组件的 imperative handle：允许欢迎页等外部入口填入文本并聚焦输入框，
@@ -107,10 +115,24 @@ export interface ChatInputHandle {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
-  { onSend, onOpenSettings, onOpenStorage, isAgentRunning, onCancel, userHistory, sessionId, model: currentModel, thinkingLevel: currentThinkingLevel, onModelChange, onThinkingChange },
+  {
+    onSend,
+    onOpenSettings,
+    onOpenStorage,
+    isAgentRunning,
+    onCancel,
+    userHistory,
+    sessionId,
+    model: currentModel,
+    thinkingLevel: currentThinkingLevel,
+    onModelChange,
+    onThinkingChange,
+    initialValue,
+    onCancelEdit,
+  },
   ref,
 ) {
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(() => initialValue ?? '');
   const [showSlash, setShowSlash] = useState(false);
   const [prompts, setPrompts] = useState<PromptMeta[]>([]);
   const [selectedPromptIndex, setSelectedPromptIndex] = useState(0);
@@ -133,6 +155,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // `await recorder.stop()` resumes — so we keep this ref so handleSend
   // can read the post-stop attachment list without waiting for a render.
   const attachmentsRef = useRef<Attachment[]>([]);
+  attachmentsRef.current = attachments;
   const [isPicking, setIsPicking] = useState(false);
   // Region-pick mode is mutually exclusive with click-pick — the toggle
   // buttons in the toolbar cancel the other when activated.
@@ -148,6 +171,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(sessionId ?? null);
   sessionIdRef.current = sessionId ?? null;
+  // Mirror of `quoteChips` for synchronous reads from handleSend.
+  // The chips list drives the outgoing message at send-time, so we need to
+  // read the post-update value without waiting for a React flush.
+  const quoteChipsRef = useRef<{ id: string; text: string }[]>([]);
+  // Mirror of `mentions` for the same reason — handleSend reads from the
+  // ref to avoid a stale state read after async attachment building.
+  const mentionsRef = useRef<MentionChip[]>(mentions);
 
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
@@ -1001,15 +1031,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setHistoryIndex(null);
   }, []);
 
-  // Mirror of `quoteChips` for synchronous reads from handleSend. The
-  // chips list drives the outgoing message at send-time, so we need to
-  // read the post-update value without waiting for a React flush.
-  const quoteChipsRef = useRef<{ id: string; text: string }[]>([]);
-
-  // Mirror of `mentions` for the same reason — handleSend reads from the
-  // ref to avoid a stale state read after async attachment building.
-  const mentionsRef = useRef<MentionChip[]>([]);
-
   // ─── Pinned context (per-chat) ───
   // A pinned prompt or skill rides along on EVERY message of the current
   // chat — handy when the user wants the LLM to keep a long-running
@@ -1768,7 +1789,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             (mobile mode). The storage shortcut is moved into the middle
             of the row so it stays high-traffic without dominating the
             leading edge — it lives one click away from the other
-            attach-type buttons (file, screenshot, recording). */}
+            attach-type buttons (file, screenshot, recording).
+        */}
         <div className="flex items-center gap-0.5 px-1.5 pt-0.5 pb-0 justify-end">
           {/* 1. Pick element */}
           <Button
@@ -1980,7 +2002,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           rows={1}
           value={value}
           onChange={(e) => handleInput(e.target.value)}
-          onKeyDown={handleKeyDown}
+          onKeyDown={(e) => { handleKeyDown(e); if (e.key === 'Escape' && onCancelEdit) { e.preventDefault(); onCancelEdit(); } }}
           onPaste={handlePaste}
           placeholder={t('chat.composer.placeholder')}
           disabled={isDispatching}

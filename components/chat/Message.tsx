@@ -21,7 +21,7 @@ import type { Message } from '@earendil-works/pi-ai';
 // normally. Matches the same shape ChatInput uses for inline expansion.
 const SLASH_COMMAND_RE = /^([\s\S]*?)(\/[a-zA-Z0-9_-]+)([\s\S]*)$/;
 
-export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; children?: ReactNode; onEdit?: () => void }) {
+export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Message; children?: ReactNode; onEdit?: () => void; editing?: boolean }) {
   const text = msg ? extractUserText(msg) : null;
   const attachments = useMemo(() => msg ? extractUserAttachments(msg) : null, [msg]);
   // Count chips we'd actually render. Pin directory/file chips AND pin
@@ -55,7 +55,10 @@ export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; ch
   const suffixPart = slashMatch ? (slashMatch[3] ?? '') : null;
 
   return (
-    <div className="group/edit self-end w-full">
+    // `editing` dims the bubble so the user knows which message they're
+    // editing without hiding it — the composer at the bottom is now the
+    // actual editor, and the bubble stays visible as context.
+    <div className={`group/edit self-end w-full transition-opacity${editing ? ' opacity-50' : ''}`}>
       {/* Chips live ABOVE the bubble (composer's chip strip → chat history
           chip strip, mirrored). Reading top-down the user sees what they
           attached before they re-read the text they sent. justify-end keeps
@@ -232,8 +235,9 @@ export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; ch
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-6 shrink-0 absolute -top-1 -left-5 opacity-0 group-hover/edit:opacity-100 text-muted-foreground hover:text-foreground"
+                className="size-6 shrink-0 absolute -top-1 -left-5 opacity-0 group-hover/edit:opacity-100 text-muted-foreground hover:text-foreground disabled:opacity-0"
                 onClick={onEdit}
+                disabled={editing}
                 aria-label={t('chat.message.edit')}
               >
                 <Pencil className="size-3" />

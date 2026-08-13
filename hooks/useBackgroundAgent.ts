@@ -768,6 +768,11 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     //   BG will surface the same error via `error` ServerMessage.
     // - Flipping `isAgentRunning` clears the prior assistant tail and hides
     //   any retry button on the truncated transcript.
+    //
+    // Edit semantics: only the user-text portion of the bubble is replaced.
+    // The bubble's existing structured attachments (images, files, etc.)
+    // stay intact — the user can change the message they sent without
+    // re-picking attachments.
     setState(prev => {
       const truncated = truncateForEditRerun(prev.messages, messageIndex, text);
       return {

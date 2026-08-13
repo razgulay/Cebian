@@ -52,7 +52,7 @@ import {
 } from '@/lib/agent/tool-permissions';
 import type { TurnSettings } from '@/lib/ipc/protocol';
 import type { SessionRecord } from '@/lib/persistence/db';
-import { truncateForRetry, sanitizeAgentMessages } from '@/lib/agent/message-helpers';
+import { truncateForRetry, truncateForEditRerun, sanitizeAgentMessages } from '@/lib/agent/message-helpers';
 import {
   providerCredentials,
   customProviders as customProvidersStorage,
@@ -69,6 +69,8 @@ import { resolveModel } from '@/lib/providers/resolve-model';
 import { t } from '@/lib/i18n';
 import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
 import { broadcastToViewers } from './viewers';
+
+// ─── Helpers ───
 
 // ─── Types ───
 
@@ -1156,6 +1158,123 @@ class SessionManager {
       // bailed via `commitRetryCancel` on abort, phase is still 'preparing' —
       // reset it to 'idle' so the next retry can proceed. The agent is never
       // torn down, so the `AgentSession` entry is always live here.
+      if (agentSession.phase === 'preparing') {
+        agentSession.phase = 'idle';
+        this.updateKeepAlive();
+      }
+    }
+  }
+
+  /**
+   * Edit a previous user message and rerun the agent from that point. The
+   * BG path mirrors `retry` — same phase guards, same persistence, same
+   * continue() resume — but the truncation point is the message at
+   * `messageIndex` (NOT the last user message) and the truncated tail
+   * replaces the user-request text instead of just dropping it. The
+   * bubble's existing structured attachments (images, files, etc.) stay
+   * intact — only the user-text portion of the bubble is updated.
+   */
+  async editAndRerun(
+    sessionId: string,
+    messageIndex: number,
+    text: string,
+    turn?: TurnSettings,
+  ): Promise<void> {
+    const agentSession = await this.getOrCreateAgent(sessionId);
+
+    if (agentSession.phase !== 'idle') {
+      // Concurrent edit-and-rerun while a retry is preparing or the agent
+      // is mid-stream. Silent no-op matches `retry`'s policy — the
+      // in-flight run reconciles viewers.
+      console.debug('[session-manager] editAndRerun: phase not idle, ignored', sessionId, agentSession.phase);
+      return;
+    }
+
+    agentSession.phase = 'preparing';
+    agentSession.prepareController = new AbortController();
+    const signal = agentSession.prepareController.signal;
+    this.updateKeepAlive();
+    let busySnapshot: AgentMessage[] | null = null;
+
+    try {
+      const messages = [...agentSession.agent.state.messages];
+      const truncated = truncateForEditRerun(messages, messageIndex, text);
+      if (!truncated) {
+        throw new Error('No user message found at the given index, or text is empty');
+      }
+
+      busySnapshot = truncated;
+      broadcastToViewers(sessionId, {
+        type: 'session_state',
+        sessionId,
+        messages: truncated,
+        isRunning: true,
+        pendingTools: this.getPendingToolSnapshot(agentSession),
+      });
+
+      if (this.persist(agentSession, truncated)) {
+        await sessionStore.flush(sessionId);
+      }
+
+      // Same model / thinking refresh logic as `retry` — only swap if
+      // the user changed them in this edit's turn.
+      const turnKey = turn?.model
+        ? `${turn.model.provider}/${turn.model.modelId}`
+        : null;
+      const modelChanged = turnKey != null && turnKey !== agentSession.modelKey;
+      const resolved = modelChanged ? await this.resolveSessionModel(turn!.model) : null;
+      if (modelChanged && !resolved) throw new Error('No model selected or model not found');
+
+      if (signal.aborted) {
+        await this.commitRetryCancel(agentSession, truncated);
+        return;
+      }
+
+      agentSession.toolCtx.cancelAll();
+      agentSession.permissionBridge.cancel();
+      agentSession.agent.state.messages = truncated;
+      if (resolved) {
+        agentSession.agent.state.model = resolved.model;
+        agentSession.modelKey = turnKey!;
+      }
+      const nextThinking = turn?.thinkingLevel != null
+        ? clampThinkingLevel(agentSession.agent.state.model, turn.thinkingLevel)
+        : null;
+      const thinkingChanged = nextThinking != null && nextThinking !== agentSession.agent.state.thinkingLevel;
+      if (thinkingChanged) {
+        agentSession.agent.state.thinkingLevel = nextThinking!;
+      }
+      if (agentSession.sessionCreated && (modelChanged || thinkingChanged)) {
+        await sessionStore.updateSettings(sessionId, {
+          provider: modelChanged ? turn!.model!.provider : undefined,
+          model: modelChanged ? turn!.model!.modelId : undefined,
+          thinkingLevel: thinkingChanged ? agentSession.agent.state.thinkingLevel : undefined,
+        });
+      }
+
+      broadcastToViewers(sessionId, {
+        type: 'session_state',
+        sessionId,
+        messages: truncated,
+        isRunning: true,
+        pendingTools: this.getPendingToolSnapshot(agentSession),
+      });
+
+      await agentSession.agent.continue();
+    } catch (err) {
+      if (busySnapshot && agentSession.phase === 'preparing') {
+        agentSession.agent.state.messages = busySnapshot;
+        broadcastToViewers(agentSession.sessionId, {
+          type: 'session_state',
+          sessionId: agentSession.sessionId,
+          messages: busySnapshot,
+          isRunning: false,
+          pendingTools: [],
+        });
+      }
+      throw err;
+    } finally {
+      agentSession.prepareController = undefined;
       if (agentSession.phase === 'preparing') {
         agentSession.phase = 'idle';
         this.updateKeepAlive();

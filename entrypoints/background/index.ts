@@ -459,6 +459,28 @@ export default defineBackground(() => {
         break;
       }
 
+      case 'edit_rerun': {
+        // Edit a previous user message and rerun the agent from that
+        // point. Mirrors `retry`'s error surface — any BG-side failure
+        // (no user message at that index, agent already running, model
+        // setup) lands as an `error` ServerMessage the UI can toast.
+        // The bubble's existing structured attachments (images, files,
+        // etc.) stay intact — only the user-text portion of the bubble
+        // is updated.
+        setViewing(port, msg.sessionId);
+        sessionManager.editAndRerun(msg.sessionId, msg.messageIndex, msg.text, {
+          model: msg.model,
+          thinkingLevel: msg.thinkingLevel,
+        }).catch((err) => {
+          post(port, {
+            type: 'error',
+            sessionId: msg.sessionId,
+            error: err.message ?? String(err),
+          });
+        });
+        break;
+      }
+
       case 'resolve_tool':
         sessionManager.resolveTool(msg.sessionId, msg.toolName, msg.response);
         break;

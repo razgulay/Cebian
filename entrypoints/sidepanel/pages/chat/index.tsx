@@ -13,15 +13,6 @@ import {
 // inside chat messages. Kept in sync with the `role` attribute on the
 // messages container rendered below.
 const CHAT_MESSAGES_SELECTOR = '[role="chat-messages"]';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Textarea } from '@/components/ui/textarea';
 import { ChatInput, type ChatInputHandle } from '@/components/chat/ChatInput';
 import { SelectionQuoteButton } from '@/components/chat/SelectionQuoteButton';
 import { WelcomeScreen } from '@/components/chat/WelcomeScreen';
@@ -51,7 +42,7 @@ import { getToolLabel } from '@/lib/tools/labels';
 import { uiToolRegistry } from '@/lib/tools/ui-registry';
 import { isCompactionSummary } from '@/lib/agent/compaction';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
-import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
+import { useBackgroundAgent, type PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
@@ -499,30 +490,42 @@ useLayoutEffect(() => {
   // and resumes the agent. Multi-window safe because the BG's broadcast
   // reconciles every subscriber.
   //
-  // `editingIndex` doubles as "is dialog open"; we never display two dialogs
-  // at once. While the agent is running, edits are blocked — the BG's phase
-  // guard would silently no-op anyway, but hiding the UI is friendlier.
+  // Inline edit replaces the old Radix Dialog: when the user clicks the
+  // pencil on a prior user turn, the bottom ChatInput pre-fills with that
+  // message's text. `editingIndex` doubles as "is edit active". The seed
+  // text is computed lazily by `useMemo` once per `editingIndex` change
+  // so we don't re-decode the same message on every render. Attachments
+  // and mentions stay on the bubble — the user can't edit them in this
+  // iteration (the BG's text-only edit_rerun IPC preserves the bubble's
+  // existing attachments).
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const editingMessage = editingIndex != null ? messages[editingIndex] : null;
-  const editingText = editingMessage && editingMessage.role === 'user' ? extractUserText(editingMessage) : '';
-  const [editDraft, setEditDraft] = useState('');
+
+  // Pre-fill text for the inline-edit composer. `useMemo` over
+  // `[editingIndex, messages]` — when the user clicks edit on a different
+  // bubble, we recompute; re-renders for unrelated state changes
+  // (agent running, tool permissions) keep the seed stable so the
+  // composer's lazy `useState` initializer doesn't see a fresh value.
+  const editSeedValue = useMemo(() => {
+    if (editingIndex == null) return undefined;
+    const m = messages[editingIndex];
+    if (!m || m.role !== 'user') return undefined;
+    return extractUserText(m);
+  }, [editingIndex, messages]);
 
   const openEdit = useCallback((index: number) => {
     const m = messages[index];
     if (!m || m.role !== 'user') return;
-    setEditDraft(extractUserText(m));
     setEditingIndex(index);
   }, [messages]);
 
   const closeEdit = useCallback(() => {
     setEditingIndex(null);
-    setEditDraft('');
   }, []);
 
-  const submitEdit = useCallback(() => {
-    if (editingIndex == null) return;
-    const trimmed = editDraft.trim();
-    if (!trimmed) return;
+  const submitEdit = useCallback(async (text: string): Promise<PromptDispatchResult> => {
+    if (editingIndex == null) return { status: 'notDispatched', reason: 'unavailable' };
+    const trimmed = text.trim();
+    if (!trimmed) return { status: 'notDispatched', reason: 'empty' };
     debugLog.info('ui', 'send:edit_resubmit',
       withSession({ sessionId: activeSessionId ?? '', targetIdx: editingIndex }, activeSessionId ?? ''));
     editAndRerun(editingIndex, trimmed, {
@@ -532,7 +535,8 @@ useLayoutEffect(() => {
     closeEdit();
     setSticky(false);
     setPendingSnapToken((t) => t + 1);
-  }, [editingIndex, editDraft, editAndRerun, turnModel, turnThinking, closeEdit, setSticky, activeSessionId]);
+    return { status: 'dispatched' };
+  }, [editingIndex, editAndRerun, turnModel, turnThinking, closeEdit, setSticky, activeSessionId]);
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   // 压缩期间隐藏思考占位符，改由专门的压缩状态条提示，避免两个动效重叠。
@@ -589,6 +593,14 @@ useLayoutEffect(() => {
 
             if (msg.role === 'user') {
               const isLastUser = idx === lastUserMsgIndex;
+              // Inline-edit placeholder: when this bubble is being edited,
+              // hide it (height: 0) so the layout below doesn't shift. The
+              // bottom ChatInput replaces the bubble as the editor — the
+              // user perceives "I'm editing this bubble" even though the
+              // visual slot is the bottom composer. Replaces the old
+              // dialog-based flow where the bubble stayed put behind a
+              // modal popup.
+              const isEditing = editingIndex === idx;
               return (
                 <div
                   key={`user-wrap-${idx}`}
@@ -598,7 +610,8 @@ useLayoutEffect(() => {
                   <UserMessageBubble
                     key={`user-${idx}`}
                     msg={msg}
-                    onEdit={effectiveRunning ? undefined : () => openEdit(idx)}
+                    onEdit={effectiveRunning || isEditing ? undefined : () => openEdit(idx)}
+                    editing={isEditing}
                   />
                 </div>
               );
@@ -928,9 +941,20 @@ useLayoutEffect(() => {
         )}
       </div>
 
+      {/* Inline edit replaces the old Dialog: the bottom ChatInput
+          switches to edit mode when `editingIndex != null`. The seed
+          props pre-fill the value/attachments/mentions so the user can
+          keep the existing chips and edit text in place. `key` on the
+          ChatInput forces a remount when the edit target changes — the
+          composer's `useState` initializers run only on first render,
+          so a fresh edit (different index) needs a fresh component
+          instance to re-seed. The `editingIndex ?? 'compose'` trick
+          keeps the compose mode mounted under a stable key when no edit
+          is active. */}
       <ChatInput
+        key={editingIndex ?? 'compose'}
         ref={inputRef}
-        onSend={handleSend}
+        onSend={editingIndex != null ? submitEdit : handleSend}
         onCancel={cancel}
         isAgentRunning={effectiveRunning}
         onOpenSettings={onOpenSettings}
@@ -941,46 +965,9 @@ useLayoutEffect(() => {
         thinkingLevel={turnThinking}
         onModelChange={handleModelChange}
         onThinkingChange={handleThinkingChange}
+        initialValue={editingIndex != null ? editSeedValue : undefined}
+        onCancelEdit={editingIndex != null ? closeEdit : undefined}
       />
-
-      <Dialog open={editingIndex != null} onOpenChange={(open) => { if (!open) closeEdit(); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('chat.edit.title')}</DialogTitle>
-            <DialogDescription>{t('chat.edit.description')}</DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={editDraft}
-            onChange={(e) => setEditDraft(e.target.value)}
-            className="min-h-32"
-            autoFocus
-            onFocus={(e) => {
-              // Caret mặc định ở đầu khi autoFocus; đẩy về cuối để user
-              // có thể gõ tiếp mà không phải bấm End.
-              const target = e.currentTarget;
-              const len = target.value.length;
-              target.setSelectionRange(len, len);
-            }}
-            onKeyDown={(e) => {
-              // Cmd/Ctrl+Enter submits, Escape cancels — same affordances
-              // as the chat composer for muscle-memory continuity.
-              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault();
-                submitEdit();
-              }
-            }}
-          />
-          <DialogFooter>
-            <Button variant="ghost" onClick={closeEdit}>{t('common.cancel')}</Button>
-            <Button
-              onClick={submitEdit}
-              disabled={editDraft.trim().length === 0 || editDraft === editingText}
-            >
-              {t('chat.edit.submit')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Floating "Quote" button — appears whenever the user selects text
           inside a chat message. Clicking it inserts the formatted Markdown
