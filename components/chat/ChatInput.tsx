@@ -496,17 +496,25 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // `displayText` is what shows in the user's bubble in chat history.
     // The chips already previewed the quoted text, so the bubble only
     // needs the user's own typed words — no need to echo the quote back.
-    // Slash-command shortening (`/foo bar` → expanded body) is handled
-    // later in this function and overwrites `text` while keeping
-    // `displayText` short.
-    const displayText = outgoingText.trim();
+    // Slash commands (`/foo bar`) now produce a `[DIRECTIVE — ATTACHED
+    // COMMAND: "<name>"]...` prefix (same shape as mention chips); the
+    // slash block below overwrites both `text` and `displayText` so the
+    // bubble shows the user's typed words after the command (`bar`),
+    // never the expanded prompt body. The chip in the bubble's chip
+    // strip carries the command name visually.
+    let displayText = outgoingText.trim();
     const dispatchSessionId = sessionIdRef.current;
 
     isDispatchingRef.current = true;
     setIsDispatching(true);
 
     try {
-      // Resolve prompt at send-time if inline expansion is disabled
+      // Resolve prompt at send-time if inline expansion is disabled. The
+      // expanded body is wrapped in a COMMAND directive so the LLM sees
+      // it as a hybrid-injected prompt framing (matching mention chips)
+      // and the bubble parser peels the directive off, leaving just the
+      // user's text after the command. Empty user input means an empty
+      // bubble — the chip alone tells the user which command fired.
       if (!isExpandInline && text.startsWith('/')) {
         const match = text.match(/^\/([a-zA-Z0-9_-]+)(?:\s+(.*))?$/s);
         if (match) {
@@ -531,7 +539,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 replaced = replaced + '\n\n' + userInput.trim();
               }
               debugLog.info('ui', 'slash_command:resolved', { name: foundPrompt.name });
-              text = replaced;
+              // Hybrid-inject the expanded body as a COMMAND directive, then
+              // follow with the user's typed words. The directive prefix
+              // matches the mention-chip shape so `stripDirectives` and
+              // `extractInlineDirectives` in lib/agent/message-helpers.ts
+              // handle bubble rendering without a new parser.
+              const slashDirective =
+                `[DIRECTIVE — ATTACHED COMMAND: "${foundPrompt.name}"]\n\n${replaced}\n\n[END DIRECTIVE]`;
+              text = userInput ? `${slashDirective}\n\n---\n\n${userInput}` : slashDirective;
+              // Bubble shows just the user-typed words (not the expanded
+              // prompt body — that lives behind the chip). Empty input
+              // means the bubble renders as empty; the chip in the strip
+              // is what the user actually sees for "what command did I run".
+              displayText = userInput;
             } catch {
               debugLog.info('ui', 'send:rejected', { reason: 'slash_read_failed', name });
               toast.error(t('chat.composer.readPromptFailed'));

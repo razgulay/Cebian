@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { sanitizeAgentMessages, truncateForEditRerun, extractUserAttachments, extractUserText, stripDirectives } from './message-helpers';
+import { sanitizeAgentMessages, truncateForEditRerun, extractUserAttachments, extractUserText, extractInlineDirectives, stripDirectives } from './message-helpers';
 
 // 用 `as unknown as AgentMessage[]` 构造违反类型契约的运行时数据（这正是本函数要兜的场景）。
 const asMessages = (arr: unknown[]) => arr as unknown as AgentMessage[];
@@ -118,6 +118,35 @@ describe('stripDirectives', () => {
     expect(stripDirectives('hello world')).toBe('hello world');
     expect(stripDirectives('  multi\n\nline  \n')).toBe('multi\n\nline');
   });
+
+  it('removes a slash command directive (COMMAND variant) and trailing separator', () => {
+    // Slash command expansion (`/english xin chào`) wraps the expanded
+    // prompt body in `[DIRECTIVE — ATTACHED COMMAND: "english"]...` at
+    // send-time so the LLM sees the full body while the bubble only
+    // shows the user's typed words after the command. Bubble stripping
+    // must peel COMMAND directives off the same way PROMPT/SKILL go.
+    const out = stripDirectives(
+      '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]\n\n---\n\nxin chào',
+    );
+    expect(out).toBe('xin chào');
+  });
+
+  it('removes a stacked COMMAND + SKILL combo before the user text', () => {
+    const out = stripDirectives(
+      '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody1\n\n[END DIRECTIVE]\n\n---\n\n[DIRECTIVE — ATTACHED SKILL: "search"]\n\nbody2\n\n[END DIRECTIVE]\n\n---\n\nxin chào',
+    );
+    expect(out).toBe('xin chào');
+  });
+
+  it('returns empty for a directive-only slash command (no user text after)', () => {
+    // User typed just `/english` with nothing after — the bubble shows
+    // an empty bubble body; the chip carries the command name. Verify
+    // stripDirectives leaves nothing behind in this case.
+    const out = stripDirectives(
+      '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]',
+    );
+    expect(out).toBe('');
+  });
 });
 
 describe('extractUserText', () => {
@@ -181,6 +210,87 @@ describe('extractUserText', () => {
     ].join('\n');
     const msg = asMessages([{ role: 'user', content: raw, timestamp: 1 }])[0];
     expect(extractUserText(msg as any)).toBe('xin chào');
+  });
+
+  it('hides the expanded prompt body of a slash command and shows just the user input', () => {
+    // Slash command expansion at send-time wraps the expanded prompt body
+    // in `[DIRECTIVE — ATTACHED COMMAND: "english"]...` and follows it
+    // with the user's typed words (after the command). When the chat is
+    // reopened or refreshed, no pending displayText override exists, so
+    // extractUserText must do the peel — otherwise the bubble would show
+    // "Always respond in English" instead of the user's actual ask.
+    const msg = asMessages([
+      {
+        role: 'user',
+        content: '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]\n\n---\n\nxin chào',
+        timestamp: 1,
+      },
+    ])[0];
+
+    expect(extractUserText(msg as any)).toBe('xin chào');
+  });
+
+  it('returns empty string for a directive-only slash command persisted in chat history', () => {
+    // User typed just `/english` with nothing after. The BG stores the
+    // directive block alone (no user-text segment). Reopening the chat
+    // must show an empty bubble body — the chip is the only visual
+    // confirmation that the command fired.
+    const msg = asMessages([
+      {
+        role: 'user',
+        content: '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]',
+        timestamp: 1,
+      },
+    ])[0];
+
+    expect(extractUserText(msg as any)).toBe('');
+  });
+});
+
+describe('extractInlineDirectives', () => {
+  it('parses a PROMPT directive and surfaces its name + kind', () => {
+    expect(extractInlineDirectives('[DIRECTIVE — ATTACHED PROMPT: "english"]')).toEqual([
+      { name: 'english', kind: 'prompt', pinned: false },
+    ]);
+  });
+
+  it('parses a SKILL directive', () => {
+    expect(extractInlineDirectives('[DIRECTIVE — ATTACHED SKILL: "search"]')).toEqual([
+      { name: 'search', kind: 'skill', pinned: false },
+    ]);
+  });
+
+  it('parses a COMMAND directive (slash command expansion)', () => {
+    // Slash command (`/english xin chào`) emits a COMMAND directive at
+    // send-time so the bubble renders the same chip-strip shape as
+    // mention chips. extractInlineDirectives must surface `command`
+    // kind for the bubble renderer to pick the right branch.
+    expect(extractInlineDirectives('[DIRECTIVE — ATTACHED COMMAND: "english"]')).toEqual([
+      { name: 'english', kind: 'command', pinned: false },
+    ]);
+  });
+
+  it('preserves order when multiple directives of different kinds stack', () => {
+    const text =
+      '[DIRECTIVE — ATTACHED PROMPT: "a"]\n\n[END DIRECTIVE]\n\n---\n\n' +
+      '[DIRECTIVE — ATTACHED COMMAND: "b"]\n\n[END DIRECTIVE]\n\n---\n\n' +
+      '[DIRECTIVE — ATTACHED SKILL: "c"]\n\n[END DIRECTIVE]';
+    expect(extractInlineDirectives(text)).toEqual([
+      { name: 'a', kind: 'prompt', pinned: false },
+      { name: 'b', kind: 'command', pinned: false },
+      { name: 'c', kind: 'skill', pinned: false },
+    ]);
+  });
+
+  it('flags pinned="true" on PROMPT directives (pin chips skip the bubble badge)', () => {
+    expect(
+      extractInlineDirectives('[DIRECTIVE — ATTACHED PROMPT: "x" pinned="true"]'),
+    ).toEqual([{ name: 'x', kind: 'prompt', pinned: true }]);
+  });
+
+  it('returns an empty array when the text has no directives', () => {
+    expect(extractInlineDirectives('hello world')).toEqual([]);
+    expect(extractInlineDirectives('<user-request>\nplain text\n</user-request>')).toEqual([]);
   });
 });
 

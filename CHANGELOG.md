@@ -18,6 +18,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### 变更 / Changed
+
+- 斜杠命令（如 `/english`）现在与提及 chip（`@english`）的渲染一致：展开后的提示词主体通过 `[DIRECTIVE — ATTACHED COMMAND: "<name>"]` 注入到发送消息中（与 `PROMPT` / `SKILL` 走同一套混合注入管线），气泡上方的 chip 条会显示命令 chip（带 Zap 图标和琥珀色调），气泡本身只展示用户输入的命令后文字，不再展开整段提示词主体；模型仍按原样接收完整展开内容
+
+- Slash commands (e.g. `/english`) now render the same way as mention chips (`@english`): the expanded prompt body is injected into the outgoing message via `[DIRECTIVE — ATTACHED COMMAND: "<name>"]` (same hybrid-injection pipeline as `PROMPT` / `SKILL`); the chip strip above the bubble shows a command chip with a Zap icon and amber tone, and the bubble itself only displays the user's typed words after the command instead of the full expanded prompt body — the model still receives the complete expanded body as before
+
 ## 1.4.2 - 2026-08-11
 
 ### 变更 / Changed

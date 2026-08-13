@@ -24,7 +24,7 @@ export interface ParsedUserAttachments {
    *  `pinned` mirrors the same flag we already use for directory/file
    *  envelopes: pin chips skip the bubble badge (the composer strip is
    *  the source of truth for pins), mention chips render as confirmation. */
-  inlineDirectives: { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[];
+  inlineDirectives: { name: string; kind: 'prompt' | 'skill' | 'command'; pinned: boolean }[];
   /** PDF attachments, surfaced separately so the bubble can render a
    *  "PDF · N pages" badge instead of a generic file chip. Extracted
    *  page count + truncation flag are the same values written by the
@@ -165,7 +165,7 @@ function replaceLastUserRequest(raw: string, newText: string): string {
 
 // Inline directive blocks emitted by ChatInput's hybrid injection — see the
 // `inlineDirectiveParts` builder there. They wrap each pinned/mentioned
-// prompt or skill body as `[DIRECTIVE — ATTACHED PROMPT/SKILL: "name"]\n\n<body>\n\n[END DIRECTIVE]`,
+// prompt, skill, or slash command body as `[DIRECTIVE — ATTACHED PROMPT/SKILL/COMMAND: "name"]\n\n<body>\n\n[END DIRECTIVE]`,
 // then join them (and the user text) with `\n\n---\n\n`. The LLM sees them
 // because they're in the user message; the bubble MUST NOT show them — the
 // user finds the visible prompt body in their chat history jarring.
@@ -174,23 +174,28 @@ function replaceLastUserRequest(raw: string, newText: string): string {
 // Pin directives also carry `pinned="true"` so the bubble can distinguish
 // them from mention directives at parse time and skip their chip (the
 // composer strip is the source of truth for pins).
-const DIRECTIVE_BLOCK_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
+const DIRECTIVE_BLOCK_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
 const SEPARATOR_LINE_RE = /^\s*---\s*$/;
 
-/** Parse `[DIRECTIVE — ATTACHED PROMPT/SKILL: "name"]` opening tags to
+/** Parse `[DIRECTIVE — ATTACHED PROMPT/SKILL/COMMAND: "name"]` opening tags to
  *  recover the chips the user attached. Returns one entry per directive
  *  in the order they appear in the text. `pinned` is true when the
  *  directive carried `pinned="true"` (a pin chip — composer strip already
  *  shows it, the bubble should suppress the badge). The directive BLOCKS
  *  are still removed from the bubble text by `stripDirectives`; this only
- *  surfaces their names for chip rendering. */
-export function extractInlineDirectives(text: string): { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[] {
-  const re = /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL):\s+"([^"]*)"(\s+pinned="true")?\]/g;
-  const out: { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[] = [];
+ *  surfaces their names for chip rendering.
+ *  - `prompt` / `skill`: mention chip variants (composer [@] popover).
+ *  - `command`: slash command (`/english`) — ChatInput wraps the expanded
+ *    prompt body in this directive at send-time so the bubble shows just
+ *    the user's typed words after the command, with the chip carrying the
+ *    command name. */
+export function extractInlineDirectives(text: string): { name: string; kind: 'prompt' | 'skill' | 'command'; pinned: boolean }[] {
+  const re = /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND):\s+"([^"]*)"(\s+pinned="true")?\]/g;
+  const out: { name: string; kind: 'prompt' | 'skill' | 'command'; pinned: boolean }[] = [];
   for (const m of text.matchAll(re)) {
     out.push({
       name: m[2],
-      kind: m[1].toLowerCase() as 'prompt' | 'skill',
+      kind: m[1].toLowerCase() as 'prompt' | 'skill' | 'command',
       pinned: m[3] !== undefined,
     });
   }

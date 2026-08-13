@@ -14,12 +14,16 @@ import { downloadFile, formatDuration, formatCompactCount } from '@/lib/utils';
 import type { Message } from '@earendil-works/pi-ai';
 
 /* ─── User Message ─── */
-// Slash commands like `/writing` get the command token bolded with a zap
-// icon prefix so the user can immediately tell "this is a command" without
-// reading the expanded prompt body. The rest of the bubble (any user input
-// before or after the command, or the full text for non-commands) renders
-// normally. Matches the same shape ChatInput uses for inline expansion.
-const SLASH_COMMAND_RE = /^([\s\S]*?)(\/[a-zA-Z0-9_-]+)([\s\S]*)$/;
+// Slash commands (`/english xin chào`) used to render inline with a Zap
+// icon and bolded command token. After the directive-based rewrite
+// (see TODO.md item 5), they produce a `[DIRECTIVE — ATTACHED COMMAND:
+// "english"]...` block at send-time; the bubble now treats them as a
+// third inline-directive variant (alongside PROMPT / SKILL chips) and
+// renders the command as a chip in the chip strip ABOVE the bubble,
+// matching mention chips visually. The bubble text shows only the
+// user's typed words after the command — never the expanded prompt
+// body. See `extractInlineDirectives` in `lib/agent/message-helpers.ts`
+// and `lib/agent/rewrite-last-user-message.ts`.
 
 export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Message; children?: ReactNode; onEdit?: () => void; editing?: boolean }) {
   const text = msg ? extractUserText(msg) : null;
@@ -30,11 +34,12 @@ export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Me
   // the strip would render an empty container (just spacing) for messages
   // that carried only pins. Other kinds (image / element / PDF /
   // recording / mention prompt / mention skill / mention directory /
-  // mention file) have no pin equivalent and always render when present.
-  // Note: inlineDirective chips for mentions also render — hybrid
-  // injection inlines prompt/skill bodies into the user text (so the LLM
-  // sees them as user-typed instructions with full weight) but the UX
-  // layer still needs confirmation chips on the bubble.
+  // mention file / slash command) have no pin equivalent and always
+  // render when present. Note: inlineDirective chips for mentions and
+  // slash commands also render — hybrid injection inlines their bodies
+  // into the user text (so the LLM sees them as user-typed instructions
+  // with full weight) but the UX layer still needs confirmation chips
+  // on the bubble.
   const hasAttachments = attachments && (
     attachments.images.length > 0
     || attachments.elements.length > 0
@@ -46,13 +51,6 @@ export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Me
     || attachments.directories.some((d) => !d.pinned)
     || attachments.inlineDirectives.some((d) => !d.pinned)
   );
-  // Split the bubble text into prefix (before the command), the command token
-  // (bolded + zap icon), and suffix (after the command). Only the
-  // `/commandname` part gets the command treatment.
-  const slashMatch = text != null ? text.match(SLASH_COMMAND_RE) : null;
-  const prefixPart = slashMatch && slashMatch[1] ? slashMatch[1] : null;
-  const commandPart = slashMatch ? slashMatch[2] : null;
-  const suffixPart = slashMatch ? (slashMatch[3] ?? '') : null;
 
   return (
     // `editing` dims the bubble so the user knows which message they're
@@ -190,6 +188,13 @@ export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Me
             // composer strip is the source of truth for pins. Mention
             // directives (the common case) render as confirmation chips
             // matching the look of the old `<attached-prompt>` chip.
+            //
+            // The `command` variant is produced by slash-command expansion
+            // (see TODO.md item 5): ChatInput wraps the expanded prompt
+            // body in `[DIRECTIVE — ATTACHED COMMAND: "<name>"]...` at
+            // send-time, the bubble strips the directive body and renders
+            // a chip with a Zap icon (preserving the visual identity of
+            // the old inline slash rendering) and `/{name}` label.
             d.pinned ? null : d.kind === 'prompt' ? (
               <Badge
                 key={`inline-prompt-${i}`}
@@ -200,7 +205,7 @@ export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Me
                 <FileText className="size-2.5 shrink-0" />
                 <span className="truncate max-w-32">/{d.name}</span>
               </Badge>
-            ) : (
+            ) : d.kind === 'skill' ? (
               <Badge
                 key={`inline-skill-${i}`}
                 variant="outline"
@@ -210,24 +215,23 @@ export function UserMessageBubble({ msg, children, onEdit, editing }: { msg?: Me
                 <Sparkles className="size-2.5 shrink-0" />
                 <span className="truncate max-w-32">{d.name}</span>
               </Badge>
+            ) : (
+              <Badge
+                key={`inline-command-${i}`}
+                variant="outline"
+                className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5"
+                title={d.name}
+              >
+                <Zap className="size-2.5 shrink-0" />
+                <span className="truncate max-w-32">/{d.name}</span>
+              </Badge>
             )
           ))}
         </div>
       )}
       <div className="relative w-fit ml-auto">
         <div className="bg-slate-200 dark:bg-slate-700 px-3.5 py-2.5 rounded-[4rem] rounded-tr-sm text-[length:var(--chat-font-size)] font-normal leading-relaxed whitespace-pre-wrap break-words">
-          {commandPart ? (
-            <span>
-              {prefixPart && <span>{prefixPart}</span>}
-              <span className="inline-flex items-baseline gap-1 font-bold">
-                <Zap className="size-3.5 shrink-0 self-center text-amber-400" aria-hidden />
-                <span>{commandPart}</span>
-              </span>
-              {suffixPart && <span>{suffixPart}</span>}
-            </span>
-          ) : (
-            <span>{text ?? children}</span>
-          )}
+          <span>{text ?? children}</span>
         </div>
         {onEdit && text != null && (
           <Tooltip>

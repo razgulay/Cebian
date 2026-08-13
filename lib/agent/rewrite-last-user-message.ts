@@ -19,13 +19,18 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
  *   the close makes the bubble's `extractLastUserRequest` latch onto an
  *   inner skill-body close tag, leaking `<reminder-instructions>` /
  *   `<user-request>` template tags into the live bubble (a user-reported
- *   regression).
+ *   regression). Directives come in three variants:
+ *     - PROMPT (mention chip)
+ *     - SKILL (mention chip)
+ *     - COMMAND (slash command `/foo`) — ChatInput builds the same shape
+ *       from the expanded prompt body so slash commands render as a chip
+ *       above the bubble instead of an inline bolded token.
  * - Directive only, no separator (user typed nothing) → return the text
  *   block identity-equal so the bubble still renders the chip.
  * - No directive → whole-text replacement.
  */
 
-const DIRECTIVE_OPEN_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL):/;
+const DIRECTIVE_OPEN_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND):/;
 const DIRECTIVE_USER_SEP = '\n\n---\n\n';
 const USER_REQUEST_CLOSE = '</user-request>';
 

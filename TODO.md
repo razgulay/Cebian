@@ -176,6 +176,8 @@ Cần làm:
 
 **Không làm trong cleanup hiện tại** — đây là feature change (slash expansion path + bubble renderer), đụng UX. Đợi cleanup `cleanup/deep-project-cleanup` xong hết rồi làm 1 task riêng, branch mới.
 
+✅ **Done** trên `feature/slash-command-chip` — ChatInput build `[DIRECTIVE — ATTACHED COMMAND: "<name>"]` ở send-time thay vì replace text, `extractInlineDirectives` / `stripDirectives` / `rewriteLastUserMessage` đều extend regex để nhận COMMAND variant, Message.tsx bỏ inline SLASH_COMMAND_RE rendering, thêm chip branch dùng Zap icon + tone amber (giữ visual identity với inline cũ). Bubble giờ chỉ thấy user-typed words sau command; chip strip ABOVE bubble mang command name.
+
 ### 6. `lib/agent/` 改名（用户暂缓）
 
 搬走 `system-prompt` / `page-context` 后，`lib/agent/` 只剩 attachments / compaction /
