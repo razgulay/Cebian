@@ -1191,6 +1191,36 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     if (isSlashMenuVisible) setSelectedPromptIndex(0);
   }, [isSlashMenuVisible]);
 
+  // Inline edit: when the user clicks the pencil on a previous bubble, the
+  // sidepanel swaps the ChatInput instance (via `key={editingIndex ?? 'compose'}`)
+  // and passes the old message's text as `initialValue`. Without an explicit
+  // focus call, the textarea mounts filled with text but unfocused — the user
+  // sees no caret and has to click before they can type, which feels broken
+  // for a "click edit, start editing" flow. Focus on mount when an edit seed
+  // is present so the caret blinks at the end and the user can keep typing
+  // immediately. Skipped on mobile (the soft keyboard pops up on focus and
+  // we don't want to hijack the screen until the user actually taps the
+  // textarea — same policy as handleSend's post-send refocus).
+  useEffect(() => {
+    if (!initialValue) return;
+    if (isActiveTabMobile) return;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.focus();
+    // Place the caret at the end so the user can keep typing without
+    // re-positioning the cursor — most apps position-at-end for "edit
+    // my last message" flows.
+    const len = ta.value.length;
+    try {
+      ta.setSelectionRange(len, len);
+    } catch {
+      // Some input types (e.g. email) reject setSelectionRange — fall
+      // back to the default caret position rather than throwing.
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only:
+  // ChatInput remounts on key change, so this runs once per edit session.
+  }, []);
+
   // Keep the highlighted item in view when navigating with the keyboard.
   useEffect(() => {
     if (!isSlashMenuVisible) return;
