@@ -56,3 +56,9 @@ export const TOOL_SUBAGENT_SCROLL = 'subagent_scroll' as const;
  *  behind an expand interaction. No user-prompt permission gate — the
  *  sub-agent decides autonomously and the gate only allows the click action. */
 export const TOOL_SUBAGENT_CLICK = 'subagent_click' as const;
+/** Tool that lists files + chunk counts + embedder metadata for a named
+ *  RAG collection. Read-only Neon query; does NOT touch VFS. Exists so the
+ *  LLM has a way to answer "what files are in <collection>?" without
+ *  reaching for fs_list/fs_search (which only see the virtual filesystem
+ *  under /home/user/...). */
+export const TOOL_RAG_INSPECT = 'rag_inspect' as const;

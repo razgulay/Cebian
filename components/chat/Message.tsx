@@ -1,4 +1,4 @@
-import { Bot, ChevronRight, FileText, Film, FoldVertical, Lightbulb, CheckCircle, Crosshair, Pencil, ShieldAlert, FileType, Zap } from 'lucide-react';
+import { Bot, ChevronRight, FileText, Film, Folder, FoldVertical, Lightbulb, CheckCircle, Crosshair, Pencil, ShieldAlert, FileType, Sparkles, Zap } from 'lucide-react';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -24,7 +24,28 @@ const SLASH_COMMAND_RE = /^([\s\S]*?)(\/[a-zA-Z0-9_-]+)([\s\S]*)$/;
 export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; children?: ReactNode; onEdit?: () => void }) {
   const text = msg ? extractUserText(msg) : null;
   const attachments = useMemo(() => msg ? extractUserAttachments(msg) : null, [msg]);
-  const hasAttachments = attachments && (attachments.images.length > 0 || attachments.elements.length > 0 || attachments.files.length > 0 || attachments.pdfs.length > 0 || attachments.recordings.length > 0);
+  // Count chips we'd actually render. Pin directory/file chips AND pin
+  // directive chips are suppressed (the composer strip is the source of
+  // truth for pins), so `hasAttachments` must skip them too — otherwise
+  // the strip would render an empty container (just spacing) for messages
+  // that carried only pins. Other kinds (image / element / PDF /
+  // recording / mention prompt / mention skill / mention directory /
+  // mention file) have no pin equivalent and always render when present.
+  // Note: inlineDirective chips for mentions also render — hybrid
+  // injection inlines prompt/skill bodies into the user text (so the LLM
+  // sees them as user-typed instructions with full weight) but the UX
+  // layer still needs confirmation chips on the bubble.
+  const hasAttachments = attachments && (
+    attachments.images.length > 0
+    || attachments.elements.length > 0
+    || attachments.files.some((f) => !f.pinned)
+    || attachments.pdfs.length > 0
+    || attachments.recordings.length > 0
+    || attachments.prompts.length > 0
+    || attachments.skills.length > 0
+    || attachments.directories.some((d) => !d.pinned)
+    || attachments.inlineDirectives.some((d) => !d.pinned)
+  );
   // Split the bubble text into prefix (before the command), the command token
   // (bolded + zap icon), and suffix (after the command). Only the
   // `/commandname` part gets the command treatment.
@@ -35,6 +56,161 @@ export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; ch
 
   return (
     <div className="group/edit self-end w-full">
+      {/* Chips live ABOVE the bubble (composer's chip strip → chat history
+          chip strip, mirrored). Reading top-down the user sees what they
+          attached before they re-read the text they sent. justify-end keeps
+          the strip right-aligned to match the bubble. mb-1.5 + dropping
+          mt-1.5 puts the gap between strip and bubble (was below). */}
+      {hasAttachments && (
+        <div className="flex gap-1.5 flex-wrap items-center justify-end mb-1 px-1">
+          {attachments.images.map((img, i) => (
+            <Badge
+              key={`img-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-0.5 pr-1 text-purple-400 border-purple-400/20 bg-purple-400/5"
+            >
+              <img
+                src={`data:${img.mimeType};base64,${img.data}`}
+                alt={t('chat.attachments.imageAlt')}
+                className="h-3.5 w-auto rounded-sm object-cover cursor-pointer"
+                onClick={() => showDialog('image-preview', {
+                  src: `data:${img.mimeType};base64,${img.data}`,
+                })}
+              />
+              {t('chat.attachments.image')}
+            </Badge>
+          ))}
+          {attachments.elements.map((el, i) => (
+            <Badge
+              key={`el-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-info border-info/20 bg-info/5"
+            >
+              <Crosshair className="size-2.5 shrink-0" />
+              <span className="truncate max-w-24">{el.selector}</span>
+            </Badge>
+          ))}
+          {attachments.files.map((f, i) => (
+            // Skip pin mention-files — the chip is already in the composer
+            // strip, repeating it on every bubble just clutters the chat
+            // history. The envelope still reaches the LLM; this is purely
+            // a visual filter. Mention mention-files (`pinned !== true`)
+            // still render as confirmation.
+            f.pinned ? null : (
+            <Badge
+              key={`file-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-emerald-400 border-emerald-400/20 bg-emerald-400/5"
+            >
+              <FileText className="size-2.5 shrink-0" />
+              <span className="truncate max-w-24">{f.name}</span>
+            </Badge>
+            )
+          ))}
+          {attachments.pdfs.map((p, i) => (
+            <Badge
+              key={`pdf-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-rose-400 border-rose-400/20 bg-rose-400/5"
+              title={p.truncated
+                ? t('chat.attachments.pdfTruncated', [p.name, String(p.pageCount), String(p.extractedPageCount)])
+                : t('chat.attachments.pdfPages', [p.name, String(p.pageCount)])}
+            >
+              <FileType className="size-2.5 shrink-0" />
+              <span className="truncate max-w-24">{p.name}</span>
+              <span className="text-rose-400/70">·</span>
+              <span>{t('chat.attachments.pdfPageCount', [String(p.pageCount)])}</span>
+            </Badge>
+          ))}
+          {attachments.recordings.map((r, i) => (
+            <Badge
+              key={`rec-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5 cursor-pointer hover:bg-amber-400/10"
+              title={`${t('chat.attachments.recordingDownload')}\n${t('chat.attachments.recordingHover', [String(r.eventCount), formatCompactCount(r.json.length)])}`}
+              onClick={() => downloadFile(r.name, r.json, RECORDING_MIME)}
+            >
+              <Film className="size-2.5 shrink-0" />
+              <span className="truncate max-w-40">
+                {r.name} · {t('chat.attachments.recordingMeta', [String(r.eventCount), formatDuration(r.durationMs)])}
+                {r.truncated ? ` · ${t('chat.attachments.recordingTruncated')}` : ''}
+              </span>
+            </Badge>
+          ))}
+          {attachments.prompts.map((p, i) => (
+            <Badge
+              key={`mention-prompt-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-blue-400 border-blue-400/20 bg-blue-400/5"
+              title={p.path}
+            >
+              <FileText className="size-2.5 shrink-0" />
+              <span className="truncate max-w-32">/{p.name}</span>
+            </Badge>
+          ))}
+          {attachments.skills.map((s, i) => (
+            <Badge
+              key={`mention-skill-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5"
+              title={s.path}
+            >
+              <Sparkles className="size-2.5 shrink-0" />
+              <span className="truncate max-w-32">{s.name}</span>
+            </Badge>
+          ))}
+          {attachments.directories.map((d, i) => (
+            // Pin directories skip the badge too — same reasoning as files
+            // above. Mention directories still render so the bubble confirms
+            // what was attached for this message.
+            d.pinned ? null : (
+            <Badge
+              key={`mention-dir-${i}`}
+              variant="outline"
+              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-emerald-400 border-emerald-400/20 bg-emerald-400/5"
+              title={`${d.path} · ${t('chat.attachments.directoryItemCount', [String(d.count)])}`}
+            >
+              <Folder className="size-2.5 shrink-0" />
+              <span className="truncate max-w-40 font-mono">
+                {d.label} · {t('chat.attachments.directoryItemCount', [String(d.count)])}
+              </span>
+            </Badge>
+            )
+          ))}
+          {attachments.inlineDirectives.map((d, i) => (
+            // Hybrid injection renders prompt/skill bodies inline as text
+            // so the LLM weights them as user-typed instructions. The data
+            // is no longer in <attached-prompt>/<attached-skill> envelopes
+            // for new messages, so the bubble parses it back from the text
+            // via `extractInlineDirectives` and renders a chip here. Pin
+            // directives carry `pinned="true"` and skip rendering — the
+            // composer strip is the source of truth for pins. Mention
+            // directives (the common case) render as confirmation chips
+            // matching the look of the old `<attached-prompt>` chip.
+            d.pinned ? null : d.kind === 'prompt' ? (
+              <Badge
+                key={`inline-prompt-${i}`}
+                variant="outline"
+                className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-blue-400 border-blue-400/20 bg-blue-400/5"
+                title={d.name}
+              >
+                <FileText className="size-2.5 shrink-0" />
+                <span className="truncate max-w-32">/{d.name}</span>
+              </Badge>
+            ) : (
+              <Badge
+                key={`inline-skill-${i}`}
+                variant="outline"
+                className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5"
+                title={d.name}
+              >
+                <Sparkles className="size-2.5 shrink-0" />
+                <span className="truncate max-w-32">{d.name}</span>
+              </Badge>
+            )
+          ))}
+        </div>
+      )}
       <div className="relative w-fit ml-auto">
         <div className="bg-slate-200 dark:bg-slate-700 px-3.5 py-2.5 rounded-[4rem] rounded-tr-sm text-[length:var(--chat-font-size)] font-normal leading-relaxed whitespace-pre-wrap break-words">
           {commandPart ? (
@@ -67,78 +243,6 @@ export function UserMessageBubble({ msg, children, onEdit }: { msg?: Message; ch
           </Tooltip>
         )}
       </div>
-
-      {hasAttachments && (
-        <div className="flex gap-1.5 flex-wrap items-center justify-end mt-1.5 px-1">
-          {attachments.images.map((img, i) => (
-            <Badge
-              key={`img-${i}`}
-              variant="outline"
-              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-0.5 pr-1 text-purple-400 border-purple-400/20 bg-purple-400/5"
-            >
-              <img
-                src={`data:${img.mimeType};base64,${img.data}`}
-                alt={t('chat.attachments.imageAlt')}
-                className="h-3.5 w-auto rounded-sm object-cover cursor-pointer"
-                onClick={() => showDialog('image-preview', {
-                  src: `data:${img.mimeType};base64,${img.data}`,
-                })}
-              />
-              {t('chat.attachments.image')}
-            </Badge>
-          ))}
-          {attachments.elements.map((el, i) => (
-            <Badge
-              key={`el-${i}`}
-              variant="outline"
-              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-info border-info/20 bg-info/5"
-            >
-              <Crosshair className="size-2.5 shrink-0" />
-              <span className="truncate max-w-24">{el.selector}</span>
-            </Badge>
-          ))}
-          {attachments.files.map((f, i) => (
-            <Badge
-              key={`file-${i}`}
-              variant="outline"
-              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-emerald-400 border-emerald-400/20 bg-emerald-400/5"
-            >
-              <FileText className="size-2.5 shrink-0" />
-              <span className="truncate max-w-24">{f.name}</span>
-            </Badge>
-          ))}
-          {attachments.pdfs.map((p, i) => (
-            <Badge
-              key={`pdf-${i}`}
-              variant="outline"
-              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-rose-400 border-rose-400/20 bg-rose-400/5"
-              title={p.truncated
-                ? t('chat.attachments.pdfTruncated', [p.name, String(p.pageCount), String(p.extractedPageCount)])
-                : t('chat.attachments.pdfPages', [p.name, String(p.pageCount)])}
-            >
-              <FileType className="size-2.5 shrink-0" />
-              <span className="truncate max-w-24">{p.name}</span>
-              <span className="text-rose-400/70">·</span>
-              <span>{t('chat.attachments.pdfPageCount', [String(p.pageCount)])}</span>
-            </Badge>
-          ))}
-          {attachments.recordings.map((r, i) => (
-            <Badge
-              key={`rec-${i}`}
-              variant="outline"
-              className="shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5 cursor-pointer hover:bg-amber-400/10"
-              title={`${t('chat.attachments.recordingDownload')}\n${t('chat.attachments.recordingHover', [String(r.eventCount), formatCompactCount(r.json.length)])}`}
-              onClick={() => downloadFile(r.name, r.json, RECORDING_MIME)}
-            >
-              <Film className="size-2.5 shrink-0" />
-              <span className="truncate max-w-40">
-                {r.name} · {t('chat.attachments.recordingMeta', [String(r.eventCount), formatDuration(r.durationMs)])}
-                {r.truncated ? ` · ${t('chat.attachments.recordingTruncated')}` : ''}
-              </span>
-            </Badge>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

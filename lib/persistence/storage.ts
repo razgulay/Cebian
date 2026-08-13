@@ -25,8 +25,11 @@ import { debugLog, withSession } from '@/lib/debug/log';
  *  leave the original bound reference intact in callers that captured it
  *  (e.g. `useStorageItem`). Returning a fresh wrapper keeps the substitution
  *  invisible at every call site.
- */
-function defineLoggedItem<T>(
+ *
+ *  Exported so other modules (e.g. `lib/rag/settings.ts`) can define their
+ *  own storage items with the same logging behavior — not just the items
+ *  declared in this file. */
+export function defineLoggedItem<T>(
   key: `local:${string}` | `session:${string}` | `sync:${string}` | `managed:${string}`,
   opts: { fallback: T },
 ): WxtStorageItem<T, Record<string, unknown>> {

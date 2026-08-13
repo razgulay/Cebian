@@ -31,6 +31,8 @@ import {
   expandPromptsInline,
   debugLogSettings,
   chatFontSize,
+  chatFontFamily,
+  lastOpenSessionId,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -343,6 +345,10 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: debugLogSettings, storageClass: 'exclude' }),
   // Chat font size（设备本地 UI 偏好，不进 config.json）。
   entry({ item: chatFontSize, storageClass: 'exclude' }),
+  // Chat font family（设备本地 UI 偏好，不进 config.json）。
+  entry({ item: chatFontFamily, storageClass: 'exclude' }),
+  // 上次打开的会话 id（设备本地 UI 状态，备份无意义）。
+  entry({ item: lastOpenSessionId, storageClass: 'exclude' }),
 ];
 
 /** BACKUP_REGISTRY 中所有已登记的 storage key 集合（供覆盖性测试比对）。 */

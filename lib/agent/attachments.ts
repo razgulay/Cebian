@@ -107,12 +107,19 @@ export interface SkillMentionAttachment {
  *  of children (file name + size; directory name + `/`) inside
  *  `<attached-directory>`. The agent can `fs_read_file` any of the listed
  *  files later if it needs the content — the listing is just a hint that
- *  this folder is in scope for the request. */
+ *  this folder is in scope for the request.
+ *
+ *  `pinned` is set when this chip came from the persistent pin list rather
+ *  than a one-shot mention. The bubble uses the flag to suppress the
+ *  visual chip (the pin is already visible in the composer strip), while
+ *  the envelope itself still reaches the LLM so the data persists across
+ *  every send of the chat. */
 export interface DirectoryMentionAttachment {
   type: 'mention-directory';
   path: string;
   label: string;
   entries: { name: string; kind: 'file' | 'dir'; size?: number }[];
+  pinned?: boolean;
 }
 
 /** Mention of a single VFS file. Resolved at send-time by reading the file
@@ -120,7 +127,10 @@ export interface DirectoryMentionAttachment {
  *  `<attached-file>` (the same envelope used by regular file attachments),
  *  so the agent can `fs_read_file` it again later if needed. Sized the
  *  same as a regular text-file attachment — large files (over
- *  `MAX_TEXT_FILE_SIZE`) get truncated to keep prompt budget in check. */
+ *  `MAX_TEXT_FILE_SIZE`) get truncated to keep prompt budget in check.
+ *
+ *  `pinned` mirrors the same flag on DirectoryMentionAttachment — pin
+ *  chips skip the bubble badge but still ship their data to the LLM. */
 export interface FileMentionAttachment {
   type: 'mention-file';
   name: string;
@@ -128,6 +138,43 @@ export interface FileMentionAttachment {
   sourcePath: string;
   mimeType: string;
   truncated: boolean;
+  pinned?: boolean;
+}
+
+/** Top-K chunks retrieved from a RAG collection at send-time. The LLM
+ *  receives them inside `<attached-rag-context>` as `<chunk>` blocks —
+ *  one per retrieved chunk, each carrying the source path + chunk
+ *  index + score. The agent sees only what the retriever picked, not
+ *  the whole collection, keeping prompt budget bounded.
+ *
+ *  When `chunks` is empty, `reason` explains why so the LLM can
+ *  decide between answering "no matches" (LLM should NOT fall back
+ *  to fs_* for the same collection — see system prompt RAG Workflow)
+ *  or asking the user to clarify. Only meaningful when chunks=0.
+ *
+ *  `pinned` mirrors the directory/file flag — pin chips skip the
+ *  bubble badge (RAG currently doesn't render one anyway) while the
+ *  envelope still ships to the LLM. Kept on the type for consistency
+ *  with the other mention kinds. */
+export interface RagContextAttachment {
+  type: 'rag-context';
+  collection: string;
+  /** User text that triggered the retrieval (or empty for explicit
+   *  pinned-without-query). Stored for the agent's awareness and for
+   *  debugging — not rendered as a separate field in the XML. */
+  query: string;
+  chunks: {
+    sourcePath: string;
+    chunkIndex: number;
+    content: string;
+    score: number;
+  }[];
+  /** Why `chunks` is empty. `no_match` = retriever ran but minScore
+   *  filtered everything out (or the collection had no relevant hits);
+   *  `empty` = the collection has zero indexed chunks. Undefined when
+   *  chunks.length > 0 (omitted from the XML). */
+  reason?: 'no_match' | 'empty';
+  pinned?: boolean;
 }
 
 export type Attachment =
@@ -139,7 +186,8 @@ export type Attachment =
   | PromptMentionAttachment
   | SkillMentionAttachment
   | DirectoryMentionAttachment
-  | FileMentionAttachment;
+  | FileMentionAttachment
+  | RagContextAttachment;
 
 /** MIME type for serialized recording JSON. Used for both the agent-prompt
  *  envelope and browser downloads of recording attachments. */
@@ -282,23 +330,69 @@ export function buildTextPrefix(attachments: Attachment[]): string {
       // One-level listing: each child rendered on its own line with kind and
       // optional size. Kept compact so a large directory doesn't blow the
       // prompt budget — the agent can `fs_list` deeper if it needs to.
+      // `pinned="true"` flags pin chips so the bubble can hide the badge
+      // (the pin is already visible in the composer strip) while the data
+      // still rides along to the LLM.
       const lines = a.entries.map((e) => {
         if (e.kind === 'dir') return `  - ${e.name}/`;
         const size = typeof e.size === 'number' ? ` (${formatBytes(e.size)})` : '';
         return `  - ${e.name}${size}`;
       });
+      const pinnedAttr = a.pinned ? ' pinned="true"' : '';
       blocks.push(
-        `<attached-directory path="${escapeXml(a.path, { forAttribute: true })}" label="${escapeXml(a.label, { forAttribute: true })}" count="${a.entries.length}">\n${lines.join('\n')}\n</attached-directory>`,
+        `<attached-directory${pinnedAttr} path="${escapeXml(a.path, { forAttribute: true })}" label="${escapeXml(a.label, { forAttribute: true })}" count="${a.entries.length}">\n${lines.join('\n')}\n</attached-directory>`,
       );
     }
 
     if (a.type === 'mention-file') {
       // Same envelope as regular file attachments so the agent can treat it
       // identically. `truncated` flag tells the agent the body was cut off.
+      // `pinned="true"` mirrors the directory flag — pin chips skip the
+      // bubble badge; the content still ships to the LLM.
       const truncAttr = a.truncated ? ' truncated="true"' : '';
+      const pinnedAttr = a.pinned ? ' pinned="true"' : '';
       blocks.push(
-        `<attached-file name="${escapeXml(a.name, { forAttribute: true })}" type="${escapeXml(a.mimeType, { forAttribute: true })}" path="${escapeXml(a.sourcePath, { forAttribute: true })}"${truncAttr}>\n${escapeXml(a.content)}\n</attached-file>`,
+        `<attached-file${pinnedAttr} name="${escapeXml(a.name, { forAttribute: true })}" type="${escapeXml(a.mimeType, { forAttribute: true })}" path="${escapeXml(a.sourcePath, { forAttribute: true })}"${truncAttr}>\n${escapeXml(a.content)}\n</attached-file>`,
       );
+    }
+
+    if (a.type === 'rag-context') {
+      // Each retrieved chunk becomes a <chunk> child of <attached-rag-context>.
+      // Score is included so the agent can see the retriever's confidence
+      // ordering. Empty result → still emit the envelope so the agent knows
+      // the collection was queried (vs silently dropped). When `reason` is
+      // set, add it as an attribute + a short inline hint so the agent can
+      // distinguish "no matches above the relevance threshold" from
+      // "collection is empty" without guessing. The hint names the
+      // `rag_inspect` tool so the agent has a fallback path that doesn't
+      // involve fs_*.
+      const chunkBlocks = a.chunks.map((c) => {
+        const score = c.score.toFixed(4);
+        return (
+          `  <chunk path="${escapeXml(c.sourcePath, { forAttribute: true })}" index="${c.chunkIndex}" score="${score}">\n` +
+          `${escapeXml(c.content)}\n` +
+          `  </chunk>`
+        );
+      });
+      // `pinned="true"` is included on pin collections for symmetry with
+      // the other mention envelopes (and so any future RAG bubble badge
+      // could skip them). RAG doesn't currently render a bubble chip,
+      // so this is purely a marker for now.
+      const pinnedAttr = a.pinned ? ' pinned="true"' : '';
+      if (a.chunks.length > 0) {
+        blocks.push(
+          `<attached-rag-context${pinnedAttr} collection="${escapeXml(a.collection, { forAttribute: true })}" count="${a.chunks.length}">\n${chunkBlocks.join('\n')}\n</attached-rag-context>`,
+        );
+      } else {
+        const reason = a.reason ?? 'no_match';
+        const hint =
+          reason === 'empty'
+            ? 'This collection has no indexed chunks yet. Use rag_inspect to confirm, or ask the user to pick files and re-index.'
+            : 'No chunks matched the user\'s outgoing text above the relevance threshold. Use rag_inspect to see what files are in this collection, or ask the user to refine the question.';
+        blocks.push(
+          `<attached-rag-context${pinnedAttr} collection="${escapeXml(a.collection, { forAttribute: true })}" count="0" reason="${reason}">\n${escapeXml(hint)}\n</attached-rag-context>`,
+        );
+      }
     }
   }
 

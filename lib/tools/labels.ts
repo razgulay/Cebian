@@ -27,6 +27,7 @@ import {
   TOOL_RUN_SKILL,
   TOOL_CHROME_API,
   TOOL_DELEGATE_DOM,
+  TOOL_RAG_INSPECT,
 } from '@/lib/tools/names';
 
 /** 记忆根目录的归一形式（/home/user/.cebian/memories），供工具卡标签判定记忆操作。 */
@@ -100,6 +101,8 @@ export function getToolLabel(name: string, args: Record<string, any> = {}): stri
       // `tools.runtime.delegate_dom` namespace. We just surface the raw
       // `task` argument so the user can see what the main agent asked.
       return `delegate_dom: ${truncLabel(typeof args.task === 'string' ? args.task : '')}`;
+    case TOOL_RAG_INSPECT:
+      return t('tools.ragInspect', [args.collection ?? '']);
     default:
       return name;
   }

@@ -22,7 +22,7 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { readRecentEntries, clearEntries, type DebugLogEntry } from '@/lib/debug/log';
-import { AGENT_PORT_NAME, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
+import { CLIENT_PORT, type ClientMessage, type ServerMessage } from '@/lib/ipc/protocol';
 
 export interface UseLiveLogOptions {
   /** Cap on the in-memory tail. Older entries are dropped from the head. */
@@ -80,7 +80,7 @@ export function useLiveLog(options: UseLiveLogOptions = {}): UseLiveLogResult {
       if (cancelled) return;
 
       try {
-        port = chrome.runtime.connect({ name: AGENT_PORT_NAME });
+        port = chrome.runtime.connect({ name: CLIENT_PORT });
       } catch {
         // Port connect can throw in test / detached contexts. The seed
         // still shows, but no live updates will arrive.

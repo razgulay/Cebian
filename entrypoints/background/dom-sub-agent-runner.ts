@@ -23,7 +23,7 @@ import {
   customProviders,
 } from '@/lib/persistence/storage';
 import { resolveModel } from '@/lib/providers/resolve-model';
-import { acquireKeepAlive, releaseKeepAlive } from './sw-keepalive';
+import { acquireKeepAlive, releaseKeepAlive } from './lifecycle/keepalive';
 import { createDomSubAgent } from './dom-sub-agent';
 import { getAssistantText } from '@/lib/agent/message-helpers';
 import { debugLog, withSession } from '@/lib/debug/log';

@@ -45,6 +45,7 @@
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@mozilla/readability": "^0.6.0",
+    "@neondatabase/serverless": "^1.1.0",
     "@wxt-dev/i18n": "^0.2.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

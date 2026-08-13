@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, ChevronDown, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -27,7 +27,8 @@ import {
   isImageFile, isTextFile, isPdfFile,
   type Attachment,
 } from '@/lib/agent/attachments';
-import { resolveMentions, type MentionChip, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
+import { ragSettings as ragSettingsStorage } from '@/lib/rag';
+import { resolveMentions, resolveMentionToAttachment, PIN_AUTO_UNPIN_THRESHOLD, type MentionChip, type PinnedMention, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { useRecorder } from '@/hooks/useRecorder';
@@ -39,6 +40,19 @@ import { downloadFile, formatDuration, formatCompactCount, formatBytes } from '@
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { debugLog, withSession } from '@/lib/debug/log';
+
+// Pick a stable human label per chip kind for debug logs, toasts, and
+// auto-unpin notifications. Module-level so togglePin and the pin
+// resolve loop share one implementation.
+function pinLabel(item: PinnedMention): string {
+  switch (item.kind) {
+    case 'prompt':         return item.name;
+    case 'skill':          return item.name;
+    case 'rag-collection': return item.collection;
+    case 'vfs-dir':        return item.label;
+    case 'vfs-file':       return item.label;
+  }
+}
 
 /** 在窄 chip 里显示不下时，把名字截成 "开头…末尾"（保留扩展名/末尾识别符）。
  *  短名原样返回；否则取首 3 + "…" + 末 4。chip 已经塞了图标 + meta，不缩写
@@ -138,6 +152,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
   const [isExpandInline] = useStorageItem(expandPromptsInline, false);
+  // RAG settings: read fresh inside handleSend via `ragSettings.getValue()`
+  // rather than the hook, so a settings change between renders and the
+  // send click is picked up (handleSend isn't a render-bound function).
 
   // 当前模型解析成 pi-ai Model（内置 + 自定义统一走 resolveModel）。是否支持图片 /
   // 支持哪些思考档 等能力派生共用这一次解析，避免多份内联解析各自漂移
@@ -515,11 +532,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       // ride along with image/file/element/recording attachments inside
       // `<attachments>…</attachments>`.
       const mentionChips = mentionsRef.current;
+      debugLog.info('ui', 'mention:resolve:start', { count: mentionChips.length });
       const resolvedMentions: ResolvedMentionAttachment[] = [];
       const failedNames: string[] = [];
       if (mentionChips.length > 0) {
         const settled = await Promise.allSettled(
-          mentionChips.map((chip) => resolveMentions([chip]).then((r) => ({ chip, r }))),
+          // RAG chips need the outgoing user text as their retrieval query —
+          // forward the post-slash-resolved `text` so the embedder sees what
+          // the user actually wants, not the raw textarea draft.
+          mentionChips.map((chip) => resolveMentions([chip], text).then((r) => ({ chip, r }))),
         );
         for (let i = 0; i < settled.length; i++) {
           const outcome = settled[i];
@@ -527,7 +548,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             const chip = mentionChips[i];
             const failedName = chip.kind === 'vfs-dir' || chip.kind === 'vfs-file'
               ? chip.label
-              : chip.name;
+              : chip.kind === 'rag-collection'
+                ? chip.collection
+                : chip.name;
             failedNames.push(failedName);
           } else {
             resolvedMentions.push(outcome.value.r[0]);
@@ -539,14 +562,135 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           );
         }
       }
+      debugLog.info('ui', 'mention:resolve:done', {
+        requested: mentionChips.length,
+        resolved: resolvedMentions.length,
+        failed: failedNames,
+      });
+
+      // Resolve pinned items — same resolver path as mention chips. Pinned
+      // items share the prompt/skill variants, so resolveMentionToAttachment
+      // accepts them directly (PinnedMention is a subset of MentionChip).
+      // Failures here are SILENT (no toast): pinned content is auto-loaded,
+      // not user-curated per message, so a missing file isn't user-facing
+      // and shouldn't block the send. The pin remains in place so a later
+      // message can succeed once the VFS re-hydrates.
+      //
+      // PINNED RAG ONLY: when settings.pinMinScore > 0, the resolver drops
+      // the RAG attachment when every retrieved chunk scores below the
+      // threshold (off-topic question). The LLM still gets the user's
+      // outgoing text, just without RAG context for this turn — a soft
+      // "skip the pin if irrelevant" behavior. One-shot mention chips
+      // always attach regardless of the gate (the user explicitly opted
+      // in for that message).
+      //
+      // `pinned: true` opts out of that silent-drop behavior — the user
+      // has explicitly pinned this collection for the chat, so we always
+      // emit the envelope (with `count="0" reason="no_match|empty"` when
+      // nothing matched). Without this, the LLM has no signal that the
+      // collection was queried and falls back to fs_* tools to look up
+      // "what files are in phaply?" — fs_* only sees VFS, so it returns
+      // unrelated content and the LLM mislabels it as RAG.
+      const pinnedItems = pinnedRef.current;
+      const resolvedPinned: ResolvedMentionAttachment[] = [];
+      if (pinnedItems.length > 0) {
+        const pinRagSettings = await ragSettingsStorage.getValue();
+        const pinRagMinScore = pinRagSettings.pinMinScore > 0 ? pinRagSettings.pinMinScore : undefined;
+        const settledPinned = await Promise.allSettled(
+          pinnedItems.map((p) =>
+            resolveMentionToAttachment(
+              p,
+              text,
+              p.kind === 'rag-collection'
+                ? { minScore: pinRagMinScore, pinned: true }
+                : undefined,
+            ),
+          ),
+        );
+
+        // Track resolution outcomes per pin id so we can update the
+        // strip chip's "broken" indicator and drive auto-unpin. RAG pins
+        // can legitimately resolve to an empty envelope — that's not a
+        // failure, it's the contract documented at the resolver. We
+        // count a pin as failed only when the resolver outright returns
+        // null or throws (file missing, read error, etc.).
+        const failedIds = new Set<string>();
+        const failedNames: string[] = [];
+        const recoveredIds: string[] = [];
+        const autoUnpinned: { item: PinnedMention; count: number }[] = [];
+
+        for (let i = 0; i < settledPinned.length; i++) {
+          const pin = pinnedItems[i];
+          const outcome = settledPinned[i];
+          const ok = outcome.status === 'fulfilled' && outcome.value !== null;
+          if (ok) {
+            resolvedPinned.push(outcome.value as ResolvedMentionAttachment);
+            // Any success resets the consecutive-failure counter — a
+            // once-deleted file that came back should not auto-unpin.
+            pinFailCountsRef.current.delete(pin.id);
+            if (failedPins.has(pin.id)) recoveredIds.push(pin.id);
+            continue;
+          }
+          failedIds.add(pin.id);
+          const label = pinLabel(pin);
+          failedNames.push(label);
+          const prevCount = pinFailCountsRef.current.get(pin.id) ?? 0;
+          const nextCount = prevCount + 1;
+          pinFailCountsRef.current.set(pin.id, nextCount);
+          if (nextCount >= PIN_AUTO_UNPIN_THRESHOLD) {
+            autoUnpinned.push({ item: pin, count: nextCount });
+            pinFailCountsRef.current.delete(pin.id);
+          }
+        }
+
+        // Apply state updates in one batch to avoid two re-renders.
+        setFailedPins((prev) => {
+          const next = new Set(prev);
+          for (const id of recoveredIds) next.delete(id);
+          for (const id of failedIds) {
+            // Don't overwrite if we're about to auto-unpin — the chip
+            // will disappear, so the ⚠ indicator is moot.
+            if (autoUnpinned.some((u) => u.item.id === id)) continue;
+            next.add(id);
+          }
+          return next;
+        });
+
+        // Toast only the *new* failures (pins not already in failedPins).
+        // The ⚠ chip is the persistent signal for repeats — repeated
+        // toasts would just spam the user.
+        const newFailureNames = pinnedItems
+          .filter((p) => failedIds.has(p.id) && !failedPins.has(p.id) && !autoUnpinned.some((u) => u.item.id === p.id))
+          .map((p) => pinLabel(p));
+        if (newFailureNames.length > 0) {
+          toast.warning(t('chat.composer.pinReadFailed', [newFailureNames.join(', ')]));
+        }
+
+        // Auto-unpin pins that have hit the threshold. We collect them
+        // first so a single togglePin call handles removal cleanly.
+        for (const { item, count } of autoUnpinned) {
+          toast.warning(t('chat.composer.pinAutoRemoved', [pinLabel(item), String(count)]));
+          togglePin(item);
+        }
+
+        debugLog.info('ui', 'pin:resolve:done', {
+          requested: pinnedItems.length,
+          resolved: resolvedPinned.length,
+          failed: failedNames,
+          autoUnpinned: autoUnpinned.map((u) => pinLabel(u.item)),
+        });
+      }
 
       if (recorder.isOwner) {
         // Pre-flight cap check: refuse to send if attachments are already
         // full — otherwise the about-to-be-delivered recording would be
         // silently dropped by the session subscription's overflow guard.
-        // Count mentions toward the same cap — they're attachments too.
+        // Count mentions AND pins toward the same cap — both are
+        // attachments too. Folder/file/RAG stay as structured
+        // attachments; prompt/skill directives are pulled out for inline
+        // injection (see filterInlineable below), so they no longer count.
         const totalAttachmentCount =
-          attachmentsRef.current.length + resolvedMentions.length;
+          attachmentsRef.current.length + resolvedMentions.length + resolvedPinned.length;
         if (totalAttachmentCount > MAX_ATTACHMENT_COUNT) {
           debugLog.info('ui', 'send:rejected', { reason: 'max_attachments' });
           toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
@@ -559,9 +703,77 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
       if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
 
+      // Hybrid injection: pull prompt/skill bodies OUT of the structured
+      // attachments and inline them as `[DIRECTIVE — <name>]` blocks in
+      // the user text. Reason: inside `<attachments>...</attachments>`,
+      // the LLM weights `<attached-prompt>` and `<attached-skill>` as
+      // reference data (lower priority than user text and far below
+      // system rules). Inlining as text puts them in the user-message
+      // region where the model actually follows instructions, with the
+      // same weight as slash command expansion (which overwrites `text`
+      // directly). Folder/file/RAG stay as structured attachments —
+      // they're data references, not directives, so attachment framing
+      // is the right channel for them.
+      const inlineDirectiveParts: string[] = [];
+      const isInlineableDirective = (att: ResolvedMentionAttachment) =>
+        att.type === 'mention-prompt' || att.type === 'mention-skill';
+      const formatDirective = (att: ResolvedMentionAttachment, pinned: boolean): string | null => {
+        // `pinned="true"` is appended to the opening tag for pin chips. The
+        // bubble parser walks the message text looking for this exact shape
+        // and skips rendering a chip when the flag is set — the pin is
+        // already visible in the composer strip, repeating it on every
+        // bubble just clutters the chat history. Mention chips omit the
+        // attribute so the bubble renders them as confirmation. The LLM
+        // doesn't care about the attribute; it only sees the body.
+        const pinAttr = pinned ? ' pinned="true"' : '';
+        if (att.type === 'mention-prompt') {
+          return `[DIRECTIVE — ATTACHED PROMPT: "${att.name}"${pinAttr}]\n\n${att.body}\n\n[END DIRECTIVE]`;
+        }
+        if (att.type === 'mention-skill') {
+          return `[DIRECTIVE — ATTACHED SKILL: "${att.name}"${pinAttr}]\n\n${att.body}\n\n[END DIRECTIVE]`;
+        }
+        return null;
+      };
+      const filteredResolvedMentions: ResolvedMentionAttachment[] = [];
+      for (const att of resolvedMentions) {
+        if (isInlineableDirective(att)) {
+          const directive = formatDirective(att, false);
+          if (directive) inlineDirectiveParts.push(directive);
+        } else {
+          // Mention folder/file/RAG stay as structured envelopes — the
+          // bubble renders them as confirmation chips, and the LLM gets
+          // the data. `pinned` is intentionally left unset / false.
+          filteredResolvedMentions.push(att);
+        }
+      }
+      const filteredResolvedPinned: ResolvedMentionAttachment[] = [];
+      for (const att of resolvedPinned) {
+        if (isInlineableDirective(att)) {
+          const directive = formatDirective(att, true);
+          if (directive) inlineDirectiveParts.push(directive);
+        } else {
+          // Pin folder/file/RAG still go as structured envelopes so the
+          // LLM receives the data every send (pins are persistent context),
+          // but we mark them `pinned: true` so the bubble renderer can
+          // suppress the visual chip — the composer strip is already
+          // showing the pin, repeating it on every bubble just clutters
+          // the chat history. The envelope itself is identical content-
+          // wise; only the `pinned="true"` attribute changes.
+          filteredResolvedPinned.push({ ...att, pinned: true } as ResolvedMentionAttachment);
+        }
+      }
+      if (inlineDirectiveParts.length > 0) {
+        const directives = inlineDirectiveParts.join('\n\n---\n\n');
+        // Pin/mention directives precede slash/quote/user text so the
+        // LLM sees them as the framing for the request, with the user's
+        // own words as the actual ask.
+        text = `${directives}\n\n---\n\n${text}`;
+      }
+
       const outgoing: Attachment[] = [
         ...attachmentsRef.current,
-        ...resolvedMentions,
+        ...filteredResolvedMentions,
+        ...filteredResolvedPinned,
       ];
       const result = await onSend(
         text,
@@ -598,6 +810,23 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // dictation and drop the pending interim tracking so a late final from the
   // previous session can't append into the new session's composer
   // （speech.stop 在空闲时是无副作用的 no-op）。
+  //
+  // Pin-clearing policy: pins are tied to the chat the user is IN, not to
+  // the lifecycle of the sessionId React prop. The sessionId prop goes
+  // from `null` → real id on the very first send of a chat that was
+  // opened with an empty composer — that's NOT a chat switch, it's the
+  // moment the chat gets born. We must not wipe the user's pins at that
+  // moment or they "vanish after the first send" (the bug that
+  // motivated this branch). The clearing rule is asymmetric:
+  //   - prev === null (we weren't in a chat): never clear, even if
+  //     `next` is non-null. This covers the "first send" case above
+  //     and also preserves any in-memory pins across a fresh page load
+  //     before the user has opened any chat.
+  //   - prev !== null (we WERE in a chat) and prev !== next: always
+  //     clear. This covers both "user clicked New Chat" (prev → null)
+  //     and "user switched to a different chat" (prev → other id).
+  //     Leaving a chat means the pins belong to a context that's gone.
+  const previousSessionIdRef = useRef<string | null>(sessionId ?? null);
   useEffect(() => {
     setHistoryIndex(null);
     setDraft('');
@@ -605,6 +834,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     quoteChipsRef.current = [];
     setMentions([]);
     mentionsRef.current = [];
+    const prev = previousSessionIdRef.current;
+    const next = sessionId ?? null;
+    if (prev !== null && prev !== next) {
+      // Genuine exit from a chat (either to null, or to a different
+      // chat id) — drop the pins that belonged to the previous chat.
+      setPinned([]);
+      pinnedRef.current = [];
+      setFailedPins(new Set());
+      pinFailCountsRef.current.clear();
+    }
+    previousSessionIdRef.current = next;
     interimSuffixRef.current = '';
     speech.stop();
   }, [sessionId, speech.stop]);
@@ -770,6 +1010,27 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // ref to avoid a stale state read after async attachment building.
   const mentionsRef = useRef<MentionChip[]>([]);
 
+  // ─── Pinned context (per-chat) ───
+  // A pinned prompt or skill rides along on EVERY message of the current
+  // chat — handy when the user wants the LLM to keep a long-running
+  // instruction (e.g. "explain in character", "always respond in
+  // Vietnamese", the translate prompt) without re-mentioning it on every
+  // turn. Scope is intentionally per-chat: switching to a new session
+  // clears the list (handled by the session-reset effect below), so the
+  // user must re-pin if they want the same context in a fresh chat.
+  const [pinned, setPinned] = useState<PinnedMention[]>([]);
+  const pinnedRef = useRef<PinnedMention[]>([]);
+
+  // Pin health tracking — surfaces failures in the strip chip and triggers
+  // auto-cleanup. `failedPins` is the set of pin ids that failed to resolve
+  // on the most recent send (the chip draws ⚠ while in this set). It is
+  // cleared for any pin that resolves successfully on the next send, so a
+  // transient VFS race heals automatically. `pinFailCounts` tracks
+  // consecutive failures per id and drives auto-unpin at
+  // PIN_AUTO_UNPIN_THRESHOLD — a single success resets the counter.
+  const [failedPins, setFailedPins] = useState<Set<string>>(() => new Set());
+  const pinFailCountsRef = useRef<Map<string, number>>(new Map());
+
   // Add a mention chip picked from the MentionPopover. The popover passes
   // the chip directly via onSelect; we dedupe by chip-id (the popover
   // stamps a unique id per pick so duplicates within one popover open are
@@ -779,6 +1040,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setMentions((prev) => {
       const next = [...prev, chip];
       mentionsRef.current = next;
+      debugLog.info('ui', 'mention:add', {
+        kind: chip.kind,
+        count: next.length,
+      });
       return next;
     });
   }, []);
@@ -790,6 +1055,43 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       return next;
     });
   }, []);
+
+  // Toggle a pin: if the item is already pinned, remove it; otherwise
+  // append. The popover passes a fresh id per pick so toggling a single
+  // item stays well-defined (each pick is a unique PinnedMention). The
+  // id-based match means built-in skills can be pinned and unpinned
+  // freely even though they share the same `name`/`filePath` (and the
+  // same is true for folders/files keyed on path).
+  const togglePin = useCallback((item: PinnedMention) => {
+    setPinned((prev) => {
+      const exists = prev.some((p) => p.id === item.id);
+      const next = exists ? prev.filter((p) => p.id !== item.id) : [...prev, item];
+      pinnedRef.current = next;
+      // When a pin is removed (manually or via auto-unpin), drop its
+      // failure bookkeeping so a re-pin starts with a clean slate.
+      if (exists) {
+        pinFailCountsRef.current.delete(item.id);
+        setFailedPins((prevSet) => {
+          if (!prevSet.has(item.id)) return prevSet;
+          const nextSet = new Set(prevSet);
+          nextSet.delete(item.id);
+          return nextSet;
+        });
+      }
+      debugLog.info('ui', 'pin:toggle', {
+        kind: item.kind,
+        label: pinLabel(item),
+        action: exists ? 'unpin' : 'pin',
+        total: next.length,
+      });
+      return next;
+    });
+  }, []);
+
+  /** Cheap helper for the popover to know if an item is currently pinned.
+   *  State-based (not ref-based) so the icon can re-render when pins
+   *  toggle without needing a separate force-update. */
+  const isPinned = useCallback((id: string) => pinned.some((p) => p.id === id), [pinned]);
 
   // Records a quote as a chip above the textarea (the chip becomes the
   // source of truth — the textarea stays clean). The chip text is what
@@ -1283,12 +1585,233 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       )}
 
       <div className="border border-border rounded-xl bg-card focus-within:border-border/80 focus-within:ring-1 focus-within:ring-primary/10 transition-all [border-width:0.5px]">
-        {/* Top row: tools + attachments */}
+        {/* Chip strips — sit at the very top of the composer, right under
+            the rounded border, so the chips are the first thing the eye
+            lands on when reading the input area. Both quote and mention
+            strips share the same `justify-end` alignment as the bubble
+            below to mirror the chat-history chip strip above the user
+            message. No border-b — they flow into the toolbar visually. */}
+
+        {/* Quote chips — preview pills rendered in a smaller font above the
+            textarea. Each chip represents one Quote click. Removing a chip
+            (X button) does NOT remove the corresponding text from the
+            textarea; the chip is purely a visual aid. */}
+        {quoteChips.length > 0 && (
+          <div
+            role="list"
+            aria-label={t('chat.composer.quoteChips')}
+            className="flex flex-col gap-1 px-1.5 pt-1.5 pb-1 justify-end"
+          >
+            {quoteChips.map((chip) => (
+              <div
+                key={chip.id}
+                role="listitem"
+                className="group flex items-start gap-1.5 rounded-md bg-muted/60 px-1.5 py-1 text-[0.72rem] leading-snug text-muted-foreground"
+              >
+                <QuoteIcon size={11} className="shrink-0 mt-px opacity-60" />
+                <pre className="flex-1 min-w-0 whitespace-pre-wrap break-words font-sans m-0 p-0">
+                  {chip.text.trimEnd()}
+                </pre>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuoteChips((prev) => {
+                      const next = prev.filter((c) => c.id !== chip.id);
+                      quoteChipsRef.current = next;
+                      return next;
+                    });
+                  }}
+                  title={t('chat.composer.removeQuoteChip')}
+                  aria-label={t('chat.composer.removeQuoteChip')}
+                  className="shrink-0 -mr-0.5 -mt-0.5 p-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-background/60 transition-colors"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Pinned chips — persistent chat-scope context. Items in this strip
+            ride along on every send in the current chat (resolved to
+            attachments in handleSend). They clear automatically when the
+            user switches to a different chat — see the session-reset effect.
+            Pinned chip strip sits at the very top so the user always sees
+            what's currently auto-included in the conversation, even when
+            no per-message mention chips are present. Distinct from mention
+            chips below by the persistent Pin icon prefix. */}
+        {pinned.length > 0 && (
+          <div
+            role="list"
+            aria-label={t('chat.composer.pinnedChips')}
+            className="flex flex-wrap gap-1 px-1.5 pt-1.5 pb-1 justify-end"
+          >
+            {pinned.map((p) => {
+              // Color matches the corresponding chip below (mention strip)
+              // and the bubble badge in the chat history so a pinned
+              // directory listing reads as the same "kind" as a one-shot
+              // mention of the same directory. Pin icon prefix is amber
+              // regardless of kind — that signals "persistent" as a
+              // separate visual layer from the kind indicator.
+              //
+              // When this pin failed to resolve on the most recent send,
+              // desaturate the kind color and add a ⚠ prefix so the user
+              // can tell at a glance that this pin's content is NOT being
+              // attached to outgoing messages. The pin stays in the strip
+              // so a transient VFS race can heal on the next send (and
+              // auto-unpin kicks in at PIN_AUTO_UNPIN_THRESHOLD failures).
+              const isFailed = failedPins.has(p.id);
+              const kindClass = p.kind === 'skill'
+                ? 'bg-amber-400/10 border-amber-400/30 text-amber-400'
+                : p.kind === 'vfs-dir' || p.kind === 'vfs-file'
+                  ? 'bg-emerald-400/10 border-emerald-400/30 text-emerald-400'
+                  : p.kind === 'rag-collection'
+                    ? 'bg-violet-400/10 border-violet-400/30 text-violet-400'
+                    : 'bg-blue-400/10 border-blue-400/30 text-blue-400';
+              const failedClass = 'bg-zinc-500/10 border-zinc-500/40 text-zinc-500 dark:text-zinc-400';
+              const chipClass = isFailed ? failedClass : kindClass;
+              const label =
+                p.kind === 'prompt' ? `/${p.name}` :
+                p.kind === 'vfs-dir' || p.kind === 'vfs-file' ? p.label :
+                p.kind === 'rag-collection' ? p.collection :
+                p.name;
+              const failTooltip = isFailed
+                ? t('chat.composer.pinReadFailed', [label])
+                : t('chat.composer.unpin');
+              return (
+                <div
+                  key={p.id}
+                  role="listitem"
+                  title={failTooltip}
+                  aria-label={failTooltip}
+                  className={
+                    'group flex items-center gap-1 rounded-md border h-5 pl-1 pr-0.5 text-[0.65rem] font-mono leading-snug ' +
+                    chipClass +
+                    (isFailed ? ' cursor-help' : '')
+                  }
+                >
+                  {isFailed
+                    ? <AlertTriangle size={10} className="shrink-0 opacity-90" aria-hidden />
+                    : <Pin size={10} className="shrink-0 opacity-80" aria-hidden />}
+                  <span className="truncate max-w-32">{label}</span>
+                  <button
+                    type="button"
+                    onClick={() => togglePin(p)}
+                    title={t('chat.composer.unpin')}
+                    aria-label={t('chat.composer.unpin')}
+                    className="shrink-0 -mr-0.5 p-0.5 rounded opacity-60 hover:opacity-100 hover:bg-foreground/10 cursor-pointer transition-opacity"
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Mention chips — compact pills for prompt/skill/VFS-directory
+            references attached via the [+] button. Each chip shows only the
+            reference name (the content lives in VFS / locales and is shipped
+            to the LLM at send-time by the resolver). Removing a chip is
+            purely visual; it just deletes the chip and prevents the content
+            from being sent. Color matches the corresponding bubble badge in
+            the chat history so the user sees the same kind of chip above
+            the bubble and below it. */}
+        {mentions.length > 0 && (
+          <div
+            role="list"
+            aria-label={t('chat.composer.mentionChips')}
+            className="flex flex-wrap gap-1 px-1.5 pt-1.5 pb-1 justify-end"
+          >
+            {mentions.map((m) => (
+              <div
+                key={m.id}
+                role="listitem"
+                className={
+                  'group flex items-center gap-1 rounded-md border h-5 pl-1.5 pr-0.5 text-[0.65rem] font-mono leading-snug ' +
+                  (m.kind === 'skill'
+                    ? 'bg-amber-400/5 border-amber-400/20 text-amber-400'
+                    : m.kind === 'vfs-dir'
+                      ? 'bg-emerald-400/5 border-emerald-400/20 text-emerald-400'
+                      : m.kind === 'vfs-file'
+                        ? 'bg-emerald-400/5 border-emerald-400/20 text-emerald-400'
+                        : m.kind === 'rag-collection'
+                          ? 'bg-violet-400/5 border-violet-400/20 text-violet-400'
+                          : 'bg-blue-400/5 border-blue-400/20 text-blue-400')
+                }
+              >
+                {m.kind === 'prompt' && <FileText size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'skill' && <Sparkles size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'vfs-dir' && <Folder size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'vfs-file' && <FileText size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'rag-collection' && <Database size={11} className="shrink-0 opacity-70" />}
+                <span className="truncate max-w-32">
+                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'vfs-file' ? m.label : m.kind === 'vfs-dir' ? m.label : m.kind === 'rag-collection' ? m.collection : m.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeMention(m.id)}
+                  title={t('chat.composer.removeMentionChip')}
+                  aria-label={t('chat.composer.removeMentionChip')}
+                  className="shrink-0 -mr-0.5 p-0.5 rounded opacity-60 hover:opacity-100 hover:bg-foreground/10 cursor-pointer transition-opacity"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Top row: tools + attachments. Item order is the user-facing
+            mental model: act on the page (pick / drag), attach stuff
+            (upload / store / screenshot / record), then meta toggles
+            (mobile mode). The storage shortcut is moved into the middle
+            of the row so it stays high-traffic without dominating the
+            leading edge — it lives one click away from the other
+            attach-type buttons (file, screenshot, recording). */}
         <div className="flex items-center gap-0.5 px-1.5 pt-0.5 pb-0 justify-end">
-          {/* Storage shortcut — pulled out of Settings nav (high-traffic entry).
-              Same row as pick/record tool icons, leading position. Clicking
-              during an active picker is safe: ChatInput's unmount cleanup
-              calls cancelElementPicker(). */}
+          {/* 1. Pick element */}
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            title={isPicking ? t('chat.composer.cancelPick') : t('chat.composer.pickElement')}
+            onClick={handlePickElement}
+            disabled={isDispatching}
+            className={`size-7 ${isPicking ? 'bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary' : ''}`}
+          >
+            <MousePointer2 className="size-3.5" />
+          </Button>
+
+          {/* 2. Drag to select a region */}
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            title={isPickingRegion ? t('chat.composer.cancelRegionPick') : t('chat.composer.pickRegion')}
+            onClick={handlePickRegion}
+            disabled={isDispatching || !supportsImage}
+            className={`size-7 ${isPickingRegion ? 'bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary' : ''}`}
+          >
+            <Crop className="size-3.5" />
+          </Button>
+
+          {/* 3. Attach file (paperclip) */}
+          <Button variant="ghost" size="icon-xs" title={t('chat.composer.uploadFile')} onClick={() => fileInputRef.current?.click()} disabled={isDispatching} className="size-7">
+            <Paperclip className="size-3.5" />
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={`${supportsImage ? 'image/*,' : ''}.pdf,application/pdf,.txt,.md,.csv,.tsv,.log,.js,.ts,.jsx,.tsx,.mjs,.cjs,.py,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.php,.sh,.bash,.sql,.yaml,.yml,.toml,.ini,.cfg,.json,.xml,.html,.htm,.css,.scss,.less,.env,.gitignore,.editorconfig`}
+            className="hidden"
+            disabled={isDispatching}
+            onChange={handleFileUpload}
+          />
+
+          {/* 4. Storage shortcut — pulled out of Settings nav (high-traffic entry).
+              Same row as the other attach-type buttons. Clicking during an
+              active picker is safe: ChatInput's unmount cleanup calls
+              cancelElementPicker(). */}
           {onOpenStorage && (
             <Button
               variant="ghost"
@@ -1301,28 +1824,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               <HardDrive className="size-3.5" />
             </Button>
           )}
-          {/* Tool icons */}
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            title={isPicking ? t('chat.composer.cancelPick') : t('chat.composer.pickElement')}
-            onClick={handlePickElement}
-            disabled={isDispatching}
-            className={`size-7 ${isPicking ? 'bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary' : ''}`}
-          >
-            <MousePointer2 className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            title={isPickingRegion ? t('chat.composer.cancelRegionPick') : t('chat.composer.pickRegion')}
-            onClick={handlePickRegion}
-            disabled={isDispatching || !supportsImage}
-            className={`size-7 ${isPickingRegion ? 'bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary' : ''}`}
-          >
-            <Crop className="size-3.5" />
-          </Button>
-          <RecordButton disabled={isDispatching} />
+
+          {/* 5. Screenshot — gated on supportsImage. Tooltip explains why it's
+              disabled when the model can't see images. */}
           <Tooltip>
             <TooltipTrigger asChild>
               <span
@@ -1344,18 +1848,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               {supportsImage ? t('chat.composer.screenshot') : t('chat.composer.modelNoImage')}
             </TooltipContent>
           </Tooltip>
-          <Button variant="ghost" size="icon-xs" title={t('chat.composer.uploadFile')} onClick={() => fileInputRef.current?.click()} disabled={isDispatching} className="size-7">
-            <Paperclip className="size-3.5" />
-          </Button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept={`${supportsImage ? 'image/*,' : ''}.pdf,application/pdf,.txt,.md,.csv,.tsv,.log,.js,.ts,.jsx,.tsx,.mjs,.cjs,.py,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.php,.sh,.bash,.sql,.yaml,.yml,.toml,.ini,.cfg,.json,.xml,.html,.htm,.css,.scss,.less,.env,.gitignore,.editorconfig`}
-            className="hidden"
-            disabled={isDispatching}
-            onChange={handleFileUpload}
-          />
+
+          {/* 6. Recorded (DOM session capture) */}
+          <RecordButton disabled={isDispatching} />
+
+          {/* 7. Mobile mode toggle */}
           <Button
             variant="ghost"
             size="icon-xs"
@@ -1477,85 +1974,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           )}
         </div>
 
-        {/* Quote chips — preview pills rendered in a smaller font above the
-            textarea. Each chip represents one Quote click. Removing a chip
-            (X button) does NOT remove the corresponding text from the
-            textarea; the chip is purely a visual aid. */}
-        {quoteChips.length > 0 && (
-          <div
-            role="list"
-            aria-label={t('chat.composer.quoteChips')}
-            className="flex flex-col gap-1 px-1.5 pt-1.5 pb-0 border-b border-border/40"
-          >
-            {quoteChips.map((chip) => (
-              <div
-                key={chip.id}
-                role="listitem"
-                className="group flex items-start gap-1.5 rounded-md bg-muted/60 px-1.5 py-1 text-[0.72rem] leading-snug text-muted-foreground"
-              >
-                <QuoteIcon size={11} className="shrink-0 mt-px opacity-60" />
-                <pre className="flex-1 min-w-0 whitespace-pre-wrap break-words font-sans m-0 p-0">
-                  {chip.text.trimEnd()}
-                </pre>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQuoteChips((prev) => {
-                      const next = prev.filter((c) => c.id !== chip.id);
-                      quoteChipsRef.current = next;
-                      return next;
-                    });
-                  }}
-                  title={t('chat.composer.removeQuoteChip')}
-                  aria-label={t('chat.composer.removeQuoteChip')}
-                  className="shrink-0 -mr-0.5 -mt-0.5 p-0.5 rounded text-muted-foreground/60 hover:text-foreground hover:bg-background/60 transition-colors"
-                >
-                  <X size={11} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Mention chips — compact pills for prompt/skill/VFS-directory
-            references attached via the [+] button. Each chip shows only the
-            reference name (the content lives in VFS / locales and is shipped
-            to the LLM at send-time by the resolver). Removing a chip is
-            purely visual; it just deletes the chip and prevents the content
-            from being sent. */}
-        {mentions.length > 0 && (
-          <div
-            role="list"
-            aria-label={t('chat.composer.mentionChips')}
-            className="flex flex-wrap gap-1 px-1.5 pt-1.5 pb-0 border-b border-border/40"
-          >
-            {mentions.map((m) => (
-              <div
-                key={m.id}
-                role="listitem"
-                className="group flex items-center gap-1 rounded-md bg-primary/10 px-1.5 py-0.5 text-[0.7rem] leading-snug text-primary"
-              >
-                {m.kind === 'prompt' && <FileText size={11} className="shrink-0 opacity-70" />}
-                {m.kind === 'skill' && <Sparkles size={11} className="shrink-0 opacity-70" />}
-                {m.kind === 'vfs-dir' && <Folder size={11} className="shrink-0 opacity-70" />}
-                {m.kind === 'vfs-file' && <FileText size={11} className="shrink-0 opacity-70" />}
-                <span className="truncate max-w-32">
-                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'vfs-file' ? m.label : m.kind === 'vfs-dir' ? m.label : m.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeMention(m.id)}
-                  title={t('chat.composer.removeMentionChip')}
-                  aria-label={t('chat.composer.removeMentionChip')}
-                  className="shrink-0 -mr-0.5 p-0.5 rounded text-primary/60 hover:text-primary hover:bg-primary/20 transition-colors"
-                >
-                  <X size={11} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Textarea */}
         <textarea
           ref={textareaRef}
@@ -1589,7 +2007,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
 
           <div className="flex items-center gap-1">
-            <MentionPopover disabled={isDispatching} onSelect={addMention} />
+            <MentionPopover
+              disabled={isDispatching}
+              onSelect={addMention}
+              pinned={pinned}
+              isPinned={isPinned}
+              onTogglePin={togglePin}
+            />
             {speech.supported && (
               <MicButton
                 state={speech.state}

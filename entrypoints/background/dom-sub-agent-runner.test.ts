@@ -25,7 +25,7 @@ vi.mock('./dom-sub-agent', () => ({
 }));
 
 // Mock the keep-alive helpers so they don't run setInterval in tests.
-vi.mock('./sw-keepalive', () => ({
+vi.mock('./lifecycle/keepalive', () => ({
   acquireKeepAlive: vi.fn(),
   releaseKeepAlive: vi.fn(),
 }));

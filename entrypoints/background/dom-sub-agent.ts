@@ -27,7 +27,7 @@ import type {
   BeforeToolCallResult,
 } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { createCebianAgent } from './agent';
+import { createCebianAgent } from './agent/factory';
 import { readPageTool } from '@/lib/tools/read-page';
 import { inspectTool } from '@/lib/tools/inspect';
 import { executeJsTool } from '@/lib/tools/execute-js';

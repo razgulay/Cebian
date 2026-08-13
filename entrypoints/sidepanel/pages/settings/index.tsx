@@ -8,6 +8,7 @@ import { InstructionsSection } from '@/components/settings/sections/Instructions
 import { PromptsSection } from '@/components/settings/sections/PromptsSection';
 import { SkillsSection } from '@/components/settings/sections/SkillsSection';
 import { MemorySection } from '@/components/settings/sections/MemorySection';
+import { RagSection } from '@/components/settings/sections/RagSection';
 import { MCPSection } from '@/components/settings/sections/MCPSection';
 import { PageInteractionSection } from '@/components/settings/sections/PageInteractionSection';
 import { AppearanceSection } from '@/components/settings/sections/AppearanceSection';
@@ -46,6 +47,7 @@ export function SettingsRoutes({ basePath, showBackButton = false, showOpenInTab
         <Route path="prompts/*" element={<PromptsSection />} />
         <Route path="skills/*" element={<SkillsSection />} />
         <Route path="memory/*" element={<MemorySection />} />
+        <Route path="rag" element={<RagSection />} />
         <Route path="mcp" element={<MCPSection />} />
         <Route path="page-interaction" element={<PageInteractionSection />} />
         <Route path="appearance" element={<AppearanceSection />} />

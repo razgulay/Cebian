@@ -37,7 +37,9 @@ const BACKUP = `${TARGET}.unpatched`;
 const MARKER = 'CEBIAN_PATCH_DEV_NO_RM';
 
 // Marker phía dưới: dễ tìm, dễ revert bằng cách sed lại.
-const PATCHED_BLOCK_OPEN = `${MARKER}
+// Phải có `// ` phía trước — nếu không WXT 0.21+ sẽ parse nó thành
+// reference đến biến undefined → ReferenceError lúc dev serve.
+const PATCHED_BLOCK_OPEN = `// ${MARKER}
 \t// Bỏ qua \`rm\` khi \`command === "serve"\` — Chrome lock file bundle
 \t// đang chạy ở thư mục output (Windows → EBUSY). Vite tự ghi đè các
 \t// entrypoint khi build, nên không cần xoá thư mục trước. Build

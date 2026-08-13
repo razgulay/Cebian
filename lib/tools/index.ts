@@ -16,6 +16,7 @@ import { fsReadFileTool } from './fs-read-file';
 import { fsListTool } from './fs-list';
 import { fsSearchTool } from './fs-search';
 import { fsSaveUrlTool } from './fs-save-url';
+import { ragInspectTool } from './rag-inspect';
 import { createSessionRunSkillTool } from './run-skill';
 import { chromeApiTool } from './chrome-api-tool';
 import { SessionToolContext } from './session-context';
@@ -31,6 +32,10 @@ const sharedTools: AgentTool<any>[] = [
   executeJsTool, readPageTool, interactTool, inspectTool, tabTool, screenshotTool, pdfTool,
   fsCreateFileTool, fsEditFileTool, fsMkdirTool, fsRenameTool, fsDeleteTool,
   fsReadFileTool, fsListTool, fsSearchTool, fsSaveUrlTool,
+  // rag_inspect lives in sharedTools (not session-specific) because it
+  // touches a per-installation Neon database, not the session workspace.
+  // Read-only — safe to expose to every session.
+  ragInspectTool,
   chromeApiTool,
 ];
 
