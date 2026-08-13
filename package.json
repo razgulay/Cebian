@@ -21,6 +21,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "depcruise": "depcruise entrypoints components hooks lib --config .dependency-cruiser.cjs",
+    "check:branches": "node scripts/check-branches.mjs",
     "check": "wxt prepare && tsc --noEmit && node scripts/lint-i18n.mjs && vitest run",
     "postinstall": "wxt prepare && simple-git-hooks && node scripts/patch-wxt-dev.mjs"
   },
