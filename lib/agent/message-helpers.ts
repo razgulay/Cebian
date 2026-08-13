@@ -15,13 +15,34 @@ import { unescapeXml } from '@/lib/utils';
 export interface ParsedUserAttachments {
   images: { data: string; mimeType: string }[];
   elements: { selector: string }[];
-  files: { name: string; type: string }[];
+  files: { name: string; type: string; pinned?: boolean }[];
+  /** Prompt/skill directives we inlined into the user text via hybrid
+   *  injection. Hybrid strips the envelope (so the LLM sees the body as
+   *  user-typed instructions with full weight) but the UX layer still
+   *  needs chips on the bubble — without them, the user loses the visual
+   *  confirmation that they attached a prompt/skill to the message.
+   *  `pinned` mirrors the same flag we already use for directory/file
+   *  envelopes: pin chips skip the bubble badge (the composer strip is
+   *  the source of truth for pins), mention chips render as confirmation. */
+  inlineDirectives: { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[];
   /** PDF attachments, surfaced separately so the bubble can render a
    *  "PDF · N pages" badge instead of a generic file chip. Extracted
    *  page count + truncation flag are the same values written by the
    *  offscreen extraction handler. */
   pdfs: { name: string; pageCount: number; extractedPageCount: number; truncated: boolean }[];
   recordings: { name: string; eventCount: number; durationMs: number; truncated: boolean; json: string }[];
+  /** Mention chips — prompt, skill, directory references attached via the
+   *  composer [+] popover. The XML envelope goes to the LLM verbatim; the
+   *  parsed fields drive a chip-style badge in the chat bubble so the user
+   *  can see what they attached. `path` is the VFS path the resolver read;
+   *  `count` is only meaningful for `directory` (number of children listed).
+   *  `pinned` mirrors the flag on the outgoing attachment: pin chips skip
+   *  the bubble badge (the pin lives in the composer strip), mention chips
+   *  render as confirmation. `pdfs` / `files` are always shown — those are
+   *  not pin-able. */
+  prompts: { name: string; path: string }[];
+  skills: { name: string; path: string }[];
+  directories: { path: string; label: string; count: number; pinned: boolean }[];
 }
 
 /** Extract plain text from an AssistantMessage's content blocks */
@@ -55,7 +76,141 @@ export function findToolResult(
   );
 }
 
-const USER_REQUEST_RE = /<user-request>\s*([\s\S]*?)\s*<\/user-request>/;
+const USER_REQUEST_OPEN = '<user-request>';
+const USER_REQUEST_CLOSE = '</user-request>';
+
+/** Snip out the content of the OUTERMOST `<user-request>...</user-request>`
+ *  wrapper in `raw`. The BG's `prompt-composer.ts` wraps the user text in
+ *  a `<user-request>` envelope, and that wrapper is always the outermost
+ *  pair — its `<user-request>` is the FIRST one in the message and its
+ *  `</user-request>` is the LAST one, even when a skill body inlined by
+ *  hybrid injection contains its own `<user-request>` placeholder
+ *  (later open tag, earlier close tag — strictly inside the BG pair).
+ *  Matching the LAST `<user-request>` alone would skip past BG's open
+ *  and pick up the skill's placeholder, so the bubble would render the
+ *  skill body verbatim. Returns `raw` unchanged when no wrapper is
+ *  found (old messages / non-BG-wrapped content). */
+function extractLastUserRequest(raw: string): string {
+  const firstOpen = raw.indexOf(USER_REQUEST_OPEN);
+  if (firstOpen < 0) return raw;
+  const lastClose = raw.lastIndexOf(USER_REQUEST_CLOSE);
+  if (lastClose < firstOpen) return raw;
+  return raw.slice(firstOpen + USER_REQUEST_OPEN.length, lastClose);
+}
+
+/** Replace the user-text segment inside the BG's OUTERMOST
+ *  `<user-request>...</user-request>` wrapper with `newText`. The BG
+ *  wraps the whole outgoing text (any directive chain plus the user's
+ *  own words) in `<user-request>\n...\n</user-request>`. The directive
+ *  chain lives at the front, separated from the user text by either
+ *  `\n\n---\n\n` (multi-directive chain) or `\n\n` (single directive).
+ *  Skill bodies injected as directives can themselves contain
+ *  `<user-request>` placeholders (skill templates wrap their request
+ *  in `<user-request>`), so we must NOT rewrite the wrapper content
+ *  wholesale — that would wipe the directive body. Instead, locate the
+ *  trailing user-text segment (after the LAST `[END DIRECTIVE]`
+ *  separator inside the wrapper, or after `<user-request>\n` when no
+ *  directives were attached) and rewrite only that segment. Same
+ *  fallback as `replaceUserRequestInText` had: when no wrapper is
+ *  present, return `newText` as-is (the surrounding context is dropped). */
+function replaceLastUserRequest(raw: string, newText: string): string {
+  const lastClose = raw.lastIndexOf(USER_REQUEST_CLOSE);
+  if (lastClose < 0) return newText;
+
+  // Find the trailing user-text segment inside BG's wrapper. The BG
+  // inserts the user text after either:
+  //   - `[END DIRECTIVE]\n\n---\n\n` (multi-directive chain)
+  //   - `[END DIRECTIVE]\n\n` (single directive, no chain separator)
+  //   - `<user-request>\n` (no directives, plain text)
+  // Walk backwards from BG's close to find the last `[END DIRECTIVE]`;
+  // if none, fall back to the wrapper open.
+  let userTextStart: number;
+  const lastEndDirective = raw.lastIndexOf('[END DIRECTIVE]', lastClose);
+  if (lastEndDirective >= 0) {
+    const afterLabel = lastEndDirective + '[END DIRECTIVE]'.length;
+    // Consume the chain separator or the plain separator that follows.
+    const chainStart = raw.indexOf('\n\n---\n\n', afterLabel);
+    const plainStart = raw.indexOf('\n\n', afterLabel);
+    let sepStart = -1;
+    let sepLen = 0;
+    if (chainStart >= 0 && chainStart < lastClose) {
+      sepStart = chainStart;
+      sepLen = '\n\n---\n\n'.length;
+    } else if (plainStart >= 0 && plainStart < lastClose) {
+      sepStart = plainStart;
+      sepLen = '\n\n'.length;
+    }
+    if (sepStart < 0) {
+      // Directive-only message — nothing to rewrite (the user-text
+      // segment is empty; the bubble's displayText override handles
+      // the "no user text" path).
+      return raw;
+    }
+    userTextStart = sepStart + sepLen;
+  } else {
+    // No directives — user text starts right after `<user-request>\n`.
+    const firstOpen = raw.indexOf(USER_REQUEST_OPEN);
+    if (firstOpen < 0) return newText;
+    userTextStart = firstOpen + USER_REQUEST_OPEN.length + 1; // +1 for the BG's `\n`
+    if (userTextStart >= lastClose) return newText;
+  }
+
+  return (
+    raw.slice(0, userTextStart) +
+    newText +
+    '\n' +
+    raw.slice(lastClose)
+  );
+}
+
+// Inline directive blocks emitted by ChatInput's hybrid injection — see the
+// `inlineDirectiveParts` builder there. They wrap each pinned/mentioned
+// prompt or skill body as `[DIRECTIVE — ATTACHED PROMPT/SKILL: "name"]\n\n<body>\n\n[END DIRECTIVE]`,
+// then join them (and the user text) with `\n\n---\n\n`. The LLM sees them
+// because they're in the user message; the bubble MUST NOT show them — the
+// user finds the visible prompt body in their chat history jarring.
+// `<user-request>` extraction above peels off the wrapping BG context; this
+// helper peels off what we ourselves injected inside the user-request body.
+// Pin directives also carry `pinned="true"` so the bubble can distinguish
+// them from mention directives at parse time and skip their chip (the
+// composer strip is the source of truth for pins).
+const DIRECTIVE_BLOCK_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
+const SEPARATOR_LINE_RE = /^\s*---\s*$/;
+
+/** Parse `[DIRECTIVE — ATTACHED PROMPT/SKILL: "name"]` opening tags to
+ *  recover the chips the user attached. Returns one entry per directive
+ *  in the order they appear in the text. `pinned` is true when the
+ *  directive carried `pinned="true"` (a pin chip — composer strip already
+ *  shows it, the bubble should suppress the badge). The directive BLOCKS
+ *  are still removed from the bubble text by `stripDirectives`; this only
+ *  surfaces their names for chip rendering. */
+export function extractInlineDirectives(text: string): { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[] {
+  const re = /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL):\s+"([^"]*)"(\s+pinned="true")?\]/g;
+  const out: { name: string; kind: 'prompt' | 'skill'; pinned: boolean }[] = [];
+  for (const m of text.matchAll(re)) {
+    out.push({
+      name: m[2],
+      kind: m[1].toLowerCase() as 'prompt' | 'skill',
+      pinned: m[3] !== undefined,
+    });
+  }
+  return out;
+};
+
+/** Strip `[DIRECTIVE — ...]...[END DIRECTIVE]` blocks and the `\n\n---\n\n`
+ *  separators we used to delimit them. Only the directive blocks and the
+ *  bare-separator lines we introduced go away — actual user text passes
+ *  through unchanged. Used by the chat bubble so the visible text matches
+ *  what the user typed, not what the LLM received. */
+export function stripDirectives(text: string): string {
+  const withoutBlocks = text.replace(DIRECTIVE_BLOCK_RE, '');
+  return withoutBlocks
+    .split('\n')
+    .filter((line) => !SEPARATOR_LINE_RE.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')  // collapse the now-empty lines we left behind
+    .trim();
+}
 
 /** Extract the raw text string from a user message (handles string and block-array formats). */
 function getRawUserText(msg: Message): string {
@@ -70,16 +225,31 @@ function getRawUserText(msg: Message): string {
 }
 
 /** Extract the user's actual input text from a structured user message.
- *  Reads the content of the <user-request> block. */
+ *  Reads the content of the <user-request> block and strips any directive
+ *  blocks we inlined for the LLM — the bubble only shows what the user
+ *  typed, never the directive bodies. */
 export function extractUserText(msg: Message): string {
   if (msg.role !== 'user') return '';
   const raw = getRawUserText(msg);
-  const match = raw.match(USER_REQUEST_RE);
-  return match ? match[1].trim() : raw.trim();
+  return stripDirectives(extractLastUserRequest(raw)).trim();
 }
 
 const ELEMENT_RE = /<selected-element\s+selector="([^"]*)"[^>]*>/g;
+// `<attached-file>` carries three shapes: regular file (drag/drop), PDF
+// (offscreen extraction), and mention-file (a VFS file the user pinned or
+// @-mentioned). Mention-files add `path="..."` and may add `pinned="true"`.
+// The trailing `([^>]*)` slurps any extra attributes (including `pinned`),
+// which `parseAttachedFileAttrs` walks key-by-key.
 const FILE_RE = /<attached-file\s+name="([^"]*)"\s+type="([^"]*)"([^>]*)>/g;
+// Mention envelopes — keep names/paths out of the bubble's badge text;
+// the UI just needs the `name` (prompt/skill) or `label` (directory) to
+// show what was attached, and `path` for tooltip context. The optional
+// `pinned="true"` prefix on `<attached-directory>` lets the bubble skip
+// rendering a badge for pin chips (the pin is already visible in the
+// composer strip); mention chips render as confirmation as before.
+const PROMPT_RE = /<attached-prompt\s+name="([^"]*)"\s+path="([^"]*)"[^>]*>/g;
+const SKILL_RE = /<attached-skill\s+name="([^"]*)"\s+path="([^"]*)"[^>]*>/g;
+const DIR_RE = /<attached-directory(?:\s+pinned="true")?\s+path="([^"]*)"\s+label="([^"]*)"\s+count="(\d+)"[^>]*>/g;
 // PDF attachments use the same `<attached-file>` envelope but carry extra
 // attributes (`pages`, `truncated`). Re-extract from the same `<attached-file>`
 // matches by walking the captures rather than a separate regex, so we can't
@@ -105,7 +275,10 @@ const ATTACHMENTS_BLOCK_RE = /<attachments>([\s\S]*?)<\/attachments>/;
 
 /** Extract attachment metadata from a user message for display in the chat bubble. */
 export function extractUserAttachments(msg: Message): ParsedUserAttachments {
-  const result: ParsedUserAttachments = { images: [], elements: [], files: [], pdfs: [], recordings: [] };
+  const result: ParsedUserAttachments = {
+    images: [], elements: [], files: [], pdfs: [], recordings: [],
+    prompts: [], skills: [], directories: [], inlineDirectives: [],
+  };
   if (msg.role !== 'user') return result;
 
   // Extract images from content blocks
@@ -129,6 +302,10 @@ export function extractUserAttachments(msg: Message): ParsedUserAttachments {
     const name = unescapeXml(m[1]!);
     const type = unescapeXml(m[2]!);
     const attrs = parseAttachedFileAttrs(m[3] ?? '');
+    // `pinned="true"` only appears on mention-file envelopes (regular file
+    // and PDF envelopes never carry it). The bubble uses it to hide pin
+    // chips; mention-files and regular files render normally.
+    const pinned = attrs.pinned === 'true';
     if (type === 'application/pdf') {
       // Pages count comes from the offscreen extractor. `truncated="true"`
       // means we hit the budget cap before reading the whole document;
@@ -143,7 +320,7 @@ export function extractUserAttachments(msg: Message): ParsedUserAttachments {
         truncated: attrs.truncated === 'true',
       });
     } else {
-      result.files.push({ name, type });
+      result.files.push({ name, type, pinned });
     }
   }
   for (const m of attachBlock.matchAll(RECORDING_RE)) {
@@ -155,6 +332,30 @@ export function extractUserAttachments(msg: Message): ParsedUserAttachments {
       json: unescapeXml(m[5]),
     });
   }
+  for (const m of attachBlock.matchAll(PROMPT_RE)) {
+    result.prompts.push({ name: unescapeXml(m[1]!), path: unescapeXml(m[2]!) });
+  }
+  for (const m of attachBlock.matchAll(SKILL_RE)) {
+    result.skills.push({ name: unescapeXml(m[1]!), path: unescapeXml(m[2]!) });
+  }
+  for (const m of attachBlock.matchAll(DIR_RE)) {
+    result.directories.push({
+      path: unescapeXml(m[1]!),
+      label: unescapeXml(m[2]!),
+      count: Number(m[3]),
+      // Optional `pinned="true"` prefix on the opening tag — pin chips skip
+      // the bubble badge; mention chips render as confirmation.
+      pinned: /pinned="true"/.test(m[0]),
+    });
+  }
+
+  // Hybrid injection pulls prompt/skill mentions OUT of <attachments> and
+  // inlines them as `[DIRECTIVE — ...]` text blocks. The LLM still gets the
+  // data (it lives in the user text now), but for UX we re-extract the
+  // names so the bubble can render confirmation chips. Scan the FULL raw
+  // text — directives sit inside `<user-request>`, not the `<attachments>`
+  // block, so the attachBlock scan above doesn't see them.
+  result.inlineDirectives = extractInlineDirectives(raw);
 
   return result;
 }
@@ -180,8 +381,8 @@ export function truncateForRetry<M extends { role: string }>(messages: M[]): M[]
 }
 
 function replaceUserRequestInText(raw: string, newText: string): string {
-  if (USER_REQUEST_RE.test(raw)) {
-    return raw.replace(USER_REQUEST_RE, `<user-request>\n${newText}\n</user-request>`);
+  if (extractLastUserRequest(raw) !== raw) {
+    return replaceLastUserRequest(raw, newText);
   }
   return newText;
 }
@@ -213,7 +414,7 @@ export function truncateForEditRerun<M extends { role: string }>(
       if (!block || typeof block !== 'object') return block;
       const b = block as Record<string, unknown>;
       if (b.type !== 'text' || typeof b.text !== 'string') return block;
-      if (!replaced && USER_REQUEST_RE.test(b.text)) {
+      if (!replaced && extractLastUserRequest(b.text) !== b.text) {
         replaced = true;
         return { ...b, text: replaceUserRequestInText(b.text, trimmed) };
       }
