@@ -279,13 +279,10 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
 
         case 'session_created':
           // No `isCurrentSession` guard: the BG already routes this event
-          // through `broadcast()` (for `prompt`-born sessions, only ports
-          // whose subscribedSession matches the new id) or, for `fork_session`,
-          // by iterating ports subscribed to the source session. By the time
-          // the message reaches this port, it IS relevant. Without this, the
-          // fork flow can't navigate to the new id — `sessionIdRef.current`
-          // is the source (the user is still viewing it), but msg.sessionId
-          // is the new fork — they'd never match.
+          // through `broadcast()` so the message only reaches ports subscribed
+          // to the new session. By the time it arrives here it IS relevant;
+          // without the guard, navigate-to-different-session flows could be
+          // dropped because `sessionIdRef.current` lags the React commit.
           setPendingTools(new Map());
           setPendingPermissions(new Map());
           setState(prev => {
@@ -317,12 +314,10 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
         case 'session_loaded':
           // No `isCurrentSession` guard: BG only posts this to the port
           // currently subscribed to `msg.sessionId` (subscribe handler
-          // filters, and the `fork_session` handler explicitly targets the
-          // port that requested the fork). For a freshly-forked session,
-          // BG can deliver `session_loaded` immediately after `session_created`
-          // — the React commit on `sessionId` is async, so `sessionIdRef.current`
-          // is still the source when this arrives, and the guard would drop
-          // the payload → empty UI on the new session.
+          // filters). BG may deliver `session_loaded` immediately after
+          // `session_created` — the React commit on `sessionId` is async, so
+          // `sessionIdRef.current` can lag, and the guard would drop the
+          // payload → empty UI on the newly-active session.
           setPendingTools(new Map());
           setPendingPermissions(new Map());
           if (msg.session) {
