@@ -18,7 +18,7 @@ import {
   type SkillImportResult,
 } from '@/lib/ai-config/skill-transfer';
 import { showDialog } from '@/lib/ui/dialog';
-import { vfs, normalizePath } from '@/lib/persistence/vfs';
+import { normalizePath } from '@/lib/persistence/vfs';
 import { downloadFile } from '@/lib/utils';
 import type { SettingsOutletContext } from '@/components/settings/SettingsLayout';
 import { t } from '@/lib/i18n';

@@ -36,7 +36,7 @@ const ORGANIZE_TOOLS = [
  * 构造 beforeToolCall 门禁：整理 agent 的每一个 fs 路径参数都必须落在 stagingRoot 内，
  * 否则 block（含 `../` 逃逸防护，见 isWithinStaging）。这是「作用域锁死」的硬执行点。
  */
-export function createStagingScopeGate(stagingRoot: string) {
+function createStagingScopeGate(stagingRoot: string) {
   return async (
     context: BeforeToolCallContext,
   ): Promise<BeforeToolCallResult | undefined> => {

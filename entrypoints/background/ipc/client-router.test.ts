@@ -15,6 +15,7 @@ import { chatClientHandlers } from '../chat/client-handlers';
 import { recorderClientHandlers } from '../recorder/client-handlers';
 import { memoryClientHandlers } from '../memory/client-handlers';
 import { mcpClientHandlers } from '../mcp/bridge';
+import { debugLogClientHandlers } from '../debug-log/client-handlers';
 
 /** 所有注册进路由器的 handler map（与 index.ts 各 setup() 注册的对象一一对应）。 */
 const DOMAIN_HANDLER_MAPS: readonly [name: string, map: ClientHandlerMap][] = [
@@ -23,6 +24,7 @@ const DOMAIN_HANDLER_MAPS: readonly [name: string, map: ClientHandlerMap][] = [
   ['recorder', recorderClientHandlers],
   ['memory', memoryClientHandlers],
   ['mcp', mcpClientHandlers],
+  ['debugLog', debugLogClientHandlers],
 ];
 
 describe('client-router 穷尽性', () => {

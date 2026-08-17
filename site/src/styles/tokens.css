@@ -155,13 +155,6 @@ img, svg, video { display: block; max-width: 100%; height: auto; }
 .btn-primary:hover { transform: translateY(-1px); background: color-mix(in srgb, var(--accent-fill) 90%, #fff); }
 .btn-secondary { background: var(--surface); border-color: var(--line-2); color: var(--ink); }
 .btn-secondary:hover { border-color: var(--ink-subtle); }
-.btn-ghost { color: var(--ink-muted); }
-.btn-ghost:hover { color: var(--ink); background: var(--surface-2); }
-
-.text-link { color: var(--accent); font-weight: 600; display: inline-flex; align-items: center; gap: 5px; transition: gap .15s var(--ease); }
-.text-link svg { width: 14px; height: 14px; }
-.text-link:hover { gap: 9px; }
-
 /* ---------- PLACEHOLDER (image / video slot) ---------- */
 .ph {
   position: relative; display: grid; place-items: center; text-align: center;

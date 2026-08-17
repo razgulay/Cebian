@@ -368,7 +368,7 @@ function formatHelpNamespace(ns: string): string {
   const doc = API_DOCS[ns];
   if (!doc) return `Unknown namespace: "${ns}". Use method="list" to see all available namespaces.`;
   const lines = [`chrome.${ns} — ${doc.summary}\n`];
-  for (const [name, m] of Object.entries(doc.methods)) {
+  for (const m of Object.values(doc.methods)) {
     lines.push(`  ${m.signature}`);
     lines.push(`    ${m.params}`);
     lines.push(`    ${m.example}\n`);

@@ -84,8 +84,23 @@ export function createMCPAgentTool(
   // ^[a-zA-Z0-9_-]+$. Keep the combined name within OpenAI's 64-char limit:
   // `mcp__` (5) + slug (≤20) + `__` (2) = 27 prefix chars, leaving 37 for
   // the tool name.
-  const safeName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 37);
-  if (safeName !== mcpTool.name) {
+  //
+  // When truncation is unavoidable, prefer the START of the name — that's
+  // the verb/object the LLM uses to recognize what the tool does (`get_`,
+  // `create_`, `update_…`). Slicing the tail just drops the disambiguating
+  // suffix (`_by_id`, `_v2`) and produces a name that collides with other
+  // tools on the same server. Fall back to slicing at a `_` boundary
+  // (don't cut mid-word) when the start is too long to fit.
+  const sanitized = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const TOOL_NAME_MAX = 37;
+  let safeName = sanitized;
+  if (safeName.length > TOOL_NAME_MAX) {
+    // Try to cut at the last `_` before the limit so we don't shred a word.
+    const slice = safeName.slice(0, TOOL_NAME_MAX);
+    const lastUnderscore = slice.lastIndexOf('_');
+    safeName = lastUnderscore > 8 ? slice.slice(0, lastUnderscore) : slice;
+  }
+  if (safeName !== sanitized) {
     console.warn(`[mcp] sanitized tool name "${mcpTool.name}" → "${safeName}" for server "${server.name}"`);
   }
   const name = `mcp__${slug}__${safeName}`;

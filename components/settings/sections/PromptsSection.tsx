@@ -3,7 +3,10 @@ import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { FileWorkspace } from './FileWorkspace';
 import { encodeRelPath } from '@/lib/persistence/vfs';
 import { CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
-import { settingsFilePanelWidth } from '@/lib/persistence/storage';
+import { settingsFilePanelWidth, expandPromptsInline } from '@/lib/persistence/storage';
+import { useStorageItem } from '@/hooks/useStorageItem';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import type { SettingsOutletContext } from '@/components/settings/SettingsLayout';
 import { t } from '@/lib/i18n';
 
@@ -30,6 +33,8 @@ export function PromptsSection() {
   const splat = params['*'] ?? '';
   const relativePath = splat || undefined;
 
+  const [expandInline, setExpandInline] = useStorageItem(expandPromptsInline, false);
+
   const handleSelect = useCallback((rel: string | null) => {
     if (rel) {
       navigate(`${basePath}/prompts/${encodeRelPath(rel)}`, { replace: true });
@@ -41,7 +46,22 @@ export function PromptsSection() {
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <div className="px-6 pt-6 pb-4 shrink-0 border-b border-border">
-        <h2 className="text-base font-semibold">{t('settings.prompts.title')}</h2>
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <h2 className="text-base font-semibold">{t('settings.prompts.title')}</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="expand-prompts-inline"
+              checked={expandInline}
+              onCheckedChange={setExpandInline}
+              className="scale-90"
+            />
+            <Label htmlFor="expand-prompts-inline" className="text-xs text-muted-foreground cursor-pointer select-none">
+              {t('settings.prompts.expandInline')}
+            </Label>
+          </div>
+        </div>
         <p className="text-xs text-muted-foreground mt-0.5">
           {(() => {
             // settings.prompts.hint embeds $1 where the trigger char appears,

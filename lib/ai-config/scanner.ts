@@ -130,12 +130,22 @@ export async function scanPrompts(): Promise<PromptMeta[]> {
     try {
       const raw = await vfs.readFile(filePath, 'utf8');
       const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
-      const { data } = parseFrontmatter(content);
-      const name = typeof data.name === 'string' ? data.name : entry.replace(/\.md$/, '');
-      const description = typeof data.description === 'string' ? data.description : '';
+      // Always include the file — fall back to filename-based defaults if
+      // frontmatter parsing fails or fields are missing. Previously a parse
+      // error would silently skip the file and the command wouldn't appear
+      // in the slash menu, which made it look like prompts were missing.
+      let name = entry.replace(/\.md$/, '');
+      let description = '';
+      try {
+        const { data } = parseFrontmatter(content);
+        if (typeof data.name === 'string' && data.name.trim()) name = data.name.trim();
+        if (typeof data.description === 'string') description = data.description;
+      } catch {
+        // Frontmatter parse failed — use filename-based defaults above.
+      }
       results.push({ name, description, fileName: entry, filePath });
     } catch {
-      // Skip unreadable files
+      // Skip files that can't be read (permissions, missing, etc.)
     }
   }
 

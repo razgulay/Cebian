@@ -15,7 +15,9 @@
     }
   },
   "scripts": {
+    "predev": "node scripts/patch-wxt-dev.mjs",
     "dev": "wxt",
+    "predev:firefox": "node scripts/patch-wxt-dev.mjs",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build && node scripts/scan-obfuscation.mjs .output/chrome-mv3",
     "build:firefox": "wxt build -b firefox && node scripts/scan-obfuscation.mjs .output/firefox-mv2",
@@ -26,6 +28,7 @@
     "test:run": "vitest run",
     "depcruise": "depcruise entrypoints components hooks lib --config .dependency-cruiser.cjs",
     "lint:agents": "node scripts/check-agent-config.mjs",
+    "check:branches": "node scripts/check-branches.mjs",
     "check": "node scripts/check-agent-config.mjs && wxt prepare && tsc --noEmit && node scripts/lint-i18n.mjs && vitest run",
     "postinstall": "wxt prepare && simple-git-hooks"
   },
@@ -50,6 +53,7 @@
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@mozilla/readability": "^0.6.0",
+    "@neondatabase/serverless": "^1.1.0",
     "@wxt-dev/i18n": "^0.2.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

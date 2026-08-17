@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Key, MessageSquare, FileText, Blocks, Brain, Plug, Info, DatabaseBackup, HardDrive, Sliders, MousePointerClick } from 'lucide-react';
+import { Key, MessageSquare, FileText, Blocks, Brain, Plug, Info, DatabaseBackup, Sliders, MousePointerClick, Type, Database } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 
@@ -21,10 +21,14 @@ export const SETTINGS_SECTIONS: SectionNavItem[] = [
   { path: 'prompts', getLabel: () => t('settings.nav.prompts'), icon: FileText },
   { path: 'skills', getLabel: () => t('settings.nav.skills'), icon: Blocks },
   { path: 'memory', getLabel: () => t('settings.nav.memory'), icon: Brain },
+  { path: 'rag', getLabel: () => t('settings.nav.rag'), icon: Database },
   { path: 'mcp', getLabel: () => t('settings.nav.mcp'), icon: Plug },
   { path: 'page-interaction', getLabel: () => t('settings.nav.pageInteraction'), icon: MousePointerClick },
+  { path: 'appearance', getLabel: () => t('settings.nav.appearance'), icon: Type },
   { path: 'backup', getLabel: () => t('settings.nav.backup'), icon: DatabaseBackup },
-  { path: 'storage', getLabel: () => t('settings.nav.storage'), icon: HardDrive },
+  // 'storage' 不再列在 nav 里 — 用户访问频次高，已迁到 ChatInput 工具栏的 HardDrive
+  // 快捷按钮（深链接 /settings/storage 仍可用）。从 nav 移除免去「Settings 里再点一
+  // 下」的两级跳转。
   { path: 'advanced', getLabel: () => t('settings.nav.advanced'), icon: Sliders },
   { path: 'about', getLabel: () => t('settings.nav.about'), icon: Info },
 ];

@@ -7,12 +7,17 @@
 
 import { sessionManager } from './session-manager';
 import { sessionStore, type LoadedSession } from './session-store';
-import type { SessionSnapshot } from '@/lib/ipc/protocol';
-import { setViewing, stopViewing, hasViewer } from './viewers';
+import type { SessionSnapshot, SessionMeta } from '@/lib/ipc/protocol';
+import {
+  setViewing,
+  stopViewing,
+  hasViewer,
+} from './viewers';
 import { registerClientHandlers, type ClientHandlerMap } from '../ipc/client-router';
 import { onPortDisconnect, post, broadcastAll } from '../ipc/port-registry';
 import { vfs } from '@/lib/persistence/vfs';
 import { isValidSessionId } from '@/lib/utils';
+import { renameSession, setSessionPinned } from '@/lib/persistence/db';
 
 // ─── Grace cancel ───
 
@@ -269,6 +274,45 @@ const chatClientHandlers: ClientHandlerMap = {
       type: 'session_deleted',
       sessionId: msg.sessionId,
     });
+  },
+
+  async session_pin(_port, msg) {
+    if (!isValidSessionId(msg.sessionId)) {
+      console.warn('[session_pin] rejecting non-UUID sessionId:', msg.sessionId);
+      return;
+    }
+    const current = await sessionStore.load(msg.sessionId);
+    if (!current) return;
+    // Toggle: read the current flag, then flip. A round-trip but cheap
+    // (single Dexie get + update per click); avoids client sending the
+    // new value which could lie to other listeners in flight.
+    const next = !(current.isPinned === true);
+    await setSessionPinned(msg.sessionId, next);
+    const { messages: _drop, ...meta } = current;
+    const updated: SessionMeta = {
+      ...meta,
+      isPinned: next,
+      isRunning: sessionManager.getSessionState(current.id)?.isRunning === true,
+    };
+    broadcastAll({ type: 'session_changed', session: updated });
+  },
+
+  async session_rename(_port, msg) {
+    if (!isValidSessionId(msg.sessionId)) {
+      console.warn('[session_rename] rejecting non-UUID sessionId:', msg.sessionId);
+      return;
+    }
+    const current = await sessionStore.load(msg.sessionId);
+    if (!current) return;
+    const ok = await renameSession(msg.sessionId, msg.title);
+    if (!ok) return;
+    const { messages: _drop, ...meta } = current;
+    const updated: SessionMeta = {
+      ...meta,
+      title: msg.title.trim(),
+      isRunning: sessionManager.getSessionState(current.id)?.isRunning === true,
+    };
+    broadcastAll({ type: 'session_changed', session: updated });
   },
 };
 

@@ -7,6 +7,7 @@ import { recorder } from './recorder/manager';
 import { setupRecorderClientHandlers } from './recorder/client-handlers';
 import { setupRecorderPortRelay } from './recorder/port-relay';
 import { setupMcpBridge } from './mcp/bridge';
+import { debugLogClientHandlers } from './debug-log/client-handlers';
 import { seedDevStorage } from './providers/dev-seed';
 import { registerBackupHandler } from './chat/backup-handler';
 import { setupPageActions } from '@/lib/page-actions/manager';
@@ -16,7 +17,7 @@ import { isRecorderRuntimeMessage, RECORDER_MSG_KIND, type RecorderControlMessag
 import { isInjectablePage } from '@/lib/browser/tab-actions';
 import { setupUpdateNotice } from './lifecycle/update-notice';
 import { setupPortRegistry } from './ipc/port-registry';
-import { setupClientRouter } from './ipc/client-router';
+import { setupClientRouter, registerClientHandlers } from './ipc/client-router';
 
 export default defineBackground(() => {
   console.log('Cebian background started', { id: browser.runtime.id });
@@ -193,6 +194,7 @@ export default defineBackground(() => {
   setupRecorderClientHandlers();
   setupMemoryClientHandlers();
   setupMcpBridge();
+  registerClientHandlers(debugLogClientHandlers);
   setupClientRouter();
 
   // 最后一步：所有 onPortConnect / onPortDisconnect 订阅者都已注册，现在才开始受理

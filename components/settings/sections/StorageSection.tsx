@@ -1,8 +1,8 @@
 /**
  * StorageSection — 虚拟文件系统（VFS）的存储概览。
  *
- * 只读视角：显示 VFS 已用空间，并提供一个按钮在新标签打开文件浏览器
- * （落到 `/workspaces`，即按会话标题翻译后的文档列表）。VFS 浏览器本身是只读的，
+ * 只读视角：显示 VFS 已用空间，并提供一个按钮在新的浏览器标签页里打开
+ * 文件浏览器（独立 vfs.html 视图，不嵌进 sidepanel）。VFS 浏览器本身是只读的，
  * 这里刻意不提供删除 / 清空——需要导出时用浏览器自带的下载。
  */
 import { useEffect, useState } from 'react';
@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { vfs } from '@/lib/persistence/vfs';
 import { formatBytes } from '@/lib/utils';
 
-function openFileBrowser(): void {
+function openInNewTab(): void {
   const url = browser.runtime.getURL('/vfs.html' as never) + '#/workspaces';
   void browser.tabs.create({ url });
 }
@@ -48,7 +48,7 @@ export function StorageSection() {
         </div>
 
         <div className="space-y-2">
-          <Button variant="outline" onClick={openFileBrowser}>
+          <Button variant="outline" onClick={openInNewTab}>
             <FolderOpen className="size-4" />
             {t('settings.storage.openBrowser')}
           </Button>

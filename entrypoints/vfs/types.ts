@@ -4,6 +4,12 @@ export interface DirEntry {
   name: string;
   isDir: boolean;
   size: number;
+  /** Optional directory mtime (ms since epoch). Only populated for `/workspaces`
+   *  entries whose session no longer exists — gives orphan rows a fallback
+   *  date label so the row isn't completely blank in the second / third
+   *  column. Undefined for known-session entries (the session row carries
+   *  the date instead) and for non-workspace listings. */
+  mtimeMs?: number;
 }
 
 /** Discriminated union of file rendering modes. The loader picks the type
@@ -14,10 +20,12 @@ export interface DirEntry {
 export type FileMedia =
   | { type: 'text'; content: string; size: number }
   | { type: 'markdown'; content: string; size: number }
+  | { type: 'pdf'; data: Uint8Array; size: number }
   | { type: 'image'; mime: string; size: number; url: string }
   | { type: 'video'; mime: string; size: number; url: string }
   | { type: 'audio'; mime: string; size: number; url: string }
   | { type: 'binary'; size: number }
+  | { type: 'unknown'; size: number }
   | { type: 'tooLarge'; size: number };
 
 export type ViewState =
@@ -35,4 +43,3 @@ export type ViewState =
     }
   | { kind: 'file'; path: string; media: FileMedia }
   | { kind: 'error'; path: string; message: string };
-

@@ -16,12 +16,14 @@ import { fsReadFileTool } from './fs-read-file';
 import { fsListTool } from './fs-list';
 import { fsSearchTool } from './fs-search';
 import { fsSaveUrlTool } from './fs-save-url';
+import { ragInspectTool } from './rag-inspect';
 import { createSessionRunSkillTool } from './run-skill';
 import { chromeApiTool } from './chrome-api-tool';
 import { SessionToolContext } from './session-context';
 import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
+import { debugLog, withSession } from '@/lib/debug/log';
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
@@ -30,6 +32,10 @@ const sharedTools: AgentTool<any>[] = [
   executeJsTool, readPageTool, interactTool, inspectTool, tabTool, screenshotTool, pdfTool,
   fsCreateFileTool, fsEditFileTool, fsMkdirTool, fsRenameTool, fsDeleteTool,
   fsReadFileTool, fsListTool, fsSearchTool, fsSaveUrlTool,
+  // rag_inspect lives in sharedTools (not session-specific) because it
+  // touches a per-installation Neon database, not the session workspace.
+  // Read-only — safe to expose to every session.
+  ragInspectTool,
   chromeApiTool,
 ];
 
@@ -76,13 +82,43 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * in the session's workspace).
  *
  * Used both at session creation and when MCP config changes mid-session.
+ *
+ * `delegate_dom` is ALWAYS included so the main agent sees it in its tool
+ * list even when the user hasn't yet configured a sub-agent model. The tool
+ * itself checks `domSubAgentModel` at execute time and returns a friendly
+ * error message if not configured — that's cheaper than hiding the tool and
+ * having the agent ask the user "do you have a sub-agent tool?" when they
+ * could just turn it on in Settings → Advanced. This also avoids the trap
+ * where the user changes the setting AFTER creating a session: the tool is
+ * already in the list, so changes take effect immediately.
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
 ): Promise<AgentTool<any>[]> {
+  // Cold-start profiling: MCP discovery and the lazy delegate_dom import are
+  // the two async paths in this function. Log each so we can see which one
+  // dominates when `createSessionTools` is slow on a fresh session. Pure
+  // instrumentation — no behavior change. Remove once we've measured enough
+  // sessions to confirm nothing is unexpectedly heavy.
+  const mcpStart = Date.now();
   const mcpTools = await discoverMCPTools();
+  debugLog.info('tool', 'tool:init:mcp',
+    withSession({
+      durationMs: Date.now() - mcpStart,
+      toolCount: mcpTools.length,
+    }, ctx.sessionId));
+
   const runSkill = createSessionRunSkillTool(ctx.sessionId);
-  return [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
+  const base = [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
+  // Always include delegate_dom — checks the sub-agent model at runtime.
+  const delegateStart = Date.now();
+  const { delegateDomTool } = await import('./delegate-dom');
+  debugLog.info('tool', 'tool:init:delegate-dom',
+    withSession({
+      durationMs: Date.now() - delegateStart,
+    }, ctx.sessionId));
+  base.push(delegateDomTool);
+  return base;
 }
 
 /**
@@ -96,6 +132,7 @@ export async function createSessionTools(sessionId: string): Promise<{
   tools: AgentTool<any>[];
   ctx: SessionToolContext;
 }> {
+  const totalStart = Date.now();
   const ctx = new SessionToolContext(sessionId);
 
   // Register interactive tools (each gets its own bridge)
@@ -103,6 +140,15 @@ export async function createSessionTools(sessionId: string): Promise<{
   ctx.register(TOOL_ASK_USER, askUserBridge, askUserTool);
 
   const tools = await buildSessionToolArray(ctx);
+
+  // Final cold-start total. Pairs with the per-phase markers in
+  // buildSessionToolArray so we can attribute the time to MCP discovery vs
+  // delegate_dom import vs everything else (register + map + push).
+  debugLog.info('tool', 'tool:init:total',
+    withSession({
+      durationMs: Date.now() - totalStart,
+      totalCount: tools.length,
+    }, sessionId));
 
   return { tools, ctx };
 }

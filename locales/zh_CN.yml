@@ -17,6 +17,7 @@ common:
     week: "7 天内"
     month: "30 天内"
     older: "更早"
+    pinned: "已固定"
   toggleTheme: "切换主题"
   settings: "设置"
   back: "返回"
@@ -38,6 +39,8 @@ common:
   copy: "复制"
   copied: "已复制"
   copyFailed: "复制失败"
+  cut: "剪切"
+  paste: "粘贴"
   speak: "朗读"
   stopSpeaking: "停止朗读"
   # $1 = 代码语言名（如 "Ts"、"Python"）
@@ -70,6 +73,10 @@ common:
     # $1 = 会话标题
     deleteConfirmDescription: "“$1”以及它的工作区文件将被永久删除，此操作不可撤销。"
     running: "工作中"
+    pin: "固定"
+    unpin: "取消固定"
+    rename: "重命名"
+    moreActions: "更多操作"
     # $1 = 消息数
     messageCount:
       0: "暂无消息"
@@ -99,8 +106,10 @@ settings:
     prompts: "提示词"
     skills: "技能"
     memory: "记忆"
+    rag: "知识库 (RAG)"
     mcp: "MCP 服务器"
     pageInteraction: "页面交互"
+    appearance: "外观"
     backup: "备份与恢复"
     storage: "文件系统"
     advanced: "高级"
@@ -134,12 +143,45 @@ settings:
       xiaohongshuHandle: "一只猫头猫"
       x: "X"
       xHandle: "@maotoumao0_0"
+  debugLog:
+    title: "调试日志"
+    description: "把扩展里所有 console 输出缓存到本地环形缓冲。反馈 bug 时把这个文件导出给维护者，他们能直接看到现场发生了什么，不用你现场复演。"
+    enable:
+      label: "记录调试日志"
+      hint: "关闭后不写入环形缓冲，导出按钮也会一并禁用。"
+    verbose:
+      label: "详细模式（逐 token 事件）"
+      hint: "同时记录 LLM 流式返回的每个 token。默认关闭——默认等级已经覆盖所有 agent 边界和警告，这通常是反馈 bug 时最需要的。"
+    live:
+      label: "实时日志"
+      hint: "实时看到新条目出现，不用等导出。"
+      open: "打开实时日志"
+      close: "关闭"
+      pause: "暂停"
+      resume: "继续"
+      cleared: "日志已清空"
+      empty: "暂无条目——操作一下扩展以触发事件。"
+    export: "导出日志"
+    clear: "清空日志"
+    # $1 = 当前缓冲的条目数
+    countLabel: "已缓冲 $1 条"
+    countUnavailable: "日志不可用（无痕模式？）"
+    # $1 = 文件中包含的条目数
+    exported: "已导出 $1 条到下载文件夹"
+    exportFailed: "导出失败：$1"
+    cleared: "调试日志已清空"
+    clearFailed: "清空失败：$1"
+    empty: "调试日志为空，暂无可导出内容"
   advanced:
     title: "高级"
     compaction:
       label: "上下文压缩模型"
       hint: "对话过长时用来自动压缩历史的模型，默认与对话模型相同。"
       followMain: "与对话模型相同"
+    domSubAgent:
+      label: "DOM 子代理模型"
+      hint: "处理主对话模型委派的重页面阅读任务的便宜模型。关 = 关闭此功能。"
+      off: "关闭"
   pageInteraction:
     title: "页面交互"
     ball:
@@ -156,6 +198,19 @@ settings:
       label: "翻译目标语言"
       hint: "工具条翻译成的目标语言。"
       auto: "跟随界面语言"
+  appearance:
+    title: "外观"
+    fontSize:
+      label: "聊天字号"
+      hint: "拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 14–15 像素（步长 0.1），默认 14 像素。"
+      preview: "预览 — The quick brown fox jumps over the lazy dog."
+    fontFamily:
+      label: "聊天字体"
+      hint: "选择侧边栏聊天使用的字体。仅影响用户消息和助手回复。"
+      geist: "Geist（默认）"
+      inter: "Inter"
+      roboto: "Roboto"
+      system: "系统默认"
   instructions:
     title: "指引"
     label: "自定义指引"
@@ -166,17 +221,27 @@ settings:
     newBody: "（在此处编写你的提示词）"
     # $1 = 触发字符（“/”）
     hint: "可复用的提示模板，通过 $1 命令在聊天输入中触发。"
+    expandInline: "在输入框中展开提示词内容"
     placeholders:
       selectedText: "页面选中文本"
       pageUrl: "当前页面 URL"
       pageTitle: "当前页面标题"
       date: "当前日期"
       clipboard: "剪贴板内容"
+      input: "斜杠命令后输入的文本"
   memory:
     title: "记忆"
     enable: "启用记忆"
     hint: "跨对话记忆，默认关闭。开启后助手会跨会话自动保存并调用关于你的长期信息。"
     newBody: "（在此写记忆内容）"
+    emptyList: "暂无记忆文件"
+    deleteConfirmTitle: "删除记忆文件？"
+    deleteConfirmDescription: "将从 VFS 永久删除该文件，此操作不可撤销。"
+    inlineEditor:
+      renameFile: "重命名文件"
+      renameConflict: "已存在同名文件"
+      close: "完成"
+      placeholder: "文件名"
     organize:
       title: "整理记忆"
       hint: "一次性合并重复、清理过时、规整你的记忆文件。"
@@ -282,6 +347,76 @@ settings:
       bearerToken: "Token"
       bearerTokenPlaceholder: "粘贴 bearer token"
       headers: "自定义 Headers"
+  rag:
+    title: "知识库 (RAG)"
+    connectionTitle: "连接"
+    connectionLabel: "Neon 连接字符串"
+    connectionHint: "从 Neon 项目控制台获取。格式：postgresql://user:pass@host/db?sslmode=require"
+    testConnection: "测试连接"
+    connectionOk: "已连接 — pgvector 就绪"
+    connectionFailed: "连接失败"
+    pgvectorMissing: "已连接，但缺少 pgvector 扩展。请到 Neon 控制台 → Extensions 启用。"
+    bootstrapFailed: "建表失败"
+    embedderTitle: "Embedding 模型"
+    embedderHint: "默认指向本地 CLIProxyAPI（端口 8317）。任何 OpenAI 兼容的 /embeddings 接口都行。"
+    embedderBaseUrl: "Base URL"
+    embedderApiKey: "API Key（可选）"
+    embedderModel: "模型"
+    embedderDim: "维度"
+    chunkingTitle: "分块"
+    chunkSize: "块大小（字符）"
+    chunkOverlap: "重叠（字符）"
+    collections: "知识库"
+    collectionsHint: "每个知识库是对所选文件的向量索引。在聊天输入框的「知识库」分组里挑一个，会把 top-K 块附到你的消息上。"
+    noCollections: "暂无知识库——点击「新建知识库」索引一批文件。"
+    rerankTitle: "重排序（第二层 — 可选）"
+    rerankHint: "用 cross-encoder 模型对第一层余弦召回的候选重新打分，返回 top-N。默认关闭；开启可获得更高质量的检索，代价是每次发送多一个 API 调用。"
+    rerankBaseUrl: "Rerank Base URL"
+    rerankModel: "Rerank 模型"
+    rerankApiKey: "Rerank API key（可选）"
+    rerankTopN: "Rerank 后的 top-N"
+    pinGateTitle: "Pinned RAG 召回门槛"
+    pinGateHint: "当你 pin 一个知识库时，这个门槛决定话题不相关时是否仍附带 envelope。设为 0 关闭（始终附带）。"
+    pinMinScore: "附带所需的最低余弦分数 (0–1)"
+    pinMinScoreHint: "Jina 模型的相关命中通常在 0.3–0.9，话题不相关时多在 0.2–0.4。如要开启门槛，建议从 0.35 起。"
+    newCollection: "新建知识库"
+    newCollectionHint: "先选择文件夹（已有或新建），再把文件放进去。索引在本地完成——文件留在你磁盘上，向量写入 Neon。"
+    newCollectionName: "知识库名称"
+    nameInvalid: "名称必须以字母或数字开头，只允许字母、数字、横线、下划线。"
+    nameExists: "已存在名为「$1」的知识库。"
+    folderLabel: "文件夹"
+    folderPlaceholder: "选择文件夹…"
+    folderNewOption: "+ 新建文件夹…"
+    folderNewPlaceholder: "输入名称后按回车"
+    folderNoFolders: "还没有文件夹——在上方输入名称"
+    filesInsideFolder: "此文件夹内的文件"
+    pickFiles: "选择文件"
+    pickFolder: "选择文件夹"
+    pickedCount: "$1 个文件 · $2"
+    pickedSkipped: "已跳过 $1 个文件（不支持的扩展名）"
+    reindexBanner: "向「$1」添加文件——已有 chunks 会被新文件替换。"
+    progressReading: "读取 $1 / $2 — $3"
+    progressChunking: "已分块 $1 块"
+    progressEmbedding: "Embedding $1 / $2"
+    progressInserting: "写入 $1 / $2"
+    index: "索引"
+    cancel: "取消"
+    indexDone: "已索引 $1 块"
+    indexFailed: "索引失败"
+    reindex: "重新索引（重新选文件）"
+    renameCollection: "重命名知识库"
+    renameCollectionLabel: "新名称"
+    renamePlaceholder: "输入新名称"
+    renameConfirm: "将「$1」重命名为「$2」？"
+    renameConfirmHint: "Neon 中已有的块会重新打上新的标签。Embedding 不会重新生成 —— 搜索结果完全不变。"
+    renameSuccess: "已将「$1」重命名为「$2」"
+    renameFailed: "重命名失败"
+    renameInUse: "已存在名为「$1」的知识库"
+    deleteCollection: "删除知识库"
+    confirmDeleteTitle: "删除知识库？"
+    confirmDelete: "删除知识库「$1」及其在 Neon 中的 $2 个块？磁盘上的文件不受影响。"
+    deleteSuccess: "已删除「$1」"
+    deleteFailed: "删除失败"
   backup:
     title: "备份与恢复"
     local:
@@ -413,6 +548,10 @@ chat:
     placeholder: "输入 / 查看命令…"
     pickElement: "选择元素"
     cancelPick: "取消选择"
+    pickRegion: "裁剪区域"
+    cancelRegionPick: "取消裁剪"
+    regionPickFailed: "区域截图失败"
+    openStorage: "文件系统"
     screenshot: "截图"
     uploadFile: "上传文件"
     mobileMode: "移动端模式"
@@ -437,8 +576,11 @@ chat:
     unsupportedFileType: "不支持的文件类型：$1"
     modelNoImage: "当前模型不支持多模态输入"
     imageStripped: "已移除图片附件——当前模型不支持多模态输入"
+    quoteChips: "引用片段"
+    removeQuoteChip: "移除引用片段"
     noPrompts: "暂无 Prompt，前往 AI 配置创建"
     noMatch: "无匹配结果"
+    loadMore: "再显示 $1 条"
     iframeEnterHint: "⏎ 点击进入"
     # 语音输入（本地优先、云端兜底的语音识别）
     voiceStart: "语音输入"
@@ -451,9 +593,50 @@ chat:
     voiceAudioCapture: "没有找到麦克风，或无法访问。"
     voiceNetworkFailed: "语音识别服务连接失败，请检查网络后重试。"
     voiceFailed: "语音输入失败，请重试。"
+    mentionAdd: "添加上下文"
+    removeMentionChip: "移除上下文"
+    mentionChips: "已引用的上下文"
+    sectionSkills: "技能"
+    sectionPrompts: "提示词"
+    sectionFolders: "文件夹"
+    sectionKnowledge: "知识库"
+    sectionTabs: "添加标签页"
+    noSkills: "暂无技能——请到 AI 配置中创建"
+    noPromptsMention: "暂无提示词——请到 AI 配置中创建"
+    noFolders: "暂无可用文件夹"
+    noCollections: "暂无 RAG 知识库——请到 设置 → 知识库 中创建"
+    folderBack: "返回上一级"
+    folderEmpty: "空文件夹"
+    loading: "加载中…"
+    # $1 = 上下文名称
+    mentionReadFailed: "无法读取上下文——已丢弃：$1"
+    tabsNotReady: "标签页引用将在后续版本提供"
+    # $1 = 固定项名称（多个以逗号分隔）
+    pinReadFailed: "已固定的上下文读取失败——本轮跳过：$1"
+    # $1 = 固定项名称, $2 = 连续失败次数
+    pinAutoRemoved: "已取消固定「$1」——连续 $2 条消息未找到来源"
+    # 把 prompt / skill 钉在本次聊天里：本会话每条消息都会自动附带其内容；
+    # 换到新会话清空，需重新钉选。
+    sectionPinned: "已固定"
+    pinnedAutoHint: "自动"
+    pinnedChips: "本次聊天自动附带"
+    togglePin: "钉到本次聊天"
+    unpin: "从本次聊天取消固定"
+  mention:
+    builtinSkill:
+      funFactsName: "趣味冷知识"
+      funFactsBody: |
+        每条回复中点缀 1-2 条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
+      hypeItUpName: "气氛拉满！"
+      hypeItUpBody: |
+        用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到 60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
+      explainInCharacterName: "角色扮演讲解"
+      explainInCharacterBody: |
+        为讲解设定一个鲜明的角色——沧桑的老船长、二十年代黑色电影侦探、穿越时空的历史学家等，挑最贴合主题的那个。贯穿始终保持角色一致：用词、比喻、腔调全部到位。第一次出现时简短引入角色（"诸位且听——老船长马洛在此……"），然后全情投入，结尾也要留在角色里。
   attachments:
     image: "图片"
     screenshot: "截图"
+    region: "区域"
     imageAlt: "附件图片"
     # $1 = 事件数量, $2 = 时长 (M:SS)
     recordingMeta: "$1 个事件 · $2"
@@ -461,6 +644,14 @@ chat:
     recordingDownload: "下载录制 JSON"
     # $1 = 事件数量, $2 = 简短字符数（如 1.2K、3M）
     recordingHover: "$1 个事件 · 约 $2 字符"
+    # 目录提及徽章文案。$1 = 子项数
+    directoryItemCount: "$1 项"
+    # PDF 附件徽章文案。$1 = 页数
+    pdfPageCount: "$1 页"
+    # PDF 附件 tooltip（完整提取时）。$1 = 文件名, $2 = 页数
+    pdfPages: "$1 — 共 $2 页"
+    # PDF 附件 tooltip（文本被截断时）。$1 = 文件名, $2 = 总页数, $3 = 实际提取页数
+    pdfTruncated: "$1 — 提取了 $2 页中的 $3 页（文本超限截断）"
   recorder:
     start: "开始录制用户操作"
     stop: "停止录制（会随下一条消息发送）"
@@ -534,6 +725,11 @@ chat:
     errorServerUnavailable: "该 MCP server 已不可用，请到设置里重新启用该服务。"
     # $1 = 后台的原始错误描述
     errorFetchFailed: "加载交互视图失败：$1"
+  fork:
+    # Header 徽章标签，标记当前会话是另一会话的分支。
+    badgeLabel: "分叉自："
+    # 徽章里返回链接的 tooltip。
+    backTooltip: "回到原对话"
   message:
     # $1 = 输入 token 数（已格式化，如 "1.2k"），$2 = 输出 token 数（已格式化）
     tokensInOut: "↑$1 ↓$2"
@@ -548,6 +744,13 @@ chat:
     # 存在并列版本的消息上「‹ n/m ›」分支切换器的 tooltip
     prevBranch: "上一个版本"
     nextBranch: "下一个版本"
+  edit:
+    # 点击任意一条 user 消息上的铅笔后弹出的对话框标题
+    title: "编辑消息"
+    # 标题下方的说明文本——告知用户将从此处开始丢弃后续所有消息并重跑 agent
+    description: "编辑此消息并从此处重新运行 agent，此消息之后的所有内容将被丢弃。"
+    # 提交按钮文案
+    submit: "重新运行"
   compaction:
     # 历史压缩分割条上的标签
     divider: "此前上下文已压缩"
@@ -619,6 +822,10 @@ provider:
     apiKeyPlaceholder: "留空则不传认证"
     models: "模型列表"
     autoFetch: "自动获取"
+    showAll: "全部显示"
+    hideAll: "全部隐藏"
+    enabled: "显示"
+    hidden: "已隐藏"
     reasoning: "推理"
     image: "多模态"
     # $1 = 模型 ID
@@ -655,6 +862,8 @@ tools:
     unknown: "pdf: $1"
   # $1 = 技能名称
   runSkill: "正在执行技能脚本 $1"
+  # $1 = RAG 知识库名称
+  ragInspect: "正在查看 RAG 知识库 $1"
   # $1 = MCP 服务器 slug（展示形式），$2 = 远端工具名
   mcpCall: "$1 · $2"
   fs:
@@ -755,14 +964,63 @@ vfs:
   inlineLoadFailed: "$1 — $2"
   preview: "预览"
   viewSource: "查看源码"
+  source: "源码"
+  defaultOpen: "默认打开方式"
+  openSmart: "智能"
+  unknownFile: "未知文件类型（$1）。请下载后安全打开。"
+  previousPage: "上一页"
+  nextPage: "下一页"
+  pageNumber: "页码"
+  zoomOut: "缩小"
+  zoomIn: "放大"
+  fitWidth: "适应宽度"
+  pdfPasswordRequired: "此 PDF 需要密码。"
+  pdfWrongPassword: "密码错误，请重试。"
+  pdfLoadFailed: "PDF 预览失败：$1"
   # $1 = 路径
   pathNotFound: "路径不存在：$1"
   unknownError: "未知错误"
   # 工作区目录还在、但对应会话已被删除。$1 = 短 id
-  unknownSession: "未知会话 · $1"
+  # 工作区目录对应的会话已被删除：目录仍在磁盘，但已无法从任何会话访问。
+  # 直接显示完整目录名作为标题，不加任何前缀——仅靠灰字 + tooltip 表达状态。
+  unknownSessionTooltip: "已删除会话留下的工作区目录，可直接删除。"
   untitledSession: "未命名会话"
   # $1 = 格式化后的日期
   workspaceCreated: "创建于 $1"
+  # 目录列表上方的工具栏按钮
+  action:
+    newFile: "新建文件"
+    newFolder: "新建文件夹"
+    paste: "粘贴到这里"
+    # $1 = 操作（"复制" / "剪切"），$2 = 条目名 —— 用于工具栏上 paste 按钮的副标题，提示剪贴板里是什么
+    pasteHint: "$1 → $2"
+  # 内联新建/重命名输入框的占位文本。$1 = 类型（"文件" 或 "文件夹"）
+  prompt:
+    newName: "输入$1名"
+  # 删除等危险操作前的确认弹窗
+  confirm:
+    # $1 = 文件名
+    deleteFile: "删除「$1」？此操作无法撤销。"
+    # $1 = 文件夹名
+    deleteFolder: "删除「$1」及其全部内容？此操作无法撤销。"
+  # 操作成功后的 toast 提示
+  toast:
+    # $1 = 类型（"文件" / "文件夹"），$2 = 名称
+    created: "$1「$2」已创建"
+    # $1 = 新名称
+    renamed: "已重命名为「$1」"
+    # $1 = 已删除条目名
+    deleted: "「$1」已删除"
+    # $1 = 已粘贴条目名
+    pasted: "「$1」已粘贴"
+    # $1 = 名字，$2 = 原因（如"名称已存在"）
+    createFailed: "创建失败：$1 — $2"
+    renameFailed: "重命名失败：$1 — $2"
+    deleteFailed: "删除失败：$1 — $2"
+    # $1 = 源名，$2 = 原因
+    pasteFailed: "粘贴失败：$1 — $2"
+    # $1 = 源名 —— 粘贴目标是源自身或其子目录（仅对 cut/移动有意义；否则会空操作或把源改坏）
+    pasteSelf: "无法将「$1」粘贴到自身内"
 
 # ─── 独立授权页（entrypoints/user-permission）───
 permission:

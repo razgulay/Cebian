@@ -45,7 +45,7 @@ const FsSaveUrlInit = Type.Object({
       'or "no-referrer" to omit. Mirrors fetch RequestInit.referrer.',
   })),
   referrerPolicy: Type.Optional(Type.Union([
-    Type.Literal(''), Type.Literal('no-referrer'), Type.Literal('no-referrer-when-downgrade'),
+    Type.Literal('no-referrer'), Type.Literal('no-referrer-when-downgrade'),
     Type.Literal('origin'), Type.Literal('origin-when-cross-origin'),
     Type.Literal('same-origin'), Type.Literal('strict-origin'),
     Type.Literal('strict-origin-when-cross-origin'), Type.Literal('unsafe-url'),

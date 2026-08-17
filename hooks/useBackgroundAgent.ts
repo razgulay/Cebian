@@ -15,11 +15,20 @@ import {
 import type { Attachment } from '@/lib/agent/attachments';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { replaceUserText, truncateForRetry } from '@/lib/agent/message-helpers';
+import { rewriteLastUserMessage } from '@/lib/agent/rewrite-last-user-message';
 import type { Message } from '@earendil-works/pi-ai';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
+import { debugLog, withSession } from '@/lib/debug/log';
+
+// ─── Helpers ───
+
+// `rewriteLastUserMessage` lives in `@/lib/agent/rewrite-last-user-message`
+// (extracted so its behavior is unit-testable directly rather than via a
+// local copy hidden inside the hook's test file). The directive / separator
+// constants and rationale comments are kept there.
 
 // ─── State ───
 
@@ -97,6 +106,14 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   // Stable callback refs to avoid re-creating the port listener
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  // Display-text overrides for the most recent optimistic user message.
+  // When a slash command like `/writing` is resolved at send-time, the BG
+  // stores and broadcasts back the *expanded* prompt text — but the user
+  // bubble should keep showing `/writing`. This map records `{sessionId,
+  // messageTimestamp, displayText}` so the session_state handler can rewrite
+  // the authoritative message's text content when it arrives.
+  // Cleared as soon as it's been applied to an incoming broadcast.
+  const pendingDisplayTextRef = useRef<Map<string, { sessionId: string; timestamp: number; displayText: string }>>(new Map());
 
   // Connect to background on mount, with auto-reconnect on disconnect.
   useEffect(() => {
@@ -146,7 +163,14 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
             // mid-stream rebuild broadcasts omit it, so preserve the existing
             // value rather than wiping the header.
             ...(msg.title !== undefined ? { sessionTitle: msg.title } : {}),
-            messages: msg.messages,
+            // Slash-command display preservation: BG stores and broadcasts
+            // back the expanded prompt body, but the user bubble should keep
+            // showing what they typed (e.g. `/writing`). Rewrite the
+            // authoritative text content back to the short command form.
+            messages: (() => {
+              const pending = pendingDisplayTextRef.current.get(msg.sessionId);
+              return pending ? rewriteLastUserMessage(msg.messages, pending.displayText) : msg.messages;
+            })(),
             // 分支信息只在结构可能变化的帧携带；缺省帧保持现值，避免切换器闪没
             branchInfo: msg.branchInfo ?? prev.branchInfo,
             isAgentRunning: msg.isRunning,
@@ -160,11 +184,30 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
 
         case 'agent_start':
           if (!isCurrentSession(msg.sessionId)) break;
+          debugLog.info('bg', 'recv:agent_start', withSession({ sessionId: msg.sessionId }, msg.sessionId));
           setState(prev => ({ ...prev, isAgentRunning: true, isCompacting: false }));
           break;
 
+        case 'message_start' as never: {
+          // Forward-compatible stub: BG's IPC protocol doesn't currently
+          // emit a dedicated `message_start` event — message lifecycle is
+          // bounded by `message_update` / `message_end`. Kept here so that
+          // if/when BG adds a start-of-message broadcast, the sidepanel
+          // hook will log it without further code changes. Cast the label
+          // to `never` so TS doesn't reject the unknown case label.
+          const m = msg as unknown as { sessionId?: string; role?: string };
+          debugLog.info('bg', 'recv:message_start',
+            withSession({ role: m.role ?? '' }, m.sessionId ?? ''));
+          break;
+        }
+
         case 'message_update':
           if (!isCurrentSession(msg.sessionId)) break;
+          debugLog.info('hook', 'recv:message_update', {
+            sessionId: msg.sessionId,
+            msgRole: msg.message.role,
+            stopReason: (msg.message as { stopReason?: string }).stopReason,
+          });
           setState(prev => {
             const msgs = [...prev.messages];
             const last = msgs[msgs.length - 1];
@@ -179,18 +222,39 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
 
         case 'message_end':
           if (!isCurrentSession(msg.sessionId)) break;
-          setState(prev => ({ ...prev, messages: msg.messages }));
+          debugLog.info('hook', 'recv:message_end', {
+            sessionId: msg.sessionId,
+            msgsLen: msg.messages.length,
+            lastRole: msg.messages.at(-1)?.role,
+          });
+          // Length-aware merge (see session_state handler for the race-condition
+          // rationale). message_end broadcasts can race with the optimistic
+          // user bubble if a previous turn is still finalising when the new
+          // turn starts; a stale empty messages array would wipe the
+          // optimistic bubble.
+          setState(prev => {
+            const pending = pendingDisplayTextRef.current.get(msg.sessionId);
+            const rewritten = pending ? rewriteLastUserMessage(msg.messages, pending.displayText) : msg.messages;
+            return {
+              ...prev,
+              messages: rewritten.length >= prev.messages.length ? rewritten : prev.messages,
+            };
+          });
           break;
 
         case 'agent_end':
           if (!isCurrentSession(msg.sessionId)) break;
-          setState(prev => ({
-            ...prev,
-            messages: msg.messages,
-            branchInfo: msg.branchInfo ?? prev.branchInfo,
-            isAgentRunning: false,
-            isCompacting: false,
-          }));
+          setState(prev => {
+            const pending = pendingDisplayTextRef.current.get(msg.sessionId);
+            const rewritten = pending ? rewriteLastUserMessage(msg.messages, pending.displayText) : msg.messages;
+            return {
+              ...prev,
+              messages: rewritten,
+              branchInfo: msg.branchInfo ?? prev.branchInfo,
+              isAgentRunning: false,
+              isCompacting: false,
+            };
+          });
           setPendingTools(new Map());
           setPendingPermissions(new Map());
           break;
@@ -214,22 +278,62 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
           break;
 
         case 'session_created':
-          if (!isCurrentSession(msg.sessionId)) break;
+          // No `isCurrentSession` guard: the BG already routes this event
+          // through `broadcast()` (for `prompt`-born sessions, only ports
+          // whose subscribedSession matches the new id) or, for `fork_session`,
+          // by iterating ports subscribed to the source session. By the time
+          // the message reaches this port, it IS relevant. Without this, the
+          // fork flow can't navigate to the new id — `sessionIdRef.current`
+          // is the source (the user is still viewing it), but msg.sessionId
+          // is the new fork — they'd never match.
           setPendingTools(new Map());
           setPendingPermissions(new Map());
-          setState(prev => ({
-            ...prev,
-            sessionId: msg.sessionId,
-            sessionTitle: msg.title,
-          }));
+          setState(prev => {
+            // Detect fork / navigate-to-different-session: clear the
+            // previous session's message list so the upcoming
+            // `session_loaded` (with the new session's messages) doesn't
+            // get overridden by the length-aware merge below. Without this,
+            // a fork from a 2-turn source into a 1-bubble new session
+            // would keep the source's messages in state — the merge sees
+            // loadedMessages.length (1) < prev.messages.length (2) and
+            // prefers prev, leaving the user staring at the source's
+            // bubbles inside the new /chat/<newId> route.
+            //
+            // For the brand-new-session path (prev.sessionId === null),
+            // prev.messages is already [], so clearing is a no-op.
+            const isSessionChange = prev.sessionId !== msg.sessionId;
+            return {
+              ...prev,
+              sessionId: msg.sessionId,
+              sessionTitle: msg.title,
+              messages: isSessionChange ? [] : prev.messages,
+              isAgentRunning: false,
+              isCompacting: false,
+            };
+          });
           callbacksRef.current.onSessionCreated?.(msg.sessionId, msg.title);
           break;
 
         case 'session_loaded':
-          if (!isCurrentSession(msg.sessionId)) break;
+          // No `isCurrentSession` guard: BG only posts this to the port
+          // currently subscribed to `msg.sessionId` (subscribe handler
+          // filters, and the `fork_session` handler explicitly targets the
+          // port that requested the fork). For a freshly-forked session,
+          // BG can deliver `session_loaded` immediately after `session_created`
+          // — the React commit on `sessionId` is async, so `sessionIdRef.current`
+          // is still the source when this arrives, and the guard would drop
+          // the payload → empty UI on the new session.
           setPendingTools(new Map());
           setPendingPermissions(new Map());
           if (msg.session) {
+            // Apply pending displayText for slash commands (same logic as
+            // session_state — rewrite the last user message's text content
+            // to the short command form). The entry persists across
+            // broadcasts for the session lifetime.
+            const pending = pendingDisplayTextRef.current.get(msg.sessionId);
+            const loadedMessages = pending
+              ? rewriteLastUserMessage(msg.session!.messages, pending.displayText)
+              : msg.session!.messages;
             setState(prev => ({
               ...prev,
               sessionId: msg.session!.id,
@@ -248,6 +352,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
           break;
 
         case 'session_deleted':
+          pendingDisplayTextRef.current.delete(msg.sessionId);
           callbacksRef.current.onSessionDeleted?.(msg.sessionId);
           break;
 
@@ -398,6 +503,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     attachments: Attachment[] | undefined,
     expectedSessionId: string | null,
     turn?: TurnSettings,
+    displayText?: string,
   ): boolean => {
     if (sessionIdRef.current !== expectedSessionId) return false;
 
@@ -426,8 +532,14 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     }
 
     // Optimistically add user message to local state for immediate UI feedback
+    const userTimestamp = Date.now();
     setState(prev => {
-      const content: any[] = [{ type: 'text' as const, text: text.trim() }];
+      // The backend sends the fully-expanded prompt (e.g. a long template body
+      // for `/writing`), but the user bubble should show what they actually
+      // typed (e.g. just `/writing`). `displayText` is the original user-facing
+      // text; fallback to the expanded text for non-slash-command sends.
+      const bubbleText = (displayText ?? text).trim();
+      const content: any[] = [{ type: 'text' as const, text: bubbleText }];
       // Include image attachments in optimistic message for preview
       if (attachments) {
         for (const att of attachments) {
@@ -436,15 +548,34 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
           }
         }
       }
-      const userMsg = { role: 'user' as const, content, timestamp: Date.now() };
+      const userMsg = { role: 'user' as const, content, timestamp: userTimestamp };
       return {
         ...prev,
+        sessionId,
         messages: [...prev.messages, userMsg as any],
         isAgentRunning: true,
         isCompacting: false,
         lastError: null,
       };
     });
+
+    // Record the displayText override so every subsequent session_state
+    // broadcast (which carries the expanded text) can rewrite the user
+    // message back to the short command form. The entry stays alive for
+    // the session's lifetime — replaced when the user sends a new prompt
+    // for the same session.
+    if (displayText && displayText.trim() !== text.trim()) {
+      pendingDisplayTextRef.current.set(sessionId, {
+        sessionId,
+        timestamp: userTimestamp,
+        displayText: displayText.trim(),
+      });
+    } else if (!displayText || displayText.trim() === text.trim()) {
+      // Non-slash-command send: clear any stale entry from a previous turn
+      // on this session (the previous user message should already have its
+      // own finalized displayText or no override).
+      pendingDisplayTextRef.current.delete(sessionId);
+    }
     return true;
   }, []);
 
@@ -453,12 +584,13 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     attachments?: Attachment[],
     expectedSessionId: string | null = sessionIdRef.current,
     turn?: TurnSettings,
+    displayText?: string,
   ): Promise<PromptDispatchResult> => {
     const trimmed = text.trim();
     if (!trimmed) return { status: 'notDispatched', reason: 'empty' };
 
     const startedSessionId = expectedSessionId;
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText)) return { status: 'dispatched' };
 
     const connected = await waitForConnected(PROMPT_RECONNECT_TIMEOUT_MS);
     if (!connected || sessionIdRef.current !== startedSessionId) {
@@ -468,7 +600,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
       return { status: 'notDispatched', reason: 'unavailable' };
     }
 
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText)) return { status: 'dispatched' };
 
     setState(prev => ({ ...prev, lastError: t('chat.session.notConnected') }));
     return { status: 'notDispatched', reason: 'unavailable' };
@@ -590,7 +722,44 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     postMessage({ type: 'subscribe', sessionId });
   }, [postMessage]);
 
+  // Mirror state.sessionId into sessionIdRef so dispatchPrompt's
+  // "sessionIdRef.current === expectedSessionId" guard passes for sessions
+  // that arrived via session_loaded (e.g. fork — there's no explicit
+  // `subscribe` call, so sessionIdRef would otherwise stay pinned to the
+  // source session and dispatchPrompt would silently no-op → user types
+  // a message, hits Enter, nothing happens).
+  useEffect(() => {
+    sessionIdRef.current = state.sessionId;
+  }, [state.sessionId]);
+
   const unsubscribe = useCallback(() => {
+    // Don't reset messages here — that wipes the optimistic user bubble
+    // when the chat page re-runs the subscribe-effect after `activeSessionId`
+    // flips from null to the new sessionId. The next `subscribe` or the
+    // natural in-flow `session_state` will provide the authoritative state.
+    sessionIdRef.current = null;
+    setState(prev => ({
+      ...prev,
+      isAgentRunning: false,
+      isCompacting: false,
+      sessionId: null,
+      sessionTitle: '',
+      connected: true,
+      lastError: null,
+    }));
+    setPendingTools(new Map());
+    setPendingPermissions(new Map());
+    postMessage({ type: 'unsubscribe' });
+  }, [postMessage]);
+
+  /**
+   * Reset hook state for an explicit "New Chat" navigation by the user.
+   * This is heavier than `unsubscribe` — it also clears messages, because
+   * the user wants a fresh empty chat. The chat page calls this when
+   * navigating to `/chat/new` so the old chat's messages don't linger.
+   * Does NOT post any IPC message — purely a local reset.
+   */
+  const clearSession = useCallback(() => {
     sessionIdRef.current = null;
     setState({
       messages: [],
@@ -604,8 +773,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     });
     setPendingTools(new Map());
     setPendingPermissions(new Map());
-    postMessage({ type: 'unsubscribe' });
-  }, [postMessage]);
+  }, []);
 
   const listSessions = useCallback(() => {
     postMessage({ type: 'session_list' });
@@ -615,6 +783,18 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     postMessage({ type: 'session_delete', sessionId });
   }, [postMessage]);
 
+  /**
+   * Fork the current session at the assistant message at
+   * `atAssistantIndex`. Background creates a new session seeded with ONLY
+   * that assistant bubble (no user bubble, no prior turns) and broadcasts
+   * `session_created`; the requesting sidepanel's `onSessionCreated`
+   * callback handles the navigate-to-new-id + subscribe. Errors propagate
+   * via the `error` ServerMessage just like `prompt` / `retry`.
+   *
+   * Caller is responsible for navigating (we don't navigate here so the
+   * hook stays renderer-agnostic). The source session's agent keeps
+   * running — fork is a pure copy.
+   */
   const resolveTool = useCallback((toolName: string, response: any) => {
     const sessionId = sessionIdRef.current;
     if (sessionId) {
@@ -668,6 +848,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     switchBranch,
     subscribe,
     unsubscribe,
+    clearSession,
     listSessions,
     deleteSession,
     resolveTool,

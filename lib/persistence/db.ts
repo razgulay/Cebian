@@ -40,6 +40,11 @@ export interface SessionRecord extends SessionRecordLike {
   thinkingLevel: string;
   messageCount: number;
   messages: AgentMessage[];
+  /** True iff the user pinned this session in the sidebar. Backed by
+   *  the row itself so listings can read it in the same Dexie query
+   *  that fetches the rest of the metadata. Optional — old rows predate
+   *  the field and read as `undefined` (falsy). */
+  isPinned?: boolean;
   /** v1→v2 树化迁移失败的标记：该行的 mutation 日志缺失，原始数据仍在 `messages`
    *  遗留字段，读路径（session-store.open）会懒重试转换。正常行不携带此字段。 */
   treeMigrationFailed?: true;
@@ -281,6 +286,34 @@ export async function updateSessionSettings(
   if (Object.keys(patch).length === 0) return;
   patch.updatedAt = Date.now();
   await db.sessions.update(id, patch);
+}
+
+/**
+ * Rename a session row. Bumps `updatedAt` so the new title sorts to the
+ * top of the recents list. Trims whitespace; rejects empty / over-long
+ * titles by leaving the row untouched.
+ */
+export async function renameSession(id: string, title: string): Promise<boolean> {
+  const trimmed = title.trim();
+  if (!trimmed || trimmed.length > 200) return false;
+  const updated = await db.sessions.update(id, { title: trimmed, updatedAt: Date.now() });
+  return updated > 0;
+}
+
+/**
+ * Flip the pinned bit on a session row. The flag lives on the row
+ * itself rather than a sidecar set so sorting and listing can read it
+ * in the same Dexie query that already powers the sidebar.
+ */
+export async function setSessionPinned(id: string, pinned: boolean): Promise<boolean> {
+  const updated = await db.sessions.update(id, { isPinned: pinned });
+  return updated > 0;
+}
+
+/** Read the pinned flag for a session (defaults to false). */
+export async function getSessionPinned(id: string): Promise<boolean> {
+  const row = await db.sessions.get(id);
+  return row?.isPinned === true;
 }
 
 // ─── Backup restore (transactional) ───

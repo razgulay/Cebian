@@ -1,12 +1,14 @@
 import type { ComponentProps } from 'react';
 import { ImagePreviewDialog } from './image-preview';
 import { SkillImportPreviewDialog } from './skill-import-preview';
+import { LiveLogDialog } from './live-log';
 
 // Dialog registry — add new dialogs here.
 // Types are auto-derived from component props.
 export const dialogRenderers = {
   'image-preview': ImagePreviewDialog,
   'skill-import-preview': SkillImportPreviewDialog,
+  'live-log': LiveLogDialog,
 } as const;
 
 export type DialogName = keyof typeof dialogRenderers;

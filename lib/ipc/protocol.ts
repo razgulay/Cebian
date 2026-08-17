@@ -25,6 +25,7 @@ import type { RecordedSession } from '@/lib/recorder/types';
 import type { MCPResourceContents } from '@/lib/mcp/client';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import type { BranchEntryInfo } from '@/lib/agent/session-projection';
+import type { DebugLogEntry } from '@/lib/debug/log';
 
 // ─── Port name ───
 
@@ -92,6 +93,12 @@ export type ClientMessage =
   | { type: 'resolve_permission'; sessionId: string; toolCallId: string; decision: 'once' | 'always' | 'denied' }
   | { type: 'session_list' }
   | { type: 'session_delete'; sessionId: string }
+  /** Pin / unpin a session in the sidebar. Bg flips the bit on the row and
+   *  broadcasts `session_changed` so all open sidepanels reconcile. */
+  | { type: 'session_pin'; sessionId: string }
+  /** Rename a session (sidebar "Rename" action). Bg updates the row and
+   *  broadcasts `session_changed`. */
+  | { type: 'session_rename'; sessionId: string; title: string }
   | { type: 'recorder_start' }
   | { type: 'recorder_stop' }
   /** Sent by a sidepanel right after it opens a port, declaring a unique
@@ -112,7 +119,11 @@ export type ClientMessage =
   | { type: 'memory_organize' }
   /** 查当前是否正在整理（供设置页重新挂载时恢复「整理中」指示——切 tab 再切回不丢状态）。
    *  后台仅向发起端口回一条 `memory_organize_state`（不带 outcome，不触发 toast）。 */
-  | { type: 'memory_organize_query' };
+  | { type: 'memory_organize_query' }
+  /** Subscribe to the BG's debug-log broadcast stream. Pair with
+   *  `debug_log_unsubscribe` on unmount. Sidepanel useLiveLog uses this. */
+  | { type: 'debug_log_subscribe' }
+  | { type: 'debug_log_unsubscribe' };
 
 /**
  * `ClientMessage['type']` 的值级清单，供运行期穷尽性检查用（类型在编译后被擦除，
@@ -140,6 +151,10 @@ export const CLIENT_MESSAGE_TYPES = [
   'mcp_read_resource',
   'memory_organize',
   'memory_organize_query',
+  'debug_log_subscribe',
+  'debug_log_unsubscribe',
+  'session_pin',
+  'session_rename',
 ] as const satisfies readonly ClientMessage['type'][];
 
 type _ExpectNever<T extends never> = T;
@@ -174,6 +189,10 @@ export type SessionMeta = Omit<SessionRecord, 'messages'> & {
    * background. Populated by the background's `session_list` handler;
    * undefined when reading SessionRecord directly from Dexie. */
   isRunning?: boolean;
+  /** True iff the user pinned this session in the sidebar. Backed by the
+   *  Dexie row but exposed on the listing projection so the sidebar can
+   *  sort pinned groups to the top without a second round-trip. */
+  isPinned?: boolean;
 };
 
 export type ServerMessage =
@@ -223,6 +242,10 @@ export type ServerMessage =
   | { type: 'session_list_result'; sessions: SessionMeta[] }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string; title: string }
+  /** Broadcast when a session's metadata (pin / rename / title) changes.
+   *  Carries the full updated `SessionMeta` so any open sidepanel can
+   *  reconcile the affected row in its local list without re-fetching. */
+  | { type: 'session_changed'; session: SessionMeta }
   | { type: 'recorder_status'; isRecording: boolean; startedAt: number | null; eventCount: number; truncated?: 'event_limit' | 'time_limit'; initiatorInstanceId: string | null; activeWindowId: number | null }
   | { type: 'recorder_session'; session: RecordedSession }
   /** Sent in reply to `recorder_start` when the BG refuses to start a
@@ -252,4 +275,10 @@ export type ServerMessage =
       running: boolean;
       outcome?: 'ok' | 'empty' | 'conflict' | 'rejected' | 'failed' | 'no-model';
       error?: string;
-    };
+    }
+  /** Live debug-log stream. Sent to any port that issued
+   *  `debug_log_subscribe`. BG throttles / drops its own internal queue
+   *  per subscriber; the consumer caps the in-memory buffer (see
+   *  useLiveLog). */
+  | { type: 'debug_log_entry'; entry: DebugLogEntry }
+  | { type: 'debug_log_cleared' };
