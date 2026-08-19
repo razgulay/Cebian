@@ -1,4 +1,4 @@
-import { Sun, Moon, SunMoon, Settings, SquarePen, History } from 'lucide-react';
+import { Sun, Moon, SunMoon, Settings, SquarePen, PanelLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -53,10 +53,10 @@ export function Header({ title, isNewChat, theme, onToggleTheme, onOpenSettings,
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="ghost" size="icon-xs" onClick={handleOpenSidebar}>
-                <History className="size-4.5" />
+                <PanelLeft className="size-4.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t('common.history')}</TooltipContent>
+            <TooltipContent>{t('common.sidebar')}</TooltipContent>
           </Tooltip>
         </div>
 

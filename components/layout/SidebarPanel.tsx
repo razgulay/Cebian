@@ -387,7 +387,9 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
             {!loading && groups.length > 0 && (
               <Accordion
                 type="multiple"
-                defaultValue={groups.map((group) => group.bucket)}
+                defaultValue={groups
+                  .filter((g) => g.bucket === 'pinned' || g.bucket === 'today')
+                  .map((g) => g.bucket)}
               >
                 {groups.map((group, groupIdx) => (
                   <AccordionItem
