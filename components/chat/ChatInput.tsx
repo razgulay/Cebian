@@ -1355,13 +1355,23 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           } else if (result.reason === 'navigation') {
             toast.warning(t('chat.composer.elementPickNavigated'));
           } else {
-            toast.error(t('chat.composer.regionPickFailed'));
-            if (result.message) console.error('[Region Picker]', result.message);
+            // Show the underlying error inline so the user knows what went
+            // wrong — "captureVisibleTab: No active tab", "scrollTo: null",
+            // "No strips produced for region capture", etc. — instead of a
+            // bare "Failed to capture region". Long messages get truncated
+            // so the toast stays compact; the full text still lands in the
+            // console for debug.
+            toast.error(t('chat.composer.regionPickFailed'), {
+              description: result.message ? result.message.slice(0, 200) : undefined,
+            });
+            console.error('[Region Picker]', result.message ?? result.reason);
           }
           break;
       }
     } catch (err) {
-      toast.error(t('chat.composer.regionPickFailed'));
+      toast.error(t('chat.composer.regionPickFailed'), {
+        description: err instanceof Error ? err.message.slice(0, 200) : undefined,
+      });
       console.error('[Region Picker]', err);
     } finally {
       setIsPickingRegion(false);
@@ -2061,7 +2071,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           onPaste={handlePaste}
           placeholder={t('chat.composer.placeholder')}
           disabled={isDispatching}
-          className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[length:var(--chat-font-size)] font-normal px-1.5 py-0.5 min-h-6 max-h-37.5 leading-tight placeholder:text-muted-foreground/50"
+          spellCheck={false}
+          className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[length:var(--chat-font-size)] font-medium px-1.5 py-0.5 min-h-6 max-h-37.5 leading-tight placeholder:text-muted-foreground/50"
         />
 
         {/* Bottom row: actions */}

@@ -1,4 +1,4 @@
-import { Bot, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, ShieldAlert } from 'lucide-react';
+import { Bot, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, ShieldAlert, Sparkles, Zap } from 'lucide-react';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -6,7 +6,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { CopyButton } from '@/components/common/CopyButton';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { MessageMetaRow, type MessageMetaProps } from '@/components/chat/MessageMetaRow';
-import { extractUserText, extractUserAttachments } from '@/lib/agent/message-helpers';
+import { StreamingCursor } from '@/components/chat/StreamingCursor';
+import { extractUserText, extractUserAttachments, extractInlineDirectivesFromMessage } from '@/lib/agent/message-helpers';
 import { showDialog } from '@/lib/ui/dialog';
 import { RECORDING_MIME } from '@/lib/agent/attachments';
 import { t } from '@/lib/i18n';
@@ -71,6 +72,7 @@ export function UserMessageBubble({
   children,
   onEdit,
   branch,
+  isLast,
 }: {
   msg?: Message;
   children?: ReactNode;
@@ -79,9 +81,19 @@ export function UserMessageBubble({
   onEdit?: (text: string) => void;
   /** 当前消息存在并列版本时，在固定操作区展示分支导航。 */
   branch?: BranchSwitcherProps;
+  /** true when this is the most recent user message in the session. Hooks
+   *  like `useStickToBottom.scrollToUserPrompt` query the DOM for
+   *  `[data-user-message="last"]` to snap the latest prompt to the top of
+   *  the viewport on send — without this marker the snap silently no-ops
+   *  and the bubble ends up scrolled off-screen. */
+  isLast?: boolean;
 }) {
   const text = msg ? extractUserText(msg) : null;
   const attachments = useMemo(() => msg ? extractUserAttachments(msg) : null, [msg]);
+  // 内联指令块（PROMPT / SKILL / COMMAND）抽自 `<user-request>` 内文——
+  // 来自与 `extractUserText` 同一段原始 inner，但跳过 stripDirectives 步骤，
+  // 因为 `text` 已经被剥过指令了；这里要的是「指令头行长什么样」。
+  const inlineDirectives = useMemo(() => msg ? extractInlineDirectivesFromMessage(msg) : [], [msg]);
   const hasAttachments = attachments && (attachments.images.length > 0 || attachments.elements.length > 0 || attachments.files.length > 0 || attachments.recordings.length > 0);
 
   const [editing, setEditing] = useState(false);
@@ -145,8 +157,49 @@ export function UserMessageBubble({
   }
 
   return (
-    <div className="self-end max-w-[95%] group/user">
-      <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[0.9rem] leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
+    <div
+      className="self-end max-w-[95%] group/user"
+      {...(isLast ? { 'data-user-message': 'last' as const } : {})}
+    >
+      {/* Inline directive chip strip: slash commands (COMMAND) and mention
+          chips (PROMPT/SKILL) render above the bubble so the bubble only
+          shows the user's typed words. Pinned directives (carrying
+          `pinned="true"`) are skipped — the pin is already visible in the
+          composer strip at the bottom of every send, so repeating it on
+          every bubble would just clutter chat history. The LLM still
+          receives the full directive body via the agent runtime. */}
+      {inlineDirectives.some((d) => !d.pinned) && (
+        <div className="flex gap-1.5 flex-wrap items-center justify-end mb-1.5 px-1">
+          {inlineDirectives.map((d, i) => {
+            // Skip pinned directives here — see comment above.
+            if (d.pinned) return null;
+            const isCommand = d.kind === 'command';
+            const isPrompt = d.kind === 'prompt';
+            // command: Zap + amber (same tone as recorder chip — "action triggered" feel)
+            // prompt:  FileText + purple (same tone as image attachment chip — "reference" feel)
+            // skill:   Sparkles + blue (reserved — d8cd54a implementation used blue)
+            const className = isCommand
+              ? 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5'
+              : isPrompt
+                ? 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-purple-400 border-purple-400/20 bg-purple-400/5'
+                : 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-blue-400 border-blue-400/20 bg-blue-400/5';
+            const Icon = isCommand ? Zap : isPrompt ? FileText : Sparkles;
+            return (
+              <Badge
+                key={`${d.kind}-${d.name}-${i}`}
+                variant="outline"
+                title={d.name}
+                className={className}
+              >
+                <Icon className="size-2.5 shrink-0" />
+                <span className="truncate max-w-24">{isCommand ? `/${d.name}` : d.name}</span>
+              </Badge>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
         {text ?? children}
       </div>
 
@@ -340,32 +393,59 @@ export function AgentMessage({
           Cebian Agent
         </div>
       )}
-      <div ref={contentRef} className="text-[0.9rem] leading-relaxed space-y-3">
+      <div ref={contentRef} className="text-[length:var(--chat-font-size)] font-medium leading-relaxed space-y-3 animate-message-fade-in">
         {children}
-        {isStreaming && (
-          <span
-            aria-hidden
-            className="inline-block w-1.5 h-4 bg-primary animate-pulse rounded-sm align-text-bottom ml-0.5"
+        {isStreaming && <StreamingCursor />}
+      </div>
+      {/* Meta-row slot: rendered unconditionally so its ~20-24px height is
+          reserved during streaming — when `isStreaming` flips false, the
+          row materialises inside the same slot rather than pushing the
+          bubble down. `invisible` (= visibility:hidden) keeps screen
+          readers and pointer events from interacting with the row while
+          it has no meaningful content (copyText / onRetry / branch are
+          all undefined until the turn closes). Reservation only kicks in
+          when at least one of `meta / copyText / onRetry / branch` is
+          provided; otherwise the wrapper is a 0px empty div in both
+          states.
+
+          The cursor span below is intentionally left as
+          `{isStreaming && <span .../>}` — an earlier attempt reserved
+          the cursor slot with `opacity-0` to eliminate the 16px
+          unmount jump, but post-stream the cursor slot (16px) +
+          `space-y-3` margin (0.75rem) + `mt-2` (0.5rem) on the
+          meta-row left ~36px of empty space between content and the
+          action row. The meta-row reservation (above) stays because
+          its ~20-24px jump is the larger of the two and is invisible
+          during streaming; the cursor's residual ~16px reflow on
+          stream end is ~60% smaller than the original combined
+          ~36-40px jump and no longer leaves any empty space. */}
+      <div className={isStreaming ? 'invisible' : ''}>
+        {(meta || copyText || onRetry || branch) && (
+          <MessageMetaRow
+            {...(meta ?? {})}
+            text={copyText}
+            getSpeakText={() => extractSpeakText(contentRef.current)}
+            onRetry={onRetry}
+            branchSwitcher={branch ? <BranchSwitcher {...branch} /> : undefined}
           />
         )}
       </div>
-      {!isStreaming && (meta || copyText || onRetry || branch) && (
-        <MessageMetaRow
-          {...(meta ?? {})}
-          text={copyText}
-          getSpeakText={() => extractSpeakText(contentRef.current)}
-          onRetry={onRetry}
-          branchSwitcher={branch ? <BranchSwitcher {...branch} /> : undefined}
-        />
-      )}
     </div>
   );
 }
 
-/* ─── Agent Text Block (Markdown) ─── */
+/* ─── Agent Text Block (Markdown) ───
+ *  Renders the assistant's full text through the standard markdown
+ *  pipeline. Streaming appearance is handled at the *bubble* level
+ *  (AgentMessage's content container — see `animate-message-fade-in`):
+ *  the whole bubble fades in once when the message mounts, while
+ *  the LLM-streamed text inside naturally "pours" out token-by-token
+ *  at the model's pace. Per-chunk / per-token animations inside the
+ *  markdown surface were tried but the discrete commit pops felt
+ *  jarring against the smooth reading-speed stream the model already
+ *  provides. data-speech-content keeps extractSpeakText focused on
+ *  the response body (skips thinking / tool cards in sibling blocks). */
 export function AgentTextBlock({ content }: { content: string }) {
-  // data-speech-content：标记「可朗读的回复正文」，供 extractSpeakText 只读此子树，
-  // 从而跳过 thinking / 工具卡片 / 错误提示等同处一个容器下的其它块。
   return (
     <div data-speech-content>
       <MarkdownRenderer content={content} />

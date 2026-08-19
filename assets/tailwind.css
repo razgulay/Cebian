@@ -227,3 +227,31 @@
 .animate-thinking-dot {
   animation: thinking-dot-fade 1.2s ease-in-out infinite;
 }
+
+/* Streaming assistant message fade-in: when an agent bubble mounts, the
+   whole content container fades in softly (opacity 0→1 + translateY 4px→0,
+   400ms ease-out). The LLM-streamed text inside naturally "pours" out
+   token-by-token at the model's own pace — the bubble fade gives the
+   "soft appearance" feel without per-token animation pops that would
+   feel jittery. Matches the reading-speed rhythm of Copilot / ChatGPT /
+   Claude — no per-token CSS, the smoothness comes from the streaming
+   rate itself. */
+@keyframes message-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-message-fade-in {
+  animation: message-fade-in 400ms ease-out both;
+}
+
+/* 流式输出 spinner：两段弧线反向旋转（Copilot 风格）。`animate-spin` 来自
+   `tw-animate-css`，这里补一个反向版本给第二段弧线用——两段同向就只像
+   单层旋转看不出层次，反向才显出双环错位感。速度比默认 `animate-spin`
+   稍慢，避免与 token 流速产生视觉抢拍。 */
+@keyframes spin-reverse {
+  from { transform: rotate(360deg); }
+  to   { transform: rotate(0deg); }
+}
+.animate-spin-reverse {
+  animation: spin-reverse 0.9s linear infinite;
+}

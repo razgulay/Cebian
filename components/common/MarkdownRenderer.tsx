@@ -487,7 +487,7 @@ const components: Components = {
         </div>
       );
     }
-    return <p className="my-1.5 text-[length:var(--chat-font-size)] leading-relaxed font-normal text-foreground" {...props}>{children}</p>;
+    return <p className="my-1.5 text-[length:var(--chat-font-size)] leading-relaxed text-foreground" {...props}>{children}</p>;
   },
 
   // Unordered list
@@ -502,7 +502,7 @@ const components: Components = {
 
   // List item
   li: ({ children, ...props }) => (
-    <li className="text-[length:var(--chat-font-size)] leading-relaxed text-foreground font-normal" {...props}>{children}</li>
+    <li className="text-[length:var(--chat-font-size)] leading-relaxed text-foreground" {...props}>{children}</li>
   ),
 
   // Blockquote
