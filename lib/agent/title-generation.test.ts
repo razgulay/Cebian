@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanTitle, fallbackTitle, TITLE_MAX_LENGTH } from '@/lib/agent/title-generation';
+import { cleanTitle, cleanTitleInputs, fallbackTitle, TITLE_MAX_LENGTH } from '@/lib/agent/title-generation';
 
 /**
  * `cleanTitle` is the boundary between messy LLM output and a usable
@@ -166,5 +166,162 @@ describe('fallbackTitle', () => {
     // doesn't silently break it.
     expect(fallbackTitle('')).toBe('');
     expect(fallbackTitle('   ')).toBe('');
+  });
+});
+
+describe('cleanTitleInputs', () => {
+  // cleanTitleInputs is the strip pipeline run on user+assistant text
+  // BEFORE the title LLM sees them. If it leaks a directive block, the
+  // LLM can echo the literal prefix back into the title (the original
+  // regression). Tests cover each strip stage + their combinations.
+  //
+  // We test this helper directly rather than mocking `complete()` from
+  // pi-ai — it's a pure function, and the integration with the LLM
+  // mock would mostly retest the helper anyway.
+
+  it('passes plain text through unchanged', () => {
+    expect(cleanTitleInputs('hello', 'world')).toEqual({ cleanedUser: 'hello', cleanedAssistant: 'world' });
+  });
+
+  it('strips inline DIRECTIVE blocks from user input (slash command body)', () => {
+    // Slash command injects a long directive body. cleanTitleInputs should
+    // peel it so the LLM sees only the words the user actually typed.
+    const userText = '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]\n\n---\n\ntell me a joke';
+    const result = cleanTitleInputs(userText, 'Sure! Why did the chicken cross the road?');
+    expect(result).not.toBeNull();
+    expect(result!.cleanedUser).toBe('tell me a joke');
+    expect(result!.cleanedUser).not.toContain('[DIRECTIVE');
+    expect(result!.cleanedUser).not.toContain('Always respond');
+  });
+
+  it('strips pinned directive blocks (pinned="true" attr)', () => {
+    const userText = '[DIRECTIVE — ATTACHED PROMPT: "eng" pinned="true"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi';
+    const result = cleanTitleInputs(userText, 'response');
+    expect(result!.cleanedUser).toBe('hi');
+  });
+
+  it('strips multiple stacked directive blocks, preserving only user text', () => {
+    const userText = [
+      '[DIRECTIVE — ATTACHED PROMPT: "a"]\n\nbody A\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED SKILL: "b"]\n\nbody B\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED COMMAND: "c"]\n\nbody C\n\n[END DIRECTIVE]',
+      '---',
+      'final user words',
+    ].join('\n\n');
+    const result = cleanTitleInputs(userText, 'reply');
+    expect(result!.cleanedUser).toBe('final user words');
+  });
+
+  it('returns null when user side is only directive body (no user words)', () => {
+    // /english alone — only directive, no extra user text. Strip yields
+    // empty string → caller should NOT fire LLM (would 400 on empty).
+    const userText = '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]';
+    expect(cleanTitleInputs(userText, 'ok')).toBeNull();
+  });
+
+  it('returns null when assistant side is empty after stripping', () => {
+    expect(cleanTitleInputs('hi', '')).toBeNull();
+    expect(cleanTitleInputs('hi', '<think>reasoning</think>')).toBeNull();
+  });
+
+  it('strips inline directive blocks from assistant input too (defensive)', () => {
+    // Assistant normally shouldn't contain directive blocks, but if a
+    // future bug causes it, we strip rather than leak.
+    const assistantText = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nactual reply';
+    expect(cleanTitleInputs('hi', assistantText)).toEqual({ cleanedUser: 'hi', cleanedAssistant: 'actual reply' });
+  });
+
+  it('strips system tags after directive strip (compound)', () => {
+    // directive strip first, then system-tag strip — the latter operates on
+    // what's left. Verify order is correct.
+    const userText = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\n<context>secret context</context> actual question';
+    const result = cleanTitleInputs(userText, 'reply');
+    expect(result!.cleanedUser).toBe('actual question');
+    expect(result!.cleanedUser).not.toContain('<context>');
+  });
+
+  it('strips think-tag content from assistant before passing on', () => {
+    // MiniMax M3 hay emit `<think>The user is asking...</think>` inline;
+    // strip phải peel phần reasoning để LLM không tóm tắt luôn reasoning.
+    const THINK_OPEN = '<' + 'think' + '>';
+    const THINK_CLOSE = '<' + '/think' + '>';
+    const assistantText = THINK_OPEN + 'The user wants X' + THINK_CLOSE + 'Bitcoin price today';
+    const result = cleanTitleInputs('what is bitcoin', assistantText);
+    expect(result!.cleanedAssistant).toBe('Bitcoin price today');
+    expect(result!.cleanedAssistant).not.toContain('The user wants');
+  });
+
+  it('strips nested XML tags inside directive body (directive-first ordering)', () => {
+    // Locks in the pipeline ordering: directive envelope goes first, so
+    // inner `<context>` / `<reminder-instructions>` that some prompts
+    // intentionally inject don't get partially peeled by `stripSystemTags`.
+    // Build tag strings via concatenation so harness/toolchain doesn't
+    // interpret angle-brackets as HTML.
+    const CTX_OPEN = '<' + 'context' + '>';
+    const CTX_CLOSE = '<' + '/context' + '>';
+    const userText =
+      `[DIRECTIVE — ATTACHED COMMAND: "x"]\n\n` +
+      `before ${CTX_OPEN}secret${CTX_CLOSE} after\n\n` +
+      `[END DIRECTIVE]\n\n---\n\nreal question`;
+    const result = cleanTitleInputs(userText, 'reply');
+    expect(result!.cleanedUser).toBe('real question');
+    expect(result!.cleanedUser).not.toContain('secret');
+  });
+
+  it('is idempotent: cleaning already-cleaned input produces the same result', () => {
+    const userText = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nreal q';
+    const asstText = 'Bitcoin price today';
+    const once = cleanTitleInputs(userText, asstText);
+    expect(once).not.toBeNull();
+    const twice = cleanTitleInputs(once!.cleanedUser, once!.cleanedAssistant);
+    expect(twice).toEqual(once);
+  });
+
+  it('strips multiple think-tag pairs from assistant (stripThinkTags handles N pairs)', () => {
+    const THINK_OPEN = '<' + 'think' + '>';
+    const THINK_CLOSE = '<' + '/think' + '>';
+    const assistantText =
+      THINK_OPEN + 'first reasoning' + THINK_CLOSE + ' middle ' +
+      THINK_OPEN + 'second reasoning' + THINK_CLOSE + 'final answer';
+    const result = cleanTitleInputs('q', assistantText);
+    expect(result!.cleanedAssistant).toBe('middle final answer');
+    expect(result!.cleanedAssistant).not.toContain('reasoning');
+  });
+
+  it('delegates pinned-attr behavior to stripDirectives (only pinned="true" triggers strip)', () => {
+    // `INLINE_DIRECTIVE_BLOCK_RE` requires the literal string
+    // `pinned="true"` to recognize the optional attribute group — any
+    // other value (`pinned="false"`, `pinned="yes"`, missing attr, …)
+    // makes the regex not match the open line and the block is left
+    // intact. That's the behavior of the underlying helper; this
+    // surface just delegates. Lock it in here so a future `stripDirectives`
+    // change is caught by the unit tests for that helper, not here.
+    const pinnedTrue =
+      '[DIRECTIVE — ATTACHED PROMPT: "p" pinned="true"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nstripped';
+    expect(cleanTitleInputs(pinnedTrue, 'reply')!.cleanedUser).toBe('stripped');
+
+    const pinnedFalse =
+      '[DIRECTIVE — ATTACHED PROMPT: "p" pinned="false"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nleft alone';
+    // `pinned="false"` makes the regex skip (only `pinned="true"`
+    // matches), so the directive body passes through. `stripDirectives`
+    // does still collapse the `---` separator unconditionally (it's not
+    // gated on having found a directive), so the post-call output drops
+    // only that separator — the OPEN header + body + close + leftover
+    // text flow through.
+    const r = cleanTitleInputs(pinnedFalse, 'reply');
+    expect(r).not.toBeNull();
+    expect(r!.cleanedUser).not.toContain('---');
+    expect(r!.cleanedUser).toContain('left alone');
+    expect(r!.cleanedUser).toContain('[DIRECTIVE');
+  });
+
+  it('returns null for fully empty input (post-guard contract)', () => {
+    // The early-return guard in `generateSessionTitle` (line 118) catches
+    // this before reaching the LLM, but `cleanTitleInputs` is exported and
+    // future callers may bypass the guard. Document the contract here.
+    expect(cleanTitleInputs('', '')).toBeNull();
+    expect(cleanTitleInputs('   ', '   ')).toBeNull();
+    expect(cleanTitleInputs('hi', '   ')).toBeNull();
+    expect(cleanTitleInputs('   ', 'hi')).toBeNull();
   });
 });

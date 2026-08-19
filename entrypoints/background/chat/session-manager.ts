@@ -61,7 +61,7 @@ import {
   type ToolGate,
 } from '@/lib/agent/tool-permissions';
 import type { BroadcastMessage, TurnSettings } from '@/lib/ipc/protocol';
-import { replaceUserText, truncateForRetry, sanitizeAgentMessages } from '@/lib/agent/message-helpers';
+import { replaceUserText, truncateForRetry, sanitizeAgentMessages, extractUserText, getAssistantText } from '@/lib/agent/message-helpers';
 import {
   providerCredentials,
   customProviders as customProvidersStorage,
@@ -77,7 +77,10 @@ import { getMCPManager } from '@/lib/mcp/manager';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { t } from '@/lib/i18n';
 import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
+import { broadcastAll } from '../ipc/port-registry';
 import { broadcastToViewers } from './viewers';
+import { generateSessionTitle } from '@/lib/agent/title-generation';
+import { renameSession } from '@/lib/persistence/db';
 
 // ─── Types ───
 
@@ -169,6 +172,26 @@ interface AgentSession {
    * `flushTree` 等它落定即等价于旧的「flush 落库」。
    */
   treeChain: Promise<void>;
+  /**
+   * Heuristic 标题（`text.slice(0, 50)`）只在以下两种情况出现：
+   *   1. 会话由本 SW lifetime 内 `prompt()` 的 `sessionStore.create()` 新建，且
+   *      我们的 create 赢了 duplicate-id race；
+   *   2. 从备份恢复 / pre-feature 已有会话被冷加载。
+   *
+   * 该字段在 createAgent 处缺省 undefined（cold load 走这条），prompt() 走赢的
+   * create 路径后由 `brandNewInProgress` 注入。等价于旧 `isBrandNew: true` 的闸门
+   * —— 但语义更强：自动标题生成既要知道「该不该触发」（值存在 = 该触发），也
+   * 要知道「原始 heuristic 标题是什么」（值就是它）以做 rename race guard。
+   *
+   * Pre-feature / 冷加载会话该字段 undefined → agent_end 闸门直接跳过，不重命名。
+   */
+  heuristicTitle?: string;
+  /**
+   * One-shot 守卫：会话产生过第一条 assistant 消息后置 true，防止后续轮 / 重试
+   * 重复触发自动标题生成（成本小但没必要重复花钱）。纯内存，SW 重启即丢失 —
+   * 由「assistant 数 ≥ 1」二次兜底避免重启后重复触发。详见 `maybeGenerateTitle`。
+   */
+  titleGenerated: boolean;
 }
 
 // ─── Session Manager ───
@@ -177,6 +200,20 @@ class SessionManager {
   private sessions = new Map<string, AgentSession>();
   /** Guards against concurrent getOrCreateAgent calls for the same session. */
   private creating = new Map<string, Promise<AgentSession>>();
+  /**
+   * Map of sessionId → 本 SW lifetime 内由 `prompt()` 写下的 heuristic 标题
+   * （= `text.slice(0, 50)`）。Drained into `AgentSession.heuristicTitle` after
+   * `getOrCreateAgent` returns。两条用途：
+   *   1. **闸门**：heuristicTitle 缺省 = 冷加载会话（pre-feature / 备份恢复），
+   *      不注入即不触发自动标题。
+   *   2. **race guard**：heuristicTitle 也是自动标题 rename 前的「期望标题」——
+   *      调 LLM 期间若用户手动改名，DB 标题就不再等于该字段 → 尊重用户的选择。
+   *
+   * Idempotent under concurrent prompt()：duplicate-id 失 race 时也写入我们的
+   * sessionTitle（与赢家可能不同）；后续 agent_end 处的 current.title 会与之失配
+   * → 跳过覆盖，相当于「输了的并发 create 也被静默吞掉」。
+   */
+  private brandNewInProgress = new Map<string, string>();
   /** True iff we're currently holding a SW keep-alive token. Tracked so
    *  acquire/release stay balanced even across error paths. */
   private keepAliveHeld = false;
@@ -634,6 +671,11 @@ class SessionManager {
       committedCount: messages.length,
       entryIds: loaded?.entryIds ? [...loaded.entryIds] : [],
       treeChain: Promise.resolve(),
+      // 冷加载（pre-feature / 备份恢复 / SW 重启后的会话）：不注入 heuristicTitle
+      // → agent_end 闸门跳过自动标题。prompt() 赢的 create 路径会后注入。
+      // titleGenerated 内存守卫：agent_end 看到第一条 assistant 消息时翻转；
+      // SW 重启后变回 false，但 `assistantCount === 1` 仍能挡住重发。
+      titleGenerated: false,
     };
     this.wireSubscriptions(agentSession);
     this.sessions.set(sessionId, agentSession);
@@ -746,8 +788,112 @@ class SessionManager {
           messages: this.annotate(agentSession, messages),
           ...(branchInfo !== undefined ? { branchInfo } : {}),
         });
+
+        // ─── One-shot auto-title（仅首条 assistant 消息）───
+        // Heuristic 标题来自 prompt() 的 `text.slice(0, 50)`，slash 命令展开后
+        // 那一行经常是 `[DIRECTIVE — ...]` 字面块（侧边栏看上去像乱码）。在第一
+        // 条 assistant 落地后异步调 LLM，按 GPT/Claude 风格生成 ≤40 字符的
+        // topic-name 标题；失败 / 取消 / 用户中途改名则保留原标题不动。
+        //
+        // `heuristicTitle` 闸门：本 SW lifetime 内新建的会话才会重命名（被 prompt()
+        // 注入）；预存在会话（含 pre-feature / 备份恢复 / SW 重启后的会话）一律
+        // 保留原标题——这是用户「不要 retroactive retitling」决定的强制语义。
+        if (agentSession.heuristicTitle !== undefined && !agentSession.titleGenerated) {
+          const assistantCount = messages.filter((m) => m.role === 'assistant').length;
+          if (assistantCount === 1) {
+            agentSession.titleGenerated = true;
+            void this.maybeGenerateTitle(agentSession, messages);
+          }
+        }
         break;
       }
+    }
+  }
+
+  /**
+   * One-shot 自动标题生成：agent_end 看到首条 assistant 消息时触发，异步
+   * fire-and-forget 调 LLM 拿 topic-name 标题，成功后写回并广播。
+   *
+   * 设计要点：
+   * - **触发唯一性**：`titleGenerated` 在 await 之前置位（agent_end 处），故
+   *   同一会话的并发 agent_end 不会再触发第二次。SW 重启会丢失该标志，但
+   *   `agent_end` 还有 `assistantCount === 1` 兜底（>=2 时跳过）。
+   * - **失败静默**：LLM 失败 / abort / 用户中途改名 → 不抛、不改 DB、保留
+   *   heuristic 标题。`generateSessionTitle` 本身已经 `null` on error。
+   * - **race vs 手动改名**：`agentSession.heuristicTitle` 是 prompt() 当时写入
+   *   的原标题（DB 真值），LLM 回来后与 `current.title` 重新比对——不等就
+   *   说明用户在 stream 中途改名过，跳过覆盖。这覆盖了 capture-window 之前的
+   *   rename（不仅仅是 LLM 调用中的 rename）。
+   * - **keep-alive**：agent_end 已把 phase 置 idle（updateKeepAlive 已释放一次），
+   *   故必须显式 `acquireKeepAlive` 才能保证 SW 不在 LLM 调用中途被挂掉。
+   *   复用 keepalive.ts 已有的 ref-counted 机制（与 `maybeCompact` 的 compacting
+   *   阶段共用同一计数器）。
+   * - **不重命名 pre-feature 会话**：仅 `heuristicTitle !== undefined` 的会话
+   *   会进 agent_end 闸门（由 prompt() 注入），冷加载的会话 heuristicTitle 缺省
+   *   → 跳过。
+   */
+  private async maybeGenerateTitle(
+    agentSession: AgentSession,
+    messages: AgentMessage[],
+  ): Promise<void> {
+    const { sessionId, heuristicTitle } = agentSession;
+    // 防御性：agent_end 闸门已保证这里一定有，但显式守卫让本函数在不依赖
+    // 上游判定的情况下依然安全（未来被复用时不会 silently 重命名会话）。
+    if (heuristicTitle === undefined) return;
+
+    const userMsg = messages.find((m) => m.role === 'user');
+    const asstMsg = messages.find((m) => m.role === 'assistant');
+    if (!userMsg || !asstMsg) return;
+
+    // extractUserText 已经剥掉 DIRECTIVE 块；assistant 文本由 generateSessionTitle
+    // 内部 strip system/think tags。空文本 / 纯 directive → 早返，避免浪费 LLM。
+    const userText = extractUserText(userMsg as Message);
+    const assistantText = getAssistantText(asstMsg as AssistantMessage);
+    if (!userText.trim() || !assistantText.trim()) return;
+
+    acquireKeepAlive();
+    try {
+      // 用会话**已 resolve** 的主模型（agent.state.model = pi-ai 的 Model<Api>）。
+      // 该会话选了什么模型就拿什么模型生成标题，与 prompt/retry 完全一致；不引
+      // 入新设置项（用户选择「用主模型」）。
+      const model = agentSession.agent.state.model;
+      const apiKey = await resolveProviderApiKey(model.provider);
+
+      const result = await generateSessionTitle({
+        userMessage: userText,
+        assistantMessage: assistantText,
+        model,
+        apiKey,
+        sessionId,
+      });
+      if (!result) return;
+
+      // Race guard: 用户可能在 prompt() → agent_end 这段时间里（甚至 agent_end
+      // 异步触发 LLM 后）已经手动改过名。heuristicTitle 是 prompt() 当时写入的
+      // 原始 DB 标题；现在 DB 标题不等就说明用户动过 → 尊重用户选择不覆盖。
+      const current = await sessionStore.load(sessionId);
+      if (!current || current.title !== heuristicTitle) return;
+
+      const ok = await renameSession(sessionId, result);
+      if (!ok) return;
+
+      // broadcastAll（不走 broadcastToViewers）：侧边栏可能在任意窗口显示，未必
+      // 是当前 viewing 那个会话的窗口——与 client-handlers.ts:297 session_pin
+      // / :315 session_rename 共用同一投递面。
+      const { messages: _drop, ...meta } = current;
+      broadcastAll({
+        type: 'session_changed',
+        session: {
+          ...meta,
+          title: result,
+          isRunning: this.getSessionState(sessionId)?.isRunning === true,
+        },
+      });
+    } catch {
+      // 静默：LLM 异常 / DB 异常 / 广播异常都吞掉，原 heuristic 标题保留。
+      // 与 generateSessionTitle 本身的 null-on-error 语义一致。
+    } finally {
+      releaseKeepAlive();
     }
   }
 
@@ -798,6 +944,10 @@ class SessionManager {
             userInstructions: instructions || '',
             thinkingLevel: thinkingLvl || 'medium',
           });
+          // 记下「本 SW lifetime 内新建 + 当时写入的 heuristic 标题」——
+          // agent_end 据此决定要不要触发自动标题生成，并用作 rename race
+          // guard 的基准。pre-feature / 冷加载的会话走不到这里。
+          this.brandNewInProgress.set(sessionId, sessionTitle);
           broadcastToViewers(sessionId, {
             type: 'session_created',
             sessionId,
@@ -806,13 +956,24 @@ class SessionManager {
         } catch (err) {
           // Race: another concurrent prompt() for the same brand-new id won
           // the create. Re-throw anything that isn't a duplicate-id violation;
-          // the winning call has already broadcast 'session_created'.
+          // the winning call has already broadcast 'session_created'. Still
+          // record our heuristic so the race-guard catches a mismatch against
+          // the winner's title (and silently no-ops).
           if (!(err instanceof SessionError && err.code === 'already_exists')) throw err;
+          this.brandNewInProgress.set(sessionId, sessionTitle);
         }
       }
     }
 
     const agentSession = await this.getOrCreateAgent(sessionId);
+
+    // 兑现 brand-new 标记：把 prompt() 当时写入的 heuristic 标题注入 AgentSession。
+    // `Map.get` 仅命中一次（`delete` 紧接其后），并发 prompt() 不会重复设。
+    const heuristicTitle = this.brandNewInProgress.get(sessionId);
+    if (heuristicTitle !== undefined) {
+      agentSession.heuristicTitle = heuristicTitle;
+      this.brandNewInProgress.delete(sessionId);
+    }
 
     if (agentSession.phase === 'preparing' || agentSession.phase === 'compacting') {
       // A retry's preparation OR a compaction is already in flight for this

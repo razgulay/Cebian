@@ -1,3 +1,8 @@
+// [DIAG:edit-btn] 渲染时 user-msg 入口诊断：与 hook/BG 的 [DIAG:edit-btn] 配对，
+// 确认 render 阶段看到的是 broadcast（带 entryId）还是 prev（被乐观消息顶掉）。
+// Bug 修完后删除并改 false。
+const __DIAG_EDIT_BTN__ = true;
+
 import { useEffect, useState, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowDown } from 'lucide-react';
@@ -360,8 +365,10 @@ export function ChatPage({
   const showWaitingPlaceholder = effectiveRunning && !isCompacting && lastMsg && lastMsg.role === 'user';
 
   // History of user-typed prompts in this session, oldest first; consumed by
-  // ChatInput's ↑/↓ navigation. Strips the <user-request> wrapper added by
-  // composeUserMessage so what comes back is exactly what the user typed.
+  // ChatInput's ↑/↓ navigation. `extractUserText` strips both the
+  // `<user-request>` wrapper (added by composeUserMessage) and any inline
+  // directive blocks (mention chips / slash commands) so what comes back is
+  // exactly what the user typed — never the expanded directive body.
   const userHistory = useMemo(
     () => messages
       .filter((m): m is UserMessage => m.role === 'user')
@@ -420,6 +427,7 @@ export function ChatPage({
                 <UserMessageBubble
                   key={`user-${entryId ?? idx}`}
                   msg={msg}
+                  isLast={idx === lastUserMsgIndex}
                   onEdit={canEdit && entryId
                     ? (text) => editMessage(entryId, text, {
                         model: turnModel ?? undefined,

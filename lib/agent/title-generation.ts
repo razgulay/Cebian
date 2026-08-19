@@ -8,6 +8,7 @@ import { complete } from '@earendil-works/pi-ai/compat';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { stripThinkTags } from '@/lib/agent/think-tags';
 import { stripSystemTags } from '@/lib/agent/strip-system-tags';
+import { stripDirectives } from '@/lib/agent/message-helpers';
 
 /**
  * Hard cap cho title. Đủ dài để mô tả nhưng đủ ngắn để hiển thị trong
@@ -37,6 +38,62 @@ const SYSTEM_PROMPT =
   'Match the language of the user\'s message. Keep it under ' + TITLE_MAX_LENGTH + ' characters.';
 
 /**
+ * Strip directive blocks (`[DIRECTIVE — ATTACHED COMMAND: "english"]` etc.),
+ * system tags (`<reminder-instructions>`, `<context>`, ...), and think-tag
+ * content from user + assistant messages before they get sent to the title
+ * LLM. The directive strip is the first step: these are slash-command /
+ * mention-chip payloads injected by `ChatInput` for the main chat agent
+ * (long bodies like "Always respond in English.") — passing them to the
+ * title LLM is purely noise and historically the LLM has echoed the
+ * directive prefix back as a literal title (regression `DIRECTIVE — ATTACHED
+ * COMMAND: "..."`), which `cleanTitle` couldn't rescue because it's plain
+ * text not a meta-commentary pattern.
+ *
+ * Pipeline order is incidental for normal inputs (`stripDirectives` always
+ * removes the full `[DIRECTIVE ...][END DIRECTIVE]` envelope regardless of
+ * what its inner tags contain), but peeling directives first keeps
+ * `stripSystemTags` from accidentally clipping into a directive body that
+ * happens to mention XML-like syntax — defense in depth.
+ *
+ * Defense-in-depth even though the main wiring (`session-manager.maybeGenerateTitle`)
+ * already passes `extractUserText()` output (which strips directives) — any
+ * other caller (future IPC handlers, manual `complete()` invocations from
+ * dev-tools) stays safe.
+ *
+ * Returns `null` when either side ends up empty after stripping — the LLM
+ * call shouldn't be fired with empty content (some providers 400). Caller
+ * falls back to heuristic title in that case.
+ */
+export function cleanTitleInputs(
+  userMessage: string,
+  assistantMessage: string,
+): { cleanedUser: string; cleanedAssistant: string } | null {
+  // Strip directive blocks first as defense in depth — see comment above.
+  const directiveStrippedUser = stripDirectives(userMessage);
+  const directiveStrippedAssistant = stripDirectives(assistantMessage);
+
+  // Strip system-only XML tags (<reminder-instructions>, <context>, ...)
+  // từ CẢ user + assistant trước khi đưa cho title LLM. Nếu không, LLM
+  // sẽ thấy literal tag trong input và dễ echo lại nó vào title output
+  // (regression user report: "<reminder-instructions>" leak thành tên
+  // session). Strip xong mới tính trim/empty check — tag-only content
+  // coi như rỗng để caller fallback heuristic.
+  const cleanedUser = stripSystemTags(directiveStrippedUser);
+  const strippedAssistant = stripSystemTags(directiveStrippedAssistant);
+
+  // Strip think-tag content ra khỏi assistant message TRƯỚC khi đưa
+  // cho LLM. MiniMax M3 hay emit `<think>The user is asking...</think>`
+  // inline; nếu pass nguyên xi cho title generator, LLM sẽ bị "lừa"
+  // tóm tắt luôn reasoning thay vì topic. `stripThinkTags` đã có sẵn
+  // orphan-close handling, idempotent trên plain prose.
+  const thinkStripped = stripThinkTags(strippedAssistant);
+  const cleanedAssistant = thinkStripped.text;
+
+  if (!cleanedUser || !cleanedAssistant) return null;
+  return { cleanedUser, cleanedAssistant };
+}
+
+/**
  * Sinh title từ user + assistant message đầu tiên.
  *
  * Returns:
@@ -64,33 +121,9 @@ export async function generateSessionTitle(params: {
   // empty content (một số provider sẽ 400 trên empty user message).
   if (!userMessage.trim() || !assistantMessage.trim()) return null;
 
-  // Strip system-only XML tags (<reminder-instructions>, <context>, ...)
-  // từ CẢ user + assistant trước khi đưa cho title LLM. Nếu không, LLM
-  // sẽ thấy literal tag trong input và dễ echo lại nó vào title output
-  // (regression user report: "<reminder-instructions>" leak thành tên
-  // session). Strip xong mới tính trim/empty check — tag-only content
-  // coi như rỗng để caller fallback heuristic.
-  const cleanedUser = stripSystemTags(userMessage);
-  const strippedAssistant = stripSystemTags(assistantMessage);
-
-  // Strip think-tag content ra khỏi assistant message TRƯỚC khi đưa
-  // cho LLM. MiniMax M3 hay emit `<think>The user is asking...</think>`
-  // inline; nếu pass nguyên xi cho title generator, LLM sẽ bị "lừa"
-  // tóm tắt luôn reasoning thay vì topic. `stripThinkTags` đã có sẵn
-  // orphan-close handling, idempotent trên plain prose.
-  const thinkStripped = stripThinkTags(strippedAssistant);
-  const cleanedAssistant = thinkStripped.text;
-
-  if (!cleanedUser || !cleanedAssistant) {
-    // Either side was empty after stripping system tags / think tags.
-    // Returning null lets the caller fall back to its own heuristic
-    // (e.g. slice user message). Avoids firing the LLM with empty
-    // content (some providers 400 on empty user message) AND avoids
-    // returning a literal "..." — which is what callers fall back to
-    // when the function returns null.
-    return null;
-  }
-
+  const cleaned = cleanTitleInputs(userMessage, assistantMessage);
+  if (!cleaned) return null;
+  const { cleanedUser, cleanedAssistant } = cleaned;
   const userPrompt =
     `User: ${cleanedUser.trim()}\n` +
     `Assistant: ${cleanedAssistant}\n` +
@@ -162,8 +195,8 @@ export async function generateSessionTitle(params: {
     .map((b) => b.text)
     .join('');
 
-  const cleaned = cleanTitle(text);
-  if (!cleaned) {
+  const cleanedTitle = cleanTitle(text);
+  if (!cleanedTitle) {
     debugLog.warn('llm', 'autoTitle:done', withSession({
       ok: false,
       reason: 'empty-after-clean',
@@ -175,10 +208,10 @@ export async function generateSessionTitle(params: {
 
   debugLog.info('llm', 'autoTitle:done', withSession({
     ok: true,
-    titleLen: cleaned.length,
+    titleLen: cleanedTitle.length,
     durationMs: Date.now() - startedAt,
   }, sessionId ?? ''));
-  return cleaned;
+  return cleanedTitle;
 }
 
 /**

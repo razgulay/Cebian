@@ -1,6 +1,10 @@
 // Hook: connects sidepanel to the background session manager via chrome.runtime Port.
 // Replaces useAgentLifecycle + useSessionManager.
 
+// [DIAG:edit-btn] 诊断「Edit 按钮在 Exa tool 第二次以后消失」的临时开关。
+// Bug 修完后删除所有 [DIAG:edit-btn] 代码块，并将此 flag 改为 false。
+const __DIAG_EDIT_BTN__ = true;
+
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   CLIENT_PORT,

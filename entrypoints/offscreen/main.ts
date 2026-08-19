@@ -20,6 +20,12 @@ import {
 export type OffscreenRequest =
   | { type: 'html-to-markdown'; html: string; readability?: { url: string } }
   | { type: 'crop-image'; imageData: string; crop: { x: number; y: number; width: number; height: number } }
+  /** 把若干裁好的 viewport 高度的 JPEG 纵向拼成一张高图。crop-region
+   *  picker 在用：用户拖出来的矩形可能跨多个 viewport，picker 把页面
+   *  分块滚、每块 `chrome.tabs.captureVisibleTab` 拍一下，再让 offscreen
+   *  把这些条拼成最终的矩形。第一块是最上面那块，后续按顺序紧接其下，
+   *  不留缝、不重叠。 */
+  | { type: 'composite-vertical'; chunks: { base64: string }[]; mimeType?: 'image/jpeg' | 'image/png' }
   | { type: 'pdf-info'; url: string }
   | { type: 'pdf-text'; url: string; pageRange?: string; maxChars?: number }
   | {
@@ -149,6 +155,53 @@ async function cropImage(
   return dataUrl.replace(/^data:image\/jpeg;base64,/, '');
 }
 
+/** 把若干 viewport 高度的图片块纵向拼成一张高图。所有块宽度必须一致
+ *  （picker 抓取过程中 viewport 宽度不变），且 MIME 类型相同。 */
+async function compositeVertical(
+  chunks: { base64: string }[],
+  mimeType: 'image/jpeg' | 'image/png' = 'image/jpeg',
+): Promise<string> {
+  if (chunks.length === 0) {
+    throw new Error('No chunks to composite');
+  }
+
+  const images = await Promise.all(
+    chunks.map(
+      (chunk) =>
+        new Promise<HTMLImageElement>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('Failed to load chunk image'));
+          img.src = `data:${mimeType};base64,${chunk.base64}`;
+        }),
+    ),
+  );
+
+  const width = images[0].naturalWidth;
+  // 防御性写法：理论上每块宽度都该一样（picker 抓取时 viewport 宽度不变）。
+  // 如果有块更窄，用白色填充右侧，保证拼图仍然对齐。
+  const height = images.reduce((sum, img) => sum + img.naturalHeight, 0);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d')!;
+  let y = 0;
+  for (const img of images) {
+    if (img.naturalWidth < width) {
+      // Pad narrower chunk to match the widest one
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, y, width, img.naturalHeight);
+    }
+    ctx.drawImage(img, 0, y);
+    y += img.naturalHeight;
+  }
+
+  const outMime = mimeType;
+  const dataUrl = canvas.toDataURL(outMime, 0.9);
+  return dataUrl.replace(/^data:.+;base64,/, '');
+}
+
 // ─── Message listener ───
 
 chrome.runtime.onMessage.addListener(
@@ -180,6 +233,13 @@ chrome.runtime.onMessage.addListener(
     const req = message as OffscreenRequest;
     if (req.type === 'crop-image') {
       cropImage(req.imageData, req.crop)
+        .then(result => sendResponse({ result } satisfies OffscreenResponse))
+        .catch(err => sendResponse({ error: (err as Error).message } satisfies OffscreenResponse));
+      return true;
+    }
+
+    if (req.type === 'composite-vertical') {
+      compositeVertical(req.chunks, req.mimeType)
         .then(result => sendResponse({ result } satisfies OffscreenResponse))
         .catch(err => sendResponse({ error: (err as Error).message } satisfies OffscreenResponse));
       return true;
