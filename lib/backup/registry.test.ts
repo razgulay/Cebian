@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import * as storageModule from '@/lib/persistence/storage';
+import * as ragStorageModule from '@/lib/rag/settings';
 import type { MCPServerConfig, CustomProviderConfig } from '@/lib/persistence/storage';
+import type { RagSettings } from '@/lib/rag/types';
+import { DEFAULT_RAG_SETTINGS } from '@/lib/rag/types';
 import {
   BACKUP_REGISTRY,
   registeredStorageKeys,
@@ -8,6 +11,9 @@ import {
   restoreMcpSecrets,
   splitCustomProviderHeaders,
   restoreCustomProviderHeaders,
+  splitRagSettings,
+  restoreRagSettingsSecrets,
+  type RagSecret,
 } from '@/lib/backup/registry';
 
 /** 判断一个导出是否是 WXT storage item（有 `key` 字符串与 `getValue` 方法）。 */
@@ -21,10 +27,11 @@ function isStorageItem(v: unknown): v is { key: string } {
 }
 
 describe('BACKUP_REGISTRY 覆盖性', () => {
-  it('lib/storage.ts 导出的每个 storage item 都已在注册表登记', () => {
+  it('导出的每个 storage item 都已在注册表登记', () => {
     const registered = registeredStorageKeys();
     const missing: string[] = [];
-    for (const value of Object.values(storageModule)) {
+    const allExports = [...Object.values(storageModule), ...Object.values(ragStorageModule)];
+    for (const value of allExports) {
       if (isStorageItem(value) && !registered.has(value.key)) {
         missing.push(value.key);
       }
@@ -254,3 +261,91 @@ describe('customProviders 密钥拆分 / 恢复', () => {
     expect(restored[0].id).toBe('p-plain');
   });
 });
+
+describe('ragSettings 密钥拆分 / 恢复', () => {
+  const fullSettings: RagSettings = {
+    ...DEFAULT_RAG_SETTINGS,
+    neonConnectionString: 'postgres://user:pass@host/db',
+    embedderApiKey: 'sk-123',
+    rerankApiKey: 'sk-456',
+  };
+
+  it('splitSecret 提取 credentials，safe 清空对应字段', () => {
+    const { safe, secret } = splitRagSettings(fullSettings);
+    expect(secret).toEqual({
+      neonConnectionString: 'postgres://user:pass@host/db',
+      embedderApiKey: 'sk-123',
+      rerankApiKey: 'sk-456',
+    });
+    expect(safe.neonConnectionString).toBe('');
+    expect(safe.embedderApiKey).toBe('');
+    expect(safe.rerankApiKey).toBe('');
+  });
+
+  it('safe 中不残留任何明文密钥', () => {
+    const { safe } = splitRagSettings(fullSettings);
+    const serialized = JSON.stringify(safe);
+    expect(serialized).not.toContain('postgres://user:pass@host/db');
+    expect(serialized).not.toContain('sk-123');
+    expect(serialized).not.toContain('sk-456');
+  });
+
+  it('split 不修改入参、返回的对象不与入参共享引用', () => {
+    const snapshot = JSON.stringify(fullSettings);
+    const { safe } = splitRagSettings(fullSettings);
+    // 入参未被修改
+    expect(JSON.stringify(fullSettings)).toBe(snapshot);
+    expect(fullSettings.neonConnectionString).toBe('postgres://user:pass@host/db');
+    expect(fullSettings.embedderApiKey).toBe('sk-123');
+    // 返回的 safe 是新对象
+    expect(safe).not.toBe(fullSettings);
+  });
+
+  it('split → restoreSecret(replace) 往返还原出原始设置', () => {
+    // 模拟「先恢复 settings safe、再恢复密钥」的两步流程
+    const { safe, secret } = splitRagSettings(fullSettings);
+    const restored = restoreRagSettingsSecrets(safe, secret, 'replace');
+    expect(restored).toEqual(fullSettings);
+  });
+
+  it('restoreSecret 在 replace 模式下覆盖所有提供的密钥字段，未提供的保留本地', () => {
+    const { secret } = splitRagSettings(fullSettings);
+    // 本地是另一套完整的
+    const local: RagSettings = {
+      ...DEFAULT_RAG_SETTINGS,
+      neonConnectionString: 'postgres://old',
+      embedderApiKey: 'old-1',
+      rerankApiKey: 'old-2',
+    };
+    // 全 secret：本地三项全部被覆盖
+    const restored = restoreRagSettingsSecrets(local, secret, 'replace');
+    expect(restored.neonConnectionString).toBe('postgres://user:pass@host/db');
+    expect(restored.embedderApiKey).toBe('sk-123');
+    expect(restored.rerankApiKey).toBe('sk-456');
+
+    // 部分 secret：未包含的字段保留本地——这同时验证
+    // 「secret.X === undefined（缺字段）不覆盖 local」。
+    const partialSecret: RagSecret = { neonConnectionString: 'new-conn' };
+    const restoredPartial = restoreRagSettingsSecrets(local, partialSecret, 'replace');
+    expect(restoredPartial.neonConnectionString).toBe('new-conn');
+    expect(restoredPartial.embedderApiKey).toBe('old-1');
+    expect(restoredPartial.rerankApiKey).toBe('old-2');
+  });
+
+  it('restoreSecret 在 merge 模式下仅补缺（本地有值的密钥保留）', () => {
+    const { secret } = splitRagSettings(fullSettings);
+    const local: RagSettings = {
+      ...DEFAULT_RAG_SETTINGS,
+      neonConnectionString: 'postgres://old',
+      embedderApiKey: '',
+      rerankApiKey: '',
+    };
+    const restored = restoreRagSettingsSecrets(local, secret, 'merge');
+    // 本地非空，保留本地
+    expect(restored.neonConnectionString).toBe('postgres://old');
+    // 本地空串，使用备份的
+    expect(restored.embedderApiKey).toBe('sk-123');
+    expect(restored.rerankApiKey).toBe('sk-456');
+  });
+});
+

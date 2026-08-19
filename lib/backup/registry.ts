@@ -38,6 +38,8 @@ import {
   type WebDavConfig,
   type CustomProviderConfig,
 } from '@/lib/persistence/storage';
+import { ragSettings, ragCollections } from '@/lib/rag/settings';
+import type { RagSettings, RagCollection } from '@/lib/rag/types';
 
 /**
  * 一个 storage item 在备份中的归属：
@@ -240,6 +242,52 @@ export function restoreCustomProviderHeaders(
   });
 }
 
+// ─── RagSettings 的密钥拆分 / 重组 ───
+//
+// RAG 设置中的敏感信息：数据库连接串、Embedder API 密钥、Rerank API 密钥。
+
+export interface RagSecret {
+  neonConnectionString?: string;
+  embedderApiKey?: string;
+  rerankApiKey?: string;
+}
+
+export function splitRagSettings(settings: RagSettings): { safe: RagSettings; secret: RagSecret } {
+  const secret: RagSecret = {};
+  if (settings.neonConnectionString) secret.neonConnectionString = settings.neonConnectionString;
+  if (settings.embedderApiKey) secret.embedderApiKey = settings.embedderApiKey;
+  if (settings.rerankApiKey) secret.rerankApiKey = settings.rerankApiKey;
+
+  const safe: RagSettings = {
+    ...settings,
+    neonConnectionString: '',
+    embedderApiKey: '',
+    rerankApiKey: '',
+  };
+  return { safe, secret };
+}
+
+export function restoreRagSettingsSecrets(
+  local: RagSettings,
+  secret: RagSecret,
+  strategy: RestoreStrategy,
+): RagSettings {
+  const isMerge = strategy === 'merge';
+  // 仅接受非空字符串字段：从备份 JSON 解码出来的 `null` / 空串 / 缺失一律视为「无此
+  // 密钥」，不写回 local（local 的字符串型字段会被持久化层要求为 string）。
+  const pickSecret = (localValue: string, secretValue: string | null | undefined): string => {
+    if (isMerge && localValue) return localValue;
+    if (typeof secretValue !== 'string' || !secretValue) return localValue;
+    return secretValue;
+  };
+  return {
+    ...local,
+    neonConnectionString: pickSecret(local.neonConnectionString, secret.neonConnectionString),
+    embedderApiKey: pickSecret(local.embedderApiKey, secret.embedderApiKey),
+    rerankApiKey: pickSecret(local.rerankApiKey, secret.rerankApiKey),
+  };
+}
+
 // ─── 合并模式的「按 id 补缺」通用助手 ───
 //
 // 合并（merge）恢复对集合型 item 的语义是「只增不减」：本地元素全保留，备份里 id
@@ -325,6 +373,19 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
     // 补缺：本地已配置则保留本地，仅在本地为 null 时从备份补入。
     fillMissing: (local: WebDavConfig | null, backup: WebDavConfig | null) =>
       local ?? backup,
+  }),
+  entry({
+    item: ragSettings,
+    storageClass: 'settings',
+    splitSecret: (v: RagSettings) => splitRagSettings(v),
+    restoreSecret: (local: RagSettings, secret: unknown, strategy) =>
+      restoreRagSettingsSecrets(local, (secret ?? {}) as RagSecret, strategy),
+  }),
+  entry({
+    item: ragCollections,
+    storageClass: 'settings',
+    fillMissing: (local: RagCollection[], backup: RagCollection[]) =>
+      fillMissingById(local, backup, (c) => c.name),
   }),
   // 记忆系统设置（仅开关，无密钥）。merge 恢复时保留本地开关状态（无 fillMissing）。
   entry({ item: memorySettings, storageClass: 'settings' }),
