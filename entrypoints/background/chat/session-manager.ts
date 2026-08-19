@@ -81,6 +81,7 @@ import { broadcastAll } from '../ipc/port-registry';
 import { broadcastToViewers } from './viewers';
 import { generateSessionTitle } from '@/lib/agent/title-generation';
 import { renameSession } from '@/lib/persistence/db';
+import { startTrace, type TraceHandle } from '@/lib/debug/trace';
 
 // ─── Types ───
 
@@ -214,6 +215,35 @@ class SessionManager {
    * → 跳过覆盖，相当于「输了的并发 create 也被静默吞掉」。
    */
   private brandNewInProgress = new Map<string, string>();
+  /**
+   * 临时诊断：sessionId → 本轮 send→reply 的 trace handle。
+   * `prompt()` 起锚后写入；`handleAgentEvent` 收到对应事件时复用同一锚点
+   * 打 `bg:agent_start` / `bg:first_token` / `bg:message_end` / `bg:agent_end`
+   * 标记。`agent_end` 消费完后 `delete` 释放。
+   */
+  private pendingTraces = new Map<string, TraceHandle>();
+  /**
+   * 临时诊断：统一释放本会话的 trace 句柄 + 关联哨兵（首 token / 计数）。
+   * 多个 bail-out 路径（cancel / destroySession / commitCompactionCancel /
+   * prompt() 中的 liveness guard / 取消 / retry-preparing 等）都应调它，
+   * 避免 `pendingTraces` / `firstTokenSeen` / `tokenCounts` 持有已死会话
+   * 的状态泄漏到 SW 生命周期之外。
+   */
+  private releaseTrace(sessionId: string): void {
+    this.pendingTraces.delete(sessionId);
+    this.firstTokenSeen.delete(sessionId);
+    this.tokenCounts.delete(sessionId);
+  }
+  /**
+   * 临时诊断：已打过 `bg:first_token` 的 sessionId 集合。
+   * 每轮 agent_start 清空（新一轮重新计），agent_end 也清空。
+   */
+  private firstTokenSeen = new Set<string>();
+  /**
+   * 临时诊断：sessionId → 本轮已收到的 message_update 次数。
+   * 每 10 次打一次 `bg:token_n` 采样（verbose 模式下可见逐 token 轨迹）。
+   */
+  private tokenCounts = new Map<string, number>();
   /** True iff we're currently holding a SW keep-alive token. Tracked so
    *  acquire/release stay balanced even across error paths. */
   private keepAliveHeld = false;
@@ -740,12 +770,43 @@ class SessionManager {
           );
         }
         agentSession.phase = 'running';
+        // 临时诊断：BG 端 agent_start 已发出——从 prompt() 到模型开始响应的
+        // 耗时是「派发 → agent loop 启动」这段的总和（包括模型 resolve、
+        // compose、maybeCompact、agent.prompt 入栈）。
+        this.pendingTraces.get(sessionId)?.mark('bg:agent_start');
+        // 新一轮开始：清掉上一轮的首 token / token 计数哨兵。
+        this.firstTokenSeen.delete(sessionId);
+        this.tokenCounts.delete(sessionId);
         broadcastToViewers(sessionId, { type: 'agent_start', sessionId });
         this.updateKeepAlive();
         break;
 
       case 'message_update':
         if (event.message.role === 'assistant') {
+          // 临时诊断：首 token latency（agent_start → 第一字符抵达 = 网络 +
+          // 推理 + 序列化总时间）。同一会话每轮只打一次：firstTokenSeen 守
+          // 卫；agent_start 处会清空该集合。
+          const trace = this.pendingTraces.get(sessionId);
+          if (trace && !this.firstTokenSeen.has(sessionId)) {
+            const text = (event.message.content ?? [])
+              .filter((b) => b.type === 'text')
+              .map((b) => (b as { text?: string }).text ?? '').join('');
+            trace.mark('bg:first_token', { contentLen: text.length });
+            this.firstTokenSeen.add(sessionId);
+          }
+          // 临时诊断：每 10 个 token 打一次采样（verbose 模式可见逐 token
+          // 节奏）。不进 NOISY_PREFIXES，因为前缀是 `bg:token_` 而非
+          // `event:message_update` / `recv:message_update`。
+          if (trace) {
+            const n = (this.tokenCounts.get(sessionId) ?? 0) + 1;
+            this.tokenCounts.set(sessionId, n);
+            if (n % 10 === 0) {
+              const text = (event.message.content ?? [])
+                .filter((b) => b.type === 'text')
+                .map((b) => (b as { text?: string }).text ?? '').join('');
+              trace.mark('bg:token_n', { n, contentLen: text.length });
+            }
+          }
           broadcastToViewers(sessionId, {
             type: 'message_update',
             sessionId,
@@ -756,6 +817,12 @@ class SessionManager {
 
       case 'message_end': {
         const messages = [...agent.state.messages];
+        // 临时诊断：message_end 抵达——从首 token 到 message_end 的耗时是
+        // 「模型推理 + 流式输出」的总耗时，是「这个回复有多长」的最直接度量。
+        this.pendingTraces.get(sessionId)?.mark('bg:message_end', {
+          lastRole: messages.at(-1)?.role,
+          stopReason: (messages.at(-1) as { stopReason?: string } | undefined)?.stopReason,
+        });
         broadcastToViewers(sessionId, { type: 'message_end', sessionId, messages: this.annotate(agentSession, messages) });
         void this.syncTail(agentSession);
         break;
@@ -770,6 +837,9 @@ class SessionManager {
         // await 一个永不到来的点击。
         agentSession.permissionBridge.cancel();
         const messages = [...agent.state.messages];
+        // 临时诊断：标记 agent_end 抵达（落库前），与下面的 `bg:agent_end_post_sync`
+        // 配对给出「落库耗时」。
+        this.pendingTraces.get(sessionId)?.mark('bg:agent_end_pre_sync');
         // 收尾同步 + 等落定（失败已在链上记录，吞掉以免打断 pi 的事件派发）。
         // 通常尾部的 message_end 已把内容同步进树，但
         // pi-agent-core 的 handleRunFailure（abort / error 路径）会把合成的
@@ -782,12 +852,16 @@ class SessionManager {
         // 要在本轮 entry 全部进树后才可见），且 annotate 需要齐全的水位线。
         await this.syncTail(agentSession).catch(() => undefined);
         const branchInfo = await this.getBranchInfo(sessionId).catch(() => undefined);
+        this.pendingTraces.get(sessionId)?.mark('bg:agent_end_post_sync');
         broadcastToViewers(sessionId, {
           type: 'agent_end',
           sessionId,
           messages: this.annotate(agentSession, messages),
           ...(branchInfo !== undefined ? { branchInfo } : {}),
         });
+        // 临时诊断：agent_end 已发出——trace 句柄使命完成，主动释放避免下一
+        // 轮 stale 复用。firstTokenSeen / tokenCounts 同步清理。
+        this.releaseTrace(sessionId);
 
         // ─── One-shot auto-title（仅首条 assistant 消息）───
         // Heuristic 标题来自 prompt() 的 `text.slice(0, 50)`，slash 命令展开后
@@ -858,6 +932,14 @@ class SessionManager {
       // 入新设置项（用户选择「用主模型」）。
       const model = agentSession.agent.state.model;
       const apiKey = await resolveProviderApiKey(model.provider);
+      // 临时诊断：自动标题生成是 fire-and-forget LLM 调用——agent_end 之
+      // 后还会再花一个 LLM round-trip 才能把标题写回。`pendingTraces` 在
+      // agent_end 时已经 delete（handle 在那一刻使命完成），所以这里开新
+      // 锚点：标题生成耗时是相对「agent_end 完结」而言，不是相对「用户
+      // 发问」。`trace` 仅用于本次 LLM 调用的起止标记，便于排查标题卡
+      // 死 / 超时问题。
+      const titleTrace = startTrace('bg', sessionId);
+      titleTrace.mark('bg:title_gen_start', { model: model.id });
 
       const result = await generateSessionTitle({
         userMessage: userText,
@@ -866,6 +948,7 @@ class SessionManager {
         apiKey,
         sessionId,
       });
+      titleTrace.mark('bg:title_gen_done', { ok: result !== null });
       if (!result) return;
 
       // Race guard: 用户可能在 prompt() → agent_end 这段时间里（甚至 agent_end
@@ -907,7 +990,15 @@ class SessionManager {
     text: string,
     attachments: Attachment[] = [],
     turn?: TurnSettings,
+    /** 临时诊断：渲染端捕获的 `performance.now()` 锚点；缺省则 BG 自己起锚。
+     *  跨 context 时间线可比性靠它：renderer 与 SW 的 `performance.now()` 起
+     *  点不同，各自起锚会让 Δt 出现负数。 */
+    traceT0?: number,
   ): Promise<void> {
+    // 临时诊断：捕获 trace 锚点。`traceT0` 来自 renderer 透传时复用同一锚点；
+    // 否则 BG 自己起新锚点（旧客户端 / retry / 非渲染端入口）。
+    const trace = startTrace('bg', sessionId, traceT0);
+    trace.mark('bg:prompt_received', { hasAttach: attachments.length > 0 });
     // Persist + broadcast 'session_created' for brand-new sessions BEFORE any
     // agent setup work (model resolve, tool factory, MCP, createAgent — easily
     // several hundred ms). Without this the UI stays on /chat/new with an empty
@@ -966,6 +1057,10 @@ class SessionManager {
     }
 
     const agentSession = await this.getOrCreateAgent(sessionId);
+    trace.mark('bg:agent_ready', { modelKey: agentSession.modelKey });
+    // 临时诊断：把 trace handle 按 sessionId 暂存，让 `handleAgentEvent` 复用
+    // 同一锚点打 `bg:agent_start` 等标记；agent_end 消费完后 `delete` 释放。
+    this.pendingTraces.set(sessionId, trace);
 
     // 兑现 brand-new 标记：把 prompt() 当时写入的 heuristic 标题注入 AgentSession。
     // `Map.get` 仅命中一次（`delete` 紧接其后），并发 prompt() 不会重复设。
@@ -984,6 +1079,9 @@ class SessionManager {
       // phase-guard pattern; the in-flight work's broadcasts reconcile every
       // viewing window to the correct state.
       console.debug('[session-manager] prompt: phase busy, ignored', sessionId, agentSession.phase);
+      // 临时诊断：phase busy 早退——trace 句柄不会被消费（agent_start
+      // 不会来），主动释放避免泄漏。
+      this.releaseTrace(sessionId);
       return;
     }
 
@@ -1033,8 +1131,8 @@ class SessionManager {
     // 保证一轮内两处读同一个值（原子门控，避免读到两个快照而前后不一致）。
     const memoryEnabled = (await memorySettings.getValue()).enabled;
     const enriched = await composeUserMessage(text, attachments, memoryEnabled);
-
     const images = extractImages(attachments);
+    trace.mark('bg:prompt_composed', { textLen: enriched.length, imgCount: images.length });
 
     // Liveness guard. Everything from `getOrCreateAgent` down to the dispatch
     // below runs while `phase === 'idle'` (model resolve, settings reads,
@@ -1045,11 +1143,18 @@ class SessionManager {
     // API call, and let `maybeCompact`'s persist resurrect the deleted row.
     // If the entry is gone (or was replaced), the user already stopped this
     // turn — bail; `cancel()` already broadcast the authoritative end state.
-    if (this.sessions.get(sessionId) !== agentSession) return;
+    if (this.sessions.get(sessionId) !== agentSession) {
+      this.releaseTrace(sessionId);
+      return;
+    }
 
     const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled);
-    if (this.sessions.get(sessionId) !== agentSession) return;
+    if (this.sessions.get(sessionId) !== agentSession) {
+      this.releaseTrace(sessionId);
+      return;
+    }
     agentSession.agent.state.systemPrompt = refreshedSystemPrompt;
+    trace.mark('bg:system_prompt', { promptLen: refreshedSystemPrompt.length });
 
     // If any interactive tool OR a permission prompt is pending, the agent is
     // paused waiting for the user — steer the new message into the loop and
@@ -1090,8 +1195,14 @@ class SessionManager {
       // turn and don't dispatch to the model.
       if (agentSession.phase === 'idle') {
         const cancelled = await this.maybeCompact(agentSession, pendingUserMessage);
-        if (cancelled) return;
+        trace.mark('bg:compaction', { ran: true, cancelled });
+        if (cancelled) {
+          // 临时诊断：压缩被用户取消——trace 句柄使命完结，主动释放。
+          this.releaseTrace(sessionId);
+          return;
+        }
       }
+      trace.mark('bg:agent_dispatched');
       await agentSession.agent.prompt(enriched, images.length > 0 ? images : undefined);
     }
   }
@@ -1295,6 +1406,8 @@ class SessionManager {
       isCompacting: false,
       pendingTools: [],
     });
+    // 临时诊断：压缩被用户取消——trace 句柄使命完结，主动释放。
+    this.releaseTrace(sessionId);
     return true;
   }
 
@@ -1777,6 +1890,10 @@ class SessionManager {
     // retry / 编辑可能刚在树上造出新分支，撤下的 agent_end 帧要携带它
     const branchInfo = await this.getBranchInfo(sessionId).catch(() => undefined);
     this.sessions.delete(sessionId);
+    // 临时诊断：cancel 走完「running/idle」路径后，`handleAgentEvent` 不会收到
+    // `agent_end`（我们主动 unsubscribe 了），原本的 `releaseTrace` 链路不会触发。
+    // 显式释放，避免 pendingTraces / firstTokenSeen / tokenCounts 永久占位。
+    this.releaseTrace(sessionId);
     this.updateKeepAlive();
     // Ensure client knows the agent stopped (abort may not fire agent_end)
     broadcastToViewers(sessionId, {
@@ -1863,6 +1980,10 @@ class SessionManager {
       agentSession.permissionBridge.cancel();
       agentSession.agent.abort();
       this.sessions.delete(sessionId);
+      // 临时诊断：destroySession 不会触发 `agent_end` 事件（我们主动 abort +
+      // delete），`handleAgentEvent` 路径不会调 `releaseTrace`。显式释放，避免
+      // pendingTraces / firstTokenSeen / tokenCounts 永久占位。
+      this.releaseTrace(sessionId);
       this.updateKeepAlive();
     }
   }

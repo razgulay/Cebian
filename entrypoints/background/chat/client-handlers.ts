@@ -18,6 +18,7 @@ import { onPortDisconnect, post, broadcastAll } from '../ipc/port-registry';
 import { vfs } from '@/lib/persistence/vfs';
 import { isValidSessionId } from '@/lib/utils';
 import { renameSession, setSessionPinned } from '@/lib/persistence/db';
+import { startTrace } from '@/lib/debug/trace';
 
 // ─── Grace cancel ───
 
@@ -149,10 +150,13 @@ const chatClientHandlers: ClientHandlerMap = {
     // navigate to /chat/<id> immediately.
     // model / thinkingLevel 是本轮携带的「该会话所用模型 / 思考档」，透传给
     // prompt() 作 override（B1：会话行是真相，全局仅作新对话种子）。
+    // 临时诊断：`msg.t0` 由渲染端 ship 过来的锚点；透传给 prompt() 让
+    // session-manager 沿用同一锚点（renderer 与 SW 的 `performance.now()` 起
+    // 点不同，不能各自起锚）。缺省时 BG 自己起锚。
     sessionManager.prompt(sessionId, msg.text, msg.attachments, {
       model: msg.model,
       thinkingLevel: msg.thinkingLevel,
-    }).catch((err) => {
+    }, msg.t0).catch((err) => {
       post(port, {
         type: 'error',
         sessionId,

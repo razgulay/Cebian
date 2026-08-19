@@ -26,6 +26,7 @@ import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
 import { debugLog, withSession } from '@/lib/debug/log';
+import { startTrace } from '@/lib/debug/trace';
 
 // ─── Helpers ───
 
@@ -110,6 +111,15 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   // Stable callback refs to avoid re-creating the port listener
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  // 临时诊断：键 = sessionId，值 = 本轮 send→reply 的 trace t0 锚点。
+  // `dispatchPrompt` 把 `send()` 收到的 t0 暂存；`handleMessage` 在收到对应
+  // 会话的事件时按需重建 hook 端 trace handle（let t0 = `pendingTraceT0Ref.get(...)`）。
+  // 终点（agent_end / cancel / 切会话等）都 `delete` 释放，避免下一轮 stale
+  // 复用（用户在 agent 跑完前连发两条的情况）。
+  const pendingTraceT0Ref = useRef<Map<string, number>>(new Map());
+  // 临时诊断：hook 端「首 token 哨兵」，每个会话每轮只打一次 `hook:first_token`。
+  // agent_start 处清空（新一轮重新计）；agent_end 与各种 bail-out 路径同步清。
+  const hookFirstTokenSeenRef = useRef<Set<string>>(new Set());
   // Display-text overrides for the most recent optimistic user message.
   // When a slash command like `/writing` is resolved at send-time, the BG
   // stores and broadcasts back the *expanded* prompt text — but the user
@@ -189,6 +199,18 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
         case 'agent_start':
           if (!isCurrentSession(msg.sessionId)) break;
           debugLog.info('bg', 'recv:agent_start', withSession({ sessionId: msg.sessionId }, msg.sessionId));
+          // 临时诊断：用本轮 ship 过来的 t0 重建 hook 端 trace handle，打
+          // `hook:recv_agent_start` 标记；缺 t0（旧客户端 / 切会话未派发的
+          // 旧会话）则静默跳过。新一轮开始：清掉 hook 端的首 token 哨兵
+          // （与 BG 端 `firstTokenSeen.delete` 对齐）。
+          {
+            const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
+            if (t0 !== undefined) {
+              const trace = startTrace('hook', msg.sessionId, t0);
+              trace.mark('hook:recv_agent_start');
+            }
+            hookFirstTokenSeenRef.current.delete(msg.sessionId);
+          }
           setState(prev => ({ ...prev, isAgentRunning: true, isCompacting: false }));
           break;
 
@@ -212,6 +234,21 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
             msgRole: msg.message.role,
             stopReason: (msg.message as { stopReason?: string }).stopReason,
           });
+          // 临时诊断：首条 message_update 在 hook 端被收到时打 `hook:first_token`
+          // ——首 token 延迟（time-to-first-token）是用户感知「LLM 是否在响应」
+          // 的最直接指标，agent_start → 第一字符抵达 = 网络 + 推理 + 序列化总
+          // 时间。`hookFirstTokenSeenRef` 守卫确保每个会话每轮只打一次。
+          if (msg.message.role === 'assistant' && !hookFirstTokenSeenRef.current.has(msg.sessionId)) {
+            hookFirstTokenSeenRef.current.add(msg.sessionId);
+            const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
+            if (t0 !== undefined) {
+              const trace = startTrace('hook', msg.sessionId, t0);
+              const text = (msg.message.content ?? [])
+                .filter((b: { type: string }) => b.type === 'text')
+                .map((b) => (b as { text?: string }).text ?? '').join('');
+              trace.mark('hook:first_token', { contentLen: text.length });
+            }
+          }
           setState(prev => {
             const msgs = [...prev.messages];
             const last = msgs[msgs.length - 1];
@@ -231,6 +268,13 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
             msgsLen: msg.messages.length,
             lastRole: msg.messages.at(-1)?.role,
           });
+          {
+            const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
+            if (t0 !== undefined) {
+              const trace = startTrace('hook', msg.sessionId, t0);
+              trace.mark('hook:recv_message_end');
+            }
+          }
           // Length-aware merge (see session_state handler for the race-condition
           // rationale). message_end broadcasts can race with the optimistic
           // user bubble if a previous turn is still finalising when the new
@@ -248,6 +292,17 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
 
         case 'agent_end':
           if (!isCurrentSession(msg.sessionId)) break;
+          // 临时诊断：最后一帧——用 t0 重建 handle 打 `hook:recv_agent_end`，
+          // 然后清掉 t0 与首 token 哨兵，防止下一轮 stale 复用。
+          {
+            const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
+            if (t0 !== undefined) {
+              const trace = startTrace('hook', msg.sessionId, t0);
+              trace.mark('hook:recv_agent_end');
+            }
+          }
+          pendingTraceT0Ref.current.delete(msg.sessionId);
+          hookFirstTokenSeenRef.current.delete(msg.sessionId);
           setState(prev => {
             const pending = pendingDisplayTextRef.current.get(msg.sessionId);
             const rewritten = pending ? rewriteLastUserMessage(msg.messages, pending.displayText) : msg.messages;
@@ -352,6 +407,11 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
 
         case 'session_deleted':
           pendingDisplayTextRef.current.delete(msg.sessionId);
+          // 临时诊断：BG 已销毁会话—— t0 与首 token 哨兵同步释放，避免老
+          // 锚点在下一次同 id 复用的会话（罕见但可能：用户删了又立刻再建）
+          // 时误命中。
+          pendingTraceT0Ref.current.delete(msg.sessionId);
+          hookFirstTokenSeenRef.current.delete(msg.sessionId);
           callbacksRef.current.onSessionDeleted?.(msg.sessionId);
           break;
 
@@ -359,6 +419,11 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
           if (msg.sessionId && !isCurrentSession(msg.sessionId)) break;
           console.error('[AgentPort] Error:', msg.error);
           setState(prev => ({ ...prev, isAgentRunning: false, isCompacting: false, lastError: msg.error }));
+          // 临时诊断：BG 报错——当前会话的 trace t0 与首 token 哨兵同步释放。
+          if (msg.sessionId) {
+            pendingTraceT0Ref.current.delete(msg.sessionId);
+            hookFirstTokenSeenRef.current.delete(msg.sessionId);
+          }
           break;
 
         case 'recorder_status':
@@ -498,11 +563,12 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   }, []);
 
   const dispatchPrompt = useCallback((
-    text: string,
+      text: string,
     attachments: Attachment[] | undefined,
     expectedSessionId: string | null,
     turn?: TurnSettings,
     displayText?: string,
+    t0?: number,
   ): boolean => {
     if (sessionIdRef.current !== expectedSessionId) return false;
 
@@ -512,8 +578,31 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     const existingSessionId = sessionIdRef.current;
     const sessionId = existingSessionId ?? crypto.randomUUID();
 
+    // 临时诊断：把渲染端捕获的 t0 锚点随消息送到 BG，让 BG 与 hook 各自创建
+    // 自己的 trace handle（BG 端已有；hook 端在 `handleMessage` 里收到事件
+    // 时按 sessionId 取 t0 重建 handle）。这样 handle source 与各端子的
+    // debugLog 写入约定对齐：hook 端写 `source: 'hook'`，BG 端写
+    // `source: 'bg'`，UI 端写 `source: 'ui'`，导出的日志 source 字段自描述、
+    // 与既有的 `debugLog.info('hook', 'recv:*')` / `debugLog.info('bg',
+    // 'recv:*')` 共存无歧义。handle 仅活本轮（agent_end 释放），下一轮
+    // 重新注入新 t0。
+    if (t0 !== undefined) {
+      // 把 t0 暂存到 sessionId→t0 映射；handleMessage 收到对应 sessionId
+      // 的事件时按需重建 hook 端 trace handle。这一段与上面 `t0` 透传
+      // IPC 的字段同步更新——当 `msg.t0` 在 BG 端被读走做 trace 后，hook 端
+      // 也用同一个 t0 接续。
+      pendingTraceT0Ref.current.set(sessionId, t0);
+    }
     try {
-      port.postMessage({ type: 'prompt', sessionId, text, attachments, model: turn?.model, thinkingLevel: turn?.thinkingLevel });
+      port.postMessage({
+        type: 'prompt',
+        sessionId,
+        text,
+        attachments,
+        model: turn?.model,
+        thinkingLevel: turn?.thinkingLevel,
+        ...(t0 !== undefined ? { t0 } : {}),
+      } satisfies ClientMessage);
     } catch {
       if (portRef.current === port) {
         portRef.current = null;
@@ -522,6 +611,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
         setState(prev => ({ ...prev, connected: false }));
         scheduleRetryRef.current?.();
       }
+      pendingTraceT0Ref.current.delete(sessionId);
       return false;
     }
 
@@ -584,12 +674,13 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     expectedSessionId: string | null = sessionIdRef.current,
     turn?: TurnSettings,
     displayText?: string,
+    t0?: number,
   ): Promise<PromptDispatchResult> => {
     const trimmed = text.trim();
     if (!trimmed) return { status: 'notDispatched', reason: 'empty' };
 
     const startedSessionId = expectedSessionId;
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText, t0)) return { status: 'dispatched' };
 
     const connected = await waitForConnected(PROMPT_RECONNECT_TIMEOUT_MS);
     if (!connected || sessionIdRef.current !== startedSessionId) {
@@ -599,7 +690,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
       return { status: 'notDispatched', reason: 'unavailable' };
     }
 
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText, t0)) return { status: 'dispatched' };
 
     setState(prev => ({ ...prev, lastError: t('chat.session.notConnected') }));
     return { status: 'notDispatched', reason: 'unavailable' };
@@ -701,10 +792,17 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   }, [postMessage]);
 
   const subscribe = useCallback((sessionId: string) => {
-    const isSessionChange = sessionIdRef.current !== sessionId;
+    const previousSessionId = sessionIdRef.current;
+    const isSessionChange = previousSessionId !== sessionId;
     if (isSessionChange) {
       setPendingTools(new Map());
       setPendingPermissions(new Map());
+      // 临时诊断：切会话——上一个会话的 t0 与首 token 哨兵（如还在的话）
+      // 主动释放，避免持有老锚点。
+      if (previousSessionId) {
+        pendingTraceT0Ref.current.delete(previousSessionId);
+        hookFirstTokenSeenRef.current.delete(previousSessionId);
+      }
     }
     sessionIdRef.current = sessionId;
     setState(prev => isSessionChange
@@ -748,6 +846,9 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     }));
     setPendingTools(new Map());
     setPendingPermissions(new Map());
+    // 临时诊断：卸载会话——清掉残留的 t0 与首 token 哨兵，避免下一轮 stale 复用。
+    pendingTraceT0Ref.current.clear();
+    hookFirstTokenSeenRef.current.clear();
     postMessage({ type: 'unsubscribe' });
   }, [postMessage]);
 
@@ -772,6 +873,9 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     });
     setPendingTools(new Map());
     setPendingPermissions(new Map());
+    // 临时诊断：New Chat 导航——清掉残留 t0 与首 token 哨兵。
+    pendingTraceT0Ref.current.clear();
+    hookFirstTokenSeenRef.current.clear();
   }, []);
 
   const listSessions = useCallback(() => {

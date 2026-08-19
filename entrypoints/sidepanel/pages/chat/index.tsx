@@ -38,6 +38,7 @@ import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   getAssistantText,
+  getLeakedThinking,
   getThinkingBlocks,
   getToolCalls,
   findToolResult,
@@ -55,6 +56,7 @@ import { hasUsableModel } from '@/lib/providers/usable-models';
 import type { Attachment } from '@/lib/agent/attachments';
 import type { SessionSnapshot } from '@/lib/ipc/protocol';
 import { debugLog, withSession } from '@/lib/debug/log';
+import { startTrace } from '@/lib/debug/trace';
 import { t } from '@/lib/i18n';
 
 // ─── ChatPage ───
@@ -139,6 +141,15 @@ export function ChatPage({
 
   // 句柄：欢迎页示例卡片通过它把 prompt 填入输入框。
   const inputRef = useRef<ChatInputHandle>(null);
+
+  // 临时诊断：本轮 send→reply 的 trace 句柄。`handleSend` 在派发 tick 捕
+  // 获 `t0` 并 ship 给 BG；hook 端按 t0 重建自己的 trace handle（让
+  // `source` 与各端 `debugLog` 写入约定对齐——hook 端写 `'hook'`、BG 端写
+  // `'bg'`、UI 端写 `'ui'`），BG 端在 session-manager 里也按 t0 起自己
+  // 的 handle（避免 renderer 与 SW 的 `performance.now()` 起点不同导致
+  // Δt 失真）。`null` = 当前轮没有派发（冷态 / 上一次已完成）。本 ref
+  // 仅供本组件生命周期内的同步读取，不持有资源。
+  const pendingTraceRef = useRef<ReturnType<typeof startTrace> | null>(null);
 
   // When the user selects text in an assistant message and clicks the floating
   // Quote button, the formatted `quote <text> quote` blockquote is inserted at
@@ -323,6 +334,16 @@ export function ChatPage({
   // Gemini-style send handler: bumps the snap token on successful dispatch.
   const handleSend = useCallback(
     async (text: string, attachments: Attachment[] | undefined, expectedSessionId: string | null, options?: { displayText?: string }) => {
+      // 临时诊断：捕获 send→reply 流水线的 `t0` 锚点。锚点通过 IPC 透传给
+      // background（让 BG 算出可比 Δt），本地也立刻打 `chat:t0` 作为边界
+      // 标记。锚点分配在本 tick（user click → dispatch 之前），反映从用
+      // 户点按到第一次派发的真实耗时，而非先 await 再算。`expectedSessionId`
+      // 此时可能为 null（新会话），用 `activeSessionId` 或占位 `'new'`——
+      // BG 端会按端口绑定后的真实 sessionId 写日志，二者由 sessionId 字
+      // 段关联。
+      const trace = startTrace('ui', expectedSessionId ?? activeSessionId ?? 'new');
+      trace.mark('chat:t0', { textLen: text.length, hasAttach: !!attachments?.length });
+      pendingTraceRef.current = trace;
       debugLog.info('ui', 'chat:handle_send',
         withSession({ sessionId: expectedSessionId ?? '', textLen: text.length }, expectedSessionId ?? ''));
       if (!isNewChat && routeSessionId !== activeSessionId) {
@@ -335,10 +356,13 @@ export function ChatPage({
       // it false here (same tick as the user input) means the observer's
       // next tick is a no-op and the user bubble stays at the top.
       setSticky(false);
+      // 把 trace.t0 ship 给 hook：BG 端按 t0 起 bg trace handle，hook 端按
+      // t0 重建 hook trace handle；二者源头一致，Δt 在 renderer ↔ BG ↔ hook
+      // 三处可对比。trace 句柄本身不需要过 IPC——锚点只是一个 number。
       const result = await send(text, attachments, expectedSessionId, {
         model: turnModel ?? undefined,
         thinkingLevel: turnThinking,
-      }, options?.displayText);
+      }, options?.displayText, pendingTraceRef.current?.t0);
       if (result.status === 'dispatched') {
         hasUserOverrideModelRef.current = false;
         hasUserOverrideThinkingRef.current = false;
@@ -454,6 +478,7 @@ export function ChatPage({
             if (msg.role === 'assistant') {
               const assistantMsg = msg as AssistantMessage;
               const thinkingBlocks = getThinkingBlocks(assistantMsg);
+              const leakedThinking = getLeakedThinking(assistantMsg);
               const text = getAssistantText(assistantMsg);
               const toolCalls = getToolCalls(assistantMsg);
               const isLast = idx === messages.length - 1;
@@ -590,6 +615,14 @@ export function ChatPage({
                   >
                   {thinkingBlocks.map((block, i) => (
                     <ThinkingBlock key={`t-${idx}-${i}`} content={block.thinking} isLive={isStreaming} />
+                  ))}
+                  {/* Some providers emit reasoning inline as `<think>...</think>`
+                     inside the text content block (instead of a structured
+                     `{type: 'thinking'}` block). `getLeakedThinking` extracts
+                     those bodies so we render them as collapsible blocks too —
+                     otherwise the raw tag would leak into the chat bubble. */}
+                  {leakedThinking.map((reasoning, i) => (
+                    <ThinkingBlock key={`tl-${idx}-${i}`} content={reasoning} isLive={isStreaming} />
                   ))}
                   {text && <AgentTextBlock content={text} />}
                   {isError && (

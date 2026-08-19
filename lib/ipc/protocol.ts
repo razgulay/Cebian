@@ -60,8 +60,13 @@ export type ClientMessage =
   /** 发送一条用户消息。`model` / `thinkingLevel`（见 TurnSettings）是「本次发送所用的
    *  模型 / 思考档」，由发起的 sidepanel 随消息携带（而非后台读全局），属于该会话的
    *  选择。新会话据此建行；已有会话据此就地刷新活 agent 并落库到会话行（会话行是真相）。
-   *  缺省时后台回退到全局 lastSelectedModel 充当「新对话默认种子」（向后兼容）。 */
-  | ({ type: 'prompt'; sessionId: string | null; text: string; attachments?: Attachment[] } & TurnSettings)
+   *  缺省时后台回退到全局 lastSelectedModel 充当「新对话默认种子」（向后兼容）。
+   *
+   *  `t0`（可选）：发起侧捕获的 `performance.now()` 锚点，由「send→reply 流水
+   *  线临时诊断」用——后台读取后用同一个锚点算 `Δt`，保证跨 context 时间线可
+   *  比（renderer 与 SW 的 `performance.now()` 起点不同）。不影响行为，缺省
+   *  即退化到本地锚点（旧客户端也无副作用）。 */
+  | ({ type: 'prompt'; sessionId: string | null; text: string; attachments?: Attachment[]; t0?: number } & TurnSettings)
   | { type: 'cancel'; sessionId: string }
   /** Re-run the last user turn for `sessionId`. The background drops any
    *  trailing assistant / toolResult messages (typically a failed turn or
