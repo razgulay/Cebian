@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, Trash2, GripVertical } from 'lucide-react';
 import { toast } from 'sonner';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import type { MCPServerConfig } from '@/lib/persistence/storage';
 import { setMCPServerEnabled, removeMCPServer } from '@/lib/mcp/store';
 import { MCPServerEditForm } from './MCPServerForm';
@@ -43,11 +44,29 @@ function getStatusDot(server: MCPServerConfig, info: MCPStatusInfo | undefined):
 /**
  * MCPServerCard — summary of one MCP server with enable/edit/delete actions.
  * Click the pencil icon to expand into an inline edit form.
+ *
+ * Drag-to-reorder: the parent mounts the card inside a SortableContext. We
+ * only spread `attributes`/`listeners` on the grip handle (GripVertical),
+ * so clicking the toggle / edit / delete buttons never starts a drag. The
+ * outer wrapper carries `setNodeRef` + transform/transition so the reorder
+ * animation slides the whole card, not just the handle.
  */
 export function MCPServerCard({ server }: MCPServerCardProps) {
   const [editing, setEditing] = useState(false);
   const statusMap = useMCPStatus();
   const dot = getStatusDot(server, statusMap[server.id]);
+
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: server.id });
+  // useSortable is a hook that must run unconditionally across renders, so we
+  // still call it when the card is in edit mode — but the form below returns
+  // early before the ref/transform are attached to any DOM node, which leaves
+  // the SortableContext item briefly unanchored. dnd-kit tolerates this; the
+  // card just can't be dragged while editing, which is the desired UX anyway.
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
 
   const handleToggle = async (enabled: boolean) => {
     try {
@@ -79,9 +98,25 @@ export function MCPServerCard({ server }: MCPServerCardProps) {
   }
 
   return (
-    <div className="rounded-lg border border-border p-3 space-y-2">
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        'rounded-lg border border-border p-3 space-y-2',
+        isDragging && 'opacity-50 ring-2 ring-primary/40 cursor-grabbing',
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            aria-label={t('settings.mcp.actions.dragHandle')}
+            className="shrink-0 -ml-1 p-0.5 text-muted-foreground/60 hover:text-foreground cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary rounded transition-colors"
+          >
+            <GripVertical className="size-3.5" />
+          </button>
           <span
             role="img"
             className={cn('size-2 rounded-full shrink-0', dot.className)}
@@ -89,14 +124,6 @@ export function MCPServerCard({ server }: MCPServerCardProps) {
             aria-label={dot.label}
           />
           <span className="text-sm font-medium truncate">{server.name}</span>
-          <Badge variant="outline" className="text-[10px] uppercase tracking-wide shrink-0">
-            {server.transport.type}
-          </Badge>
-          {!server.enabled && (
-            <Badge variant="secondary" className="text-[10px] shrink-0">
-              {t('settings.mcp.status.disabled')}
-            </Badge>
-          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <Switch
@@ -125,9 +152,6 @@ export function MCPServerCard({ server }: MCPServerCardProps) {
           </Button>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground font-mono truncate" title={server.transport.url}>
-        {server.transport.url}
-      </p>
     </div>
   );
 }
