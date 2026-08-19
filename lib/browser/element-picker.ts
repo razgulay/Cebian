@@ -1,8 +1,13 @@
 import type { ElementAttachment, ImageAttachment } from '@/lib/agent/attachments';
-import { getActiveTabId } from '@/lib/browser/tab-actions';
-import { t } from '@/lib/i18n';
+import { executeInTabWithArgs, getActiveTabId } from '@/lib/browser/tab-actions';
 import { ensureOffscreen } from '@/lib/tools/offscreen';
 import type { OffscreenResponse } from '@/entrypoints/offscreen/main';
+import { t } from '@/lib/i18n';
+
+/** crop-image / composite-vertical offscreen responses share the same
+ *  `{ result?: string; error?: string }` shape — the picker only cares
+ *  about a base64 string back, so this alias keeps the call sites terse. */
+type OffscreenCropResponse = OffscreenResponse;
 
 // ─── Injected picker script (self-contained, runs in content-script isolated world) ───
 // IMPORTANT: This function must be fully self-contained — no closures over external variables.
@@ -489,16 +494,46 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
      *  edge, scroll the page in the corresponding direction until the
      *  cursor leaves the edge zone. Capped at ~30 fps via RAF. Lets the
      *  user extend the selection past the current viewport by dragging
-     *  toward (and over) the edge. */
-    const EDGE_PX = 30;
+     *  toward (and over) the edge.
+     *
+     *  Speed scales with how deep into the edge zone the cursor is: at
+     *  the zone boundary it scrolls slowly (MIN_PX_PER_FRAME ≈ 840 px/s),
+     *  ramping up to MAX_PX_PER_FRAME ≈ 3600 px/s as the cursor pushes
+     *  right against the viewport edge — gives the user tactile control
+     *  instead of a single fixed speed. */
+    // 鼠标靠近视口边缘时按方向自动滚：顶部/左侧 → 负方向（向上/向左），
+    // 底部/右侧 → 正方向（向下/向右）。速度随深度线性 ramp，贴边最快、
+    // 进缓冲带时最慢——给用户一个既能甩手快速滚、也能精细微调的手感。
+    const EDGE_PX = 50;
+    const MIN_PX_PER_FRAME = 14;
+    const MAX_PX_PER_FRAME = 60;
+    function edgeSpeed(cursor: number, edgeMax: number): number {
+      // 先算 factor（0..1）：0 在死区中央（不滚），1 在贴边（最猛）。
+      // 用 factor 而不是 ramp 来判死区——`ramp = MIN + (MAX-MIN)*factor`
+      // 永远 ≥ MIN，死区检查 `ramp === 0` 永远不成立，会让中部永远
+      // 慢速漂移（之前出 bug 的就是这条）。
+      let factor: number;
+      let sign: number;
+      if (cursor < EDGE_PX) {
+        factor = (EDGE_PX - cursor) / EDGE_PX;
+        sign = -1;
+      } else if (cursor > edgeMax - EDGE_PX) {
+        factor = (cursor - (edgeMax - EDGE_PX)) / EDGE_PX;
+        sign = +1;
+      } else {
+        return 0;
+      }
+      const ramp = MIN_PX_PER_FRAME + (MAX_PX_PER_FRAME - MIN_PX_PER_FRAME) * factor;
+      // 顶部/左侧 → 负方向；底部/右侧 → 正方向。
+      // 之前两个分支都返回正数，结果 top/left 自动滚根本滚不动——
+      // 只能往下/右滚，鼠标一进缓冲带就被钉死。
+      return sign * Math.min(MAX_PX_PER_FRAME, ramp);
+    }
     function tickScroll() {
       scrollRafId = null;
       if (!dragStart || !lastCursor) return;
-      let dx = 0, dy = 0;
-      if (lastCursor.x < EDGE_PX) dx = -10;
-      else if (lastCursor.x > window.innerWidth - EDGE_PX) dx = 10;
-      if (lastCursor.y < EDGE_PX) dy = -10;
-      else if (lastCursor.y > window.innerHeight - EDGE_PX) dy = 10;
+      const dx = edgeSpeed(lastCursor.x, window.innerWidth);
+      const dy = edgeSpeed(lastCursor.y, window.innerHeight);
       if (dx !== 0 || dy !== 0) {
         window.scrollBy(dx, dy);
         // The page scrolled — recompute dragEnd in *document* coords so
@@ -540,11 +575,32 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
       if (!dragStart || !dragEnd) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      const rect = {
+      const rawRect = {
         x: Math.min(dragStart.x, dragEnd.x),
         y: Math.min(dragStart.y, dragEnd.y),
         width: Math.abs(dragEnd.x - dragStart.x),
         height: Math.abs(dragEnd.y - dragStart.y),
+      };
+      // Clamp to the actual document bounds. CDP's `Page.captureScreenshot`
+      // with `captureBeyondViewport: true` honours the clip rectangle, but
+      // for areas beyond the document's own `scrollHeight`/`scrollWidth` it
+      // has a long-standing quirk: it pads the missing region by repeating
+      // the current viewport contents. On a typical page the user sees the
+      // page header / top section stacked vertically — a captured image
+      // that's bigger than the document but shows the same top content
+      // repeated. Clamping here keeps the captured image honest: it shows
+      // exactly the document pixels under the drag, nothing more.
+      const maxX = Math.max(0, document.documentElement.scrollWidth);
+      const maxY = Math.max(0, document.documentElement.scrollHeight);
+      const x0 = Math.max(0, Math.min(rawRect.x, maxX));
+      const y0 = Math.max(0, Math.min(rawRect.y, maxY));
+      const x1 = Math.max(0, Math.min(rawRect.x + rawRect.width, maxX));
+      const y1 = Math.max(0, Math.min(rawRect.y + rawRect.height, maxY));
+      const rect = {
+        x: x0,
+        y: y0,
+        width: Math.max(0, x1 - x0),
+        height: Math.max(0, y1 - y0),
       };
       // Reject zero-area drags (just a click, no real selection). Cancel cleanly.
       if (rect.width < 4 || rect.height < 4) {
@@ -684,23 +740,6 @@ export type PickerResult =
   | { status: 'cancelled' }
   | { status: 'error'; reason: 'unsupported-page' | 'navigation' | 'injection-failed'; message?: string };
 
-/** Query the captured tab's device pixel ratio so we can scale the CSS-pixel
- *  rect from the picker into the JPEG-pixel space that `captureVisibleTab`
- *  returns. Falls back to 1 (no scaling) if the tab is unreachable — typical
- *  for system pages that the pre-flight check already rejected. */
-async function getTabDpr(tabId: number): Promise<number> {
-  try {
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => window.devicePixelRatio || 1,
-    });
-    const dpr = result?.result;
-    return typeof dpr === 'number' && dpr > 0 ? dpr : 1;
-  } catch {
-    return 1;
-  }
-}
-
 export interface StartPickerOptions {
   /** Pick mode. Defaults to 'click' (single element).
    *  - 'click'  — hover highlights an element; click captures it.
@@ -778,42 +817,179 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
         }
 
         case 'cebian:picker-region-result': {
-          // Region mode: capture the visible viewport, crop to the rectangle,
-          // and return an ImageAttachment. The whole sequence is async —
-          // resolve() is called once the crop is back from the offscreen doc.
+          // Region mode：通过 scroll-and-stitch 抓取文档坐标系下的矩形。
+          // picker 内部用 document 坐标记录 rect（跨滚轮不漂），但
+          // `chrome.tabs.captureVisibleTab` 只能拍当前视口——拖到折叠线以下的部分
+          // 会被裁掉。之前试过 CDP `Page.captureScreenshot` + `captureBeyondViewport: true`
+          // + `clip`，但 Chrome 会把超出 `scrollHeight` 的区域用当前视口内容
+          // 重复填充——矮页面的高截图会把页头叠两三次。scroll-and-stitch 完全
+          // 绕开这个坑：始终拍视口，再在 offscreen 里把 viewport-sized 的
+          // 条按顺序纵向粘起来。
+          //
+          // 流程：
+          // 1. 从 tab 探测 viewport 尺寸 + DPR。
+          // 2. 记住当前 scroll。
+          // 3. 对 rect 的每个 viewport-sized 条：滚到该条的文档 y、
+          //    等布局稳定、拍当前视口、裁出该条里 rect 可见的那部分。
+          // 4. 通过 `composite-vertical` 在 offscreen 里把条纵向粘起来。
+          // 5. 还原原始 scroll。
           const cssRect = msg.rect as { x: number; y: number; width: number; height: number };
           cleanup();
-          // Fire-and-forget the capture/crop pipeline; resolve below.
           void (async () => {
             try {
-              const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 85 });
-              const base64 = dataUrl.split(',', 2)[1] ?? '';
-              const dpr = await getTabDpr(tabId);
+              const probe = await executeInTabWithArgs<[], { viewportWidth: number; viewportHeight: number; dpr: number; scrollX: number; scrollY: number }>(
+                tabId,
+                () => ({
+                  viewportWidth: window.innerWidth,
+                  viewportHeight: window.innerHeight,
+                  dpr: window.devicePixelRatio ?? 1,
+                  scrollX: window.scrollX,
+                  scrollY: window.scrollY,
+                }),
+                [],
+              );
+              const viewportHeight = Math.max(1, Math.round(probe.viewportHeight));
+              const dpr = probe.dpr;
+
+              // 进入循环前先把 offscreen 文档拉起来。`crop-image`（每条一次）
+              // 和 `composite-vertical`（末尾一次）都在那边处理；
+              // `chrome.runtime.sendMessage` 在没监听器时会静默 resolve 成
+              // `undefined`——而新会话里如果之前没跑过 `screenshot` /
+              // `read-page`，offscreen 还没建过，第一次 region pick 就会撞上
+              // 这条路径，`cropResp.error` 抛出
+              // "Cannot read properties of undefined (reading 'error')"。
               await ensureOffscreen();
-              const resp = (await chrome.runtime.sendMessage({
-                type: 'crop-image',
-                imageData: base64,
-                crop: {
-                  x: Math.round(cssRect.x * dpr),
-                  y: Math.round(cssRect.y * dpr),
-                  width: Math.round(cssRect.width * dpr),
-                  height: Math.round(cssRect.height * dpr),
-                },
-              })) as OffscreenResponse;
-              if (resp?.error || !resp?.result) {
-                throw new Error(resp?.error ?? 'crop-image returned no result');
+
+              // 滚动-拼接：每个条从顶向下抓一个 viewport 高度的切片，
+              // 不重叠、不留缝（页面按精确的 CSS px 滚动，渲染器会照办）。
+              //
+              // 水平 scroll 在整个循环里钉死在 `origScrollX`。最早的做法是
+              // 横向 `scrollTo(cssRect.x, y)`，但多数页面无法横向滚动——
+              // `scrollTo` 会被静默 clamp、`scrollX` 保持原值，但裁切仍用
+              // `x=0`，结果拖到视口右侧却截到左侧。把 `scrollX` 锁住、
+              // 每条按 rect↔viewport 交集来裁，简单又鲁棒——
+              // **前提**是 rect 横向能塞进视口。如果页面能横向滚动且
+              // rect 比 viewport 还宽，超出 `origScrollX + viewportWidth`
+              // 那段就抓不到（绝大多数页面横向不滚动，所以这条是
+              // 已知的、暂时接受的小限制）。
+              const strips: { base64: string }[] = [];
+              const viewportWidth = Math.max(1, Math.round(probe.viewportWidth));
+              const origScrollX = probe.scrollX;
+              const origScrollY = probe.scrollY;
+              try {
+                // Chrome 对同一 tab 的 `chrome.tabs.captureVisibleTab`
+                // 限速 2 次/秒（MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND）。
+                // scroll-and-stitch 每条 strip 调一次，3+ 条的高 rect
+                // 不节流就会撞 quota，Chrome 抛
+                // "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota."
+                // 上一条距今不到 550ms 就等到满再拍。
+                const CAPTURE_MIN_INTERVAL_MS = 550;
+                let lastCaptureAt = 0;
+                let y = cssRect.y;
+                while (y < cssRect.y + cssRect.height) {
+                  // 节流：上一条 capture 距今不足 550ms 就等到满再往下走。
+                  // 第一条 lastCaptureAt=0，跳过。
+                  if (lastCaptureAt > 0) {
+                    const elapsed = Date.now() - lastCaptureAt;
+                    if (elapsed < CAPTURE_MIN_INTERVAL_MS) {
+                      await new Promise<void>((r) => setTimeout(r, CAPTURE_MIN_INTERVAL_MS - elapsed));
+                    }
+                  }
+                  const remaining = cssRect.y + cssRect.height - y;
+                  const stripHeight = Math.min(viewportHeight, remaining);
+                  // 只滚竖向。横向保持在用户松手时的 scrollX，rect 在
+                  // viewport 里的左缘从那里算起。
+                  await executeInTabWithArgs<[number, number], void>(
+                    tabId,
+                    (sx, sy) => window.scrollTo(sx, sy),
+                    [origScrollX, Math.max(0, y)],
+                  );
+                  // 等一帧 + 一个小的 idle 窗口让布局稳定（sticky header、
+                  // 懒加载图、scroll snap）。
+                  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+                  await new Promise<void>((r) => setTimeout(r, 40));
+
+                  // `chrome.tabs.captureVisibleTab` 的第一个参数是 `windowId`、
+                  // 不是 `tabId`——传 tabId 进去 Chrome 去找一个不存在的 window，
+                  // 每次都静默失败。picker 在用户当前 active tab 里，松手时
+                  // 也在 active tab，省掉第一个参数就直接拍到正确 viewport。
+                  // 万一从 mouseup 到这条消息到达扩展侧之间用户切了 tab，
+                  // `screenshot.ts` 的 activate-target-tab 模式可以兜底——
+                  // 当前常见的「picker 仍在前台」场景用不上。
+                  const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 85 });
+                  const fullBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
+                  lastCaptureAt = Date.now();
+
+                  // 按本条的 rect↔viewport 交集裁。捕获出来的图像锚定在
+                  // 文档坐标 (origScrollX, y)，尺寸 viewportWidth × stripHeight
+                  // （CSS px），发给 offscreen 的 crop-image 要 IMAGE px，
+                  // 所以乘 DPR。`Math.max(0, ...)` / `Math.max(1, ...)` 是
+                  // 浮点噪声 + 未来重构的安全网，按构造实际上不可达。
+                  const ix0 = Math.max(cssRect.x, origScrollX);
+                  const ix1 = Math.min(cssRect.x + cssRect.width, origScrollX + viewportWidth);
+                  const cropWidthCss = Math.max(0, ix1 - ix0);
+                  if (cropWidthCss <= 0) {
+                    // 本条 rect 横向不与 viewport 相交（`scrollX` 锁住后
+                    // 实际不应发生，保守兜底，避免发一个 0 宽的 crop）。
+                    y += stripHeight;
+                    continue;
+                  }
+                  const cropResp = (await chrome.runtime.sendMessage({
+                    type: 'crop-image',
+                    imageData: fullBase64,
+                    crop: {
+                      x: Math.max(0, Math.round((ix0 - origScrollX) * dpr)),
+                      y: 0,
+                      width: Math.max(1, Math.round(cropWidthCss * dpr)),
+                      height: Math.max(1, Math.round(stripHeight * dpr)),
+                    },
+                  })) as OffscreenCropResponse | undefined;
+                  if (!cropResp) throw new Error('crop-image: no response from offscreen (document missing or shutting down)');
+                  if (cropResp.error) throw new Error(`Crop failed: ${cropResp.error}`);
+                  if (!cropResp.result) throw new Error('crop-image: offscreen returned an empty image');
+                  strips.push({ base64: cropResp.result });
+
+                  y += stripHeight;
+                }
+              } finally {
+                // 不论成功失败都要还原原始 scroll（tab 可能已经导航走了，catch 一下）。
+                await executeInTabWithArgs<[number, number], void>(
+                  tabId,
+                  (sx, sy) => window.scrollTo(sx, sy),
+                  [origScrollX, origScrollY],
+                ).catch(() => { /* tab may have navigated away */ });
               }
+
+              if (strips.length === 0) {
+                throw new Error('No strips produced for region capture');
+              }
+
+              // 单条时直接用，跳过 composite；多条才走 offscreen 的纵向 stacker。
+              const finalBase64 = strips.length === 1
+                ? strips[0].base64
+                : (await (async () => {
+                    const resp = (await chrome.runtime.sendMessage({
+                      type: 'composite-vertical',
+                      chunks: strips,
+                      mimeType: 'image/jpeg',
+                    })) as OffscreenCropResponse | undefined;
+                    if (!resp) throw new Error('composite-vertical: no response from offscreen (document missing or shutting down)');
+                    if (resp.error) throw new Error(`Composite failed: ${resp.error}`);
+                    if (!resp.result) throw new Error('composite-vertical: offscreen returned an empty image');
+                    return resp.result;
+                  })());
+
               resolve({
                 status: 'ok',
                 attachment: {
                   type: 'image',
                   source: 'region-select',
-                  data: resp.result,
+                  data: finalBase64,
                   mimeType: 'image/jpeg',
                 },
               });
             } catch (err) {
-              console.error('[Region Picker] capture/crop failed:', err);
+              console.error('[Region Picker] capture failed:', err);
               resolve({
                 status: 'error',
                 reason: 'injection-failed',
