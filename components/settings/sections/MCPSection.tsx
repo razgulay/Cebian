@@ -1,6 +1,6 @@
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { mcpServers } from '@/lib/persistence/storage';
-import { MCPServerCard } from '@/components/settings/mcp/MCPServerCard';
+import { MCPServerSortableList } from '@/components/settings/mcp/MCPServerSortableList';
 import { MCPServerAddForm } from '@/components/settings/mcp/MCPServerForm';
 import { t } from '@/lib/i18n';
 
@@ -27,11 +27,7 @@ export function MCPSection() {
           <p className="text-xs text-muted-foreground mt-1">{t('settings.mcp.empty.hint')}</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {servers.map((s) => (
-            <MCPServerCard key={s.id} server={s} />
-          ))}
-        </div>
+        <MCPServerSortableList servers={servers} />
       )}
 
       <MCPServerAddForm />
