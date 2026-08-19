@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assertJsonSerializable, type AgentMessage } from '@earendil-works/pi-agent-core';
-import { replaceUserText, sanitizeAgentMessages } from './message-helpers';
+import { replaceUserText, sanitizeAgentMessages, stripDirectives, extractInlineDirectives, extractInlineDirectivesFromMessage, extractUserText } from './message-helpers';
 
 // 用 `as unknown as AgentMessage[]` 构造违反类型契约的运行时数据（这正是本函数要兜的场景）。
 const asMessages = (arr: unknown[]) => arr as unknown as AgentMessage[];
@@ -181,6 +181,55 @@ describe('sanitizeAgentMessages', () => {
     expect((out[0] as any).content[0].arguments).toBe(null);
   });
 
+  it('移除 block 内值为 undefined 的属性，使其满足 durable payload 契约', () => {
+    const toolResultBlock = {
+      type: 'toolResult',
+      toolCallId: 't',
+      content: [{ type: 'text', text: 'ok' }],
+      isError: undefined,
+      metadata: undefined,
+    };
+    const msg = {
+      role: 'toolResult',
+      toolCallId: 't',
+      content: [toolResultBlock],
+      timestamp: 1,
+    };
+    const out = sanitizeAgentMessages(asMessages([msg]));
+
+    expect(() => assertJsonSerializable(out)).not.toThrow();
+    const sanitizedBlock = (out[0] as any).content[0];
+    expect(Object.hasOwn(sanitizedBlock, 'isError')).toBe(false);
+    expect(Object.hasOwn(sanitizedBlock, 'metadata')).toBe(false);
+    expect(Object.hasOwn(toolResultBlock, 'isError')).toBe(true);
+  });
+
+  it('移除 details 对象内值为 undefined 的属性', () => {
+    const msg = {
+      role: 'toolResult',
+      toolCallId: 't',
+      toolName: 'demo',
+      content: [{ type: 'text', text: 'ok' }],
+      details: {
+        server: { id: '1', name: 'srv' },
+        structured: undefined, // this caused the crash
+      },
+      isError: false,
+      timestamp: 1,
+    };
+    const out = sanitizeAgentMessages(asMessages([msg]));
+
+    expect(() => assertJsonSerializable(out)).not.toThrow();
+    const details = (out[0] as any).details;
+    expect(Object.hasOwn(details, 'structured')).toBe(false);
+    expect(Object.hasOwn(details, 'server')).toBe(true);
+    // original is unmutated
+    expect(Object.hasOwn(msg.details, 'structured')).toBe(true);
+  });
+});
+
+describe('extractInlineDirectives', () => {
+
   it('矫正发生在中间时，其后干净的消息仍走透传分支保持引用', () => {
     const bad = { role: 'assistant', content: [{ type: 'text', text: null }], timestamp: 1 };
     const cleanTail = { role: 'user', content: [{ type: 'text', text: 'hi' }], timestamp: 2 };
@@ -245,5 +294,173 @@ describe('replaceUserText', () => {
     );
     expect(out.content).toHaveLength(2);
     expect(out.content[1]).toEqual({ type: 'text', text: '新' });
+  });
+});
+
+describe('stripDirectives', () => {
+  it('剥掉单个 COMMAND 块，保留用户敲的字', () => {
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nAlways respond in English.\n\n[END DIRECTIVE]\n\n---\n\nxin chào';
+    expect(stripDirectives(text)).toBe('xin chào');
+  });
+
+  it('剥掉多个堆叠指令（PROMPT + SKILL + COMMAND）并按出现顺序保留用户字', () => {
+    const text = [
+      '[DIRECTIVE — ATTACHED PROMPT: "a"]\n\nbody A\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED SKILL: "b"]\n\nbody B\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED COMMAND: "c"]\n\nbody C\n\n[END DIRECTIVE]',
+      '---',
+      'user words',
+    ].join('\n\n');
+    expect(stripDirectives(text)).toBe('user words');
+  });
+
+  it('剥掉指令后把残留的 `---` 分隔线和连续空行归一成标准换行', () => {
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n\n\n\n   ---   \n\n\n\nfinal';
+    expect(stripDirectives(text)).toBe('final');
+  });
+
+  it('对没有指令的文本只做 trim（不动）', () => {
+    expect(stripDirectives('  hello world  ')).toBe('hello world');
+  });
+
+  it('剥掉带 pinned="true" 的指令块', () => {
+    const text = '[DIRECTIVE — ATTACHED SKILL: "reminder" pinned="true"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi';
+    expect(stripDirectives(text)).toBe('hi');
+  });
+
+  it('幂等：跑两次和跑一次结果相同', () => {
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi';
+    const once = stripDirectives(text);
+    const twice = stripDirectives(once);
+    expect(twice).toBe(once);
+  });
+
+  it('纯指令（无 --- 分隔符也无用户字）剥完返回空串', () => {
+    // ChatInput 在用户只输入 `/foo` 没敲别的字时，组装出的就是这种形状：
+    //   `<user-request>${slashDirective}</user-request>`
+    // 没有 `\n\n---\n\n` 分隔符，也没有用户字。剥完后应为空串，气泡不显示字。
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]';
+    expect(stripDirectives(text)).toBe('');
+  });
+});
+
+describe('extractInlineDirectives', () => {
+  it('识别 COMMAND 类型并返回正确的 name', () => {
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'command', name: 'english', pinned: false },
+    ]);
+  });
+
+  it('没有指令时返回空数组', () => {
+    expect(extractInlineDirectives('just plain text')).toEqual([]);
+  });
+
+  it('多指令按源顺序返回', () => {
+    const text = [
+      '[DIRECTIVE — ATTACHED PROMPT: "a"]\n\nA\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED SKILL: "b"]\n\nB\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED COMMAND: "c"]\n\nC\n\n[END DIRECTIVE]',
+    ].join('\n\n---\n\n');
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'prompt', name: 'a', pinned: false },
+      { kind: 'skill', name: 'b', pinned: false },
+      { kind: 'command', name: 'c', pinned: false },
+    ]);
+  });
+
+  it('正确解析 pinned="true" 标记', () => {
+    const text = '[DIRECTIVE — ATTACHED PROMPT: "english" pinned="true"]\n\nbody\n\n[END DIRECTIVE]';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'prompt', name: 'english', pinned: true },
+    ]);
+  });
+
+  it('半截指令（缺少 [END DIRECTIVE]）的 open 行不被误判（BLOCK_RE 会泄漏但 OPEN_RE 仍识别开头）', () => {
+    // extractInlineDirectives 只看开头行——所以「只有开头行」的伪指令仍被识别为合法指令。
+    // stripDirectives 处理完整块，行为见对应 describe。
+    const text = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody without close';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'command', name: 'x', pinned: false },
+    ]);
+  });
+});
+
+describe('extractInlineDirectivesFromMessage', () => {
+  const wrap = (text: string) => `<user-request>\n${text}\n</user-request>`;
+
+  it('从 <user-request> 内文里抽出指令元信息', () => {
+    const msg = {
+      role: 'user',
+      content: wrap('[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi'),
+      timestamp: 1,
+    } as any;
+    expect(extractInlineDirectivesFromMessage(msg)).toEqual([
+      { kind: 'command', name: 'english', pinned: false },
+    ]);
+  });
+
+  it('非 user 角色返回空数组', () => {
+    expect(extractInlineDirectivesFromMessage({ role: 'assistant', content: 'x', timestamp: 1 } as any)).toEqual([]);
+  });
+
+  it('从块数组 content 里也读得到（text 块里包着 <user-request>）', () => {
+    const msg = {
+      role: 'user',
+      content: [{ type: 'text', text: wrap('[DIRECTIVE — ATTACHED SKILL: "search"]\n\nb\n\n[END DIRECTIVE]\n\n---\n\nq') }],
+      timestamp: 1,
+    } as any;
+    expect(extractInlineDirectivesFromMessage(msg)).toEqual([
+      { kind: 'skill', name: 'search', pinned: false },
+    ]);
+  });
+
+  it('混合 pin 和非-pin 指令都抽出（Message.tsx 用 d.pinned 决定是否渲染 chip）', () => {
+    // Pin chip đã ở composer strip, không lặp trên bubble.
+    // Slash/mention chip (không pin) v�n render để confirm đã attach.
+    const msg = {
+      role: 'user',
+      content: wrap([
+        '[DIRECTIVE — ATTACHED PROMPT: "pinned-prompt" pinned="true"]\n\nbody A\n\n[END DIRECTIVE]',
+        '[DIRECTIVE — ATTACHED SKILL: "search"]\n\nbody B\n\n[END DIRECTIVE]',
+        '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody C\n\n[END DIRECTIVE]',
+        'q',
+      ].join('\n\n---\n\n')),
+      timestamp: 1,
+    } as any;
+    expect(extractInlineDirectivesFromMessage(msg)).toEqual([
+      { kind: 'prompt', name: 'pinned-prompt', pinned: true },
+      { kind: 'skill', name: 'search', pinned: false },
+      { kind: 'command', name: 'english', pinned: false },
+    ]);
+  });
+});
+
+describe('extractUserText + stripDirectives 集成', () => {
+  const wrap = (text: string) => `<user-request>\n${text}\n</user-request>`;
+
+  it('带指令的 user 消息提取出的文本不包含指令块 / 分隔线', () => {
+    const msg = {
+      role: 'user',
+      content: wrap('[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nxin chào'),
+      timestamp: 1,
+    } as any;
+    const text = extractUserText(msg);
+    expect(text).toBe('xin chào');
+    expect(text).not.toContain('[DIRECTIVE');
+    expect(text).not.toContain('---');
+  });
+
+  it('裸文本（无 <user-request> 包裹）也走 strip 路径', () => {
+    const msg = {
+      role: 'user',
+      content: '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]\n\n---\n\nhi',
+      timestamp: 1,
+    } as any;
+    expect(extractUserText(msg)).toBe('hi');
+  });
+
+  it('非 user 角色返回空串', () => {
+    expect(extractUserText({ role: 'assistant', content: 'x', timestamp: 1 } as any)).toBe('');
   });
 });

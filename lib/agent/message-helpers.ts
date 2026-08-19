@@ -52,6 +52,55 @@ export function findToolResult(
 
 const USER_REQUEST_RE = /<user-request>\s*([\s\S]*?)\s*<\/user-request>/;
 
+// ─── 内联指令块（mention chip + slash command）───
+// 三种指令共享同一个开头格式：
+//   [DIRECTIVE — ATTACHED (PROMPT|SKILL|COMMAND): "name"( pinned="true")?]
+//   <body>
+//   [END DIRECTIVE]
+//   ---\n
+//   <用户敲的字>
+// 这里解析出头行的 kind/name/pinned；`stripDirectives` 用来把整个块（连同
+// 块与块之间、块与用户字之间的 `---` 分隔线）一并剥掉，让气泡只显示用户
+// 自己敲的文字。模型侧仍按原样接收完整文本（见 rewrite-last-user-message.ts）。
+
+export type InlineDirectiveKind = 'prompt' | 'skill' | 'command';
+
+export interface InlineDirective {
+  kind: InlineDirectiveKind;
+  name: string;
+  pinned: boolean;
+}
+
+const INLINE_DIRECTIVE_OPEN_RE =
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND):\s+"([^"]*)"(\s+pinned="true")?\]/g;
+
+// 匹配完整的指令块（开头行 + 中间任意字符 + 关闭标记）
+const INLINE_DIRECTIVE_BLOCK_RE =
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
+
+/** 从用户消息文本里抽取出所有内联指令的开头元信息（按出现顺序） */
+export function extractInlineDirectives(text: string): InlineDirective[] {
+  const out: InlineDirective[] = [];
+  for (const m of text.matchAll(INLINE_DIRECTIVE_OPEN_RE)) {
+    out.push({
+      kind: m[1].toLowerCase() as InlineDirectiveKind,
+      name: m[2],
+      pinned: Boolean(m[3]),
+    });
+  }
+  return out;
+}
+
+/** 把指令块本身、以及块与块/块与用户字之间的 `---` 分隔线一并剥掉，
+ *  返回用户在指令之后实际敲的字。幂等：对没有指令的文本直接原样 trim。 */
+export function stripDirectives(text: string): string {
+  return text
+    .replace(INLINE_DIRECTIVE_BLOCK_RE, '')
+    .replace(/\n{0,3}-{3,}\n{0,3}/g, '\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** Extract the raw text string from a user message (handles string and block-array formats). */
 function getRawUserText(msg: Message): string {
   if (typeof msg.content === 'string') return msg.content;
@@ -65,12 +114,27 @@ function getRawUserText(msg: Message): string {
 }
 
 /** Extract the user's actual input text from a structured user message.
- *  Reads the content of the <user-request> block. */
+ *  Reads the content of the <user-request> block, then strips any inline
+ *  directive blocks (mention chips / slash commands) so the bubble shows
+ *  only the words the user actually typed. The model still receives the
+ *  full directive block via the agent runtime. */
 export function extractUserText(msg: Message): string {
   if (msg.role !== 'user') return '';
   const raw = getRawUserText(msg);
   const match = raw.match(USER_REQUEST_RE);
-  return match ? match[1].trim() : raw.trim();
+  const inner = match ? match[1] : raw;
+  return stripDirectives(inner);
+}
+
+/** 从 user 消息的 `<user-request>` 内文里抽出所有内联指令（PROMPT/SKILL/COMMAND）。
+ *  与 `extractUserText` 不同：这里返回「指令长什么样」，而非「用户敲了什么」，
+ *  供 UI（气泡上方 chip 条）渲染。文本本身仍由 `extractUserText` 提供。 */
+export function extractInlineDirectivesFromMessage(msg: Message): InlineDirective[] {
+  if (msg.role !== 'user') return [];
+  const raw = getRawUserText(msg);
+  const match = raw.match(USER_REQUEST_RE);
+  const inner = match ? match[1] : raw;
+  return extractInlineDirectives(inner);
 }
 
 const ELEMENT_RE = /<selected-element\s+selector="([^"]*)"[^>]*>/g;
@@ -185,13 +249,15 @@ export function replaceUserText<M extends Message>(msg: M, newText: string): M {
 /** 把单个内容块里为 null / undefined 的字符串字段兜成空串；块无需矫正时原样返回同一引用 */
 function sanitizeBlock(block: unknown): unknown {
   if (!block || typeof block !== 'object') return block;
-  const b = block as Record<string, unknown>;
+  // Apply omitUndefinedFields to strip any undefined properties like isError: undefined
+  // BEFORE we apply the custom null-to-empty-string coercions below.
+  const b = omitUndefinedFields(block as object) as Record<string, unknown>;
   // text / thinking / name 在 pi 类型里都是 string；个别 provider 返回或旧数据可能落成
   // null，`== null` 同时覆盖 null 与 undefined
   if (b.type === 'text' && b.text == null) return { ...b, text: '' };
   if (b.type === 'thinking' && b.thinking == null) return { ...b, thinking: '' };
   if (b.type === 'toolCall' && b.name == null) return { ...b, name: '' };
-  return block;
+  return b;
 }
 
 /** 矫正一个内容块数组；无改动时原样返回同一引用，只复制受影响的块 */
@@ -225,7 +291,19 @@ function sanitizeMessage(msg: AgentMessage): AgentMessage {
   if (msg.role !== 'user' && msg.role !== 'assistant' && msg.role !== 'toolResult') {
     return msg;
   }
-  const clean = omitUndefinedFields(msg);
+  const baseClean = omitUndefinedFields(msg);
+  let clean = baseClean;
+
+  // Custom tools (e.g. MCP) often inject arbitrary metadata into 'details'.
+  // If 'details' is an object, scrub it too so nested undefined properties
+  // don't crash pi-agent-core's recursive json-serializable check.
+  if (clean.role === 'toolResult' && clean.details && typeof clean.details === 'object') {
+    const cleanDetails = omitUndefinedFields(clean.details as object);
+    if (cleanDetails !== clean.details) {
+      clean = { ...clean, details: cleanDetails } as any;
+    }
+  }
+
   const content: unknown = (clean as Message).content;
   // 顶层 content 缺失 → 空数组（对齐 pi transformMessages 的规整）
   if (content == null) {
