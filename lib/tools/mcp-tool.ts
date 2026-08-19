@@ -164,7 +164,7 @@ export function createMCPAgentTool(
           details: {
             server: { id: server.id, name: server.name },
             tool: mcpTool.name,
-            structured: result.structuredContent,
+            ...(result.structuredContent !== undefined ? { structured: result.structuredContent } : {}),
             ...(mcpApp ? { mcpApp } : {}),
           },
         };

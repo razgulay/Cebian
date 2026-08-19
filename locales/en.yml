@@ -12,6 +12,7 @@ common:
   newChat: "New chat"
   send: "Send"
   history: "History"
+  sidebar: "Sidebar"
   # History list date groupings (by last-activity time)
   historyGroup:
     today: "Today"
@@ -321,6 +322,7 @@ settings:
       toggle: "Enable server"
       edit: "Edit server"
       delete: "Delete server"
+      dragHandle: "Drag to reorder"
       deleteConfirmTitle: "Delete MCP server?"
       # $1 = server name
       deleteConfirmDescription: "\"$1\" will be removed. This cannot be undone."

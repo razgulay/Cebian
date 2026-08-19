@@ -167,6 +167,29 @@ export async function removeMCPServer(id: string): Promise<void> {
 }
 
 /**
+ * Move a server from `fromIndex` to `toIndex` in the persisted list. No-op
+ * when either index is out of range or both indices point at the same slot —
+ * the caller (DndContext onDragEnd) may report stale indices during a
+ * cancel/drop-on-self interaction, so guard at the boundary rather than
+ * throwing.
+ *
+ * Reorder does NOT bump `updatedAt`: the records themselves didn't change,
+ * only their order. Storage write is the same atomic `setValue` shape used
+ * by the other helpers here, so concurrent edits from the settings form /
+ * the sidebar drawer stay coherent.
+ */
+export async function reorderMCPServers(fromIndex: number, toIndex: number): Promise<void> {
+  const all = await mcpServers.getValue();
+  if (fromIndex < 0 || fromIndex >= all.length) return;
+  if (toIndex < 0 || toIndex >= all.length) return;
+  if (fromIndex === toIndex) return;
+  const next = [...all];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  await mcpServers.setValue(next);
+}
+
+/**
  * Toggle the `enabled` flag without re-validating transport/auth, so users can
  * disable a record that has become invalid (e.g. expired token, stricter
  * validator shipped in a later version).

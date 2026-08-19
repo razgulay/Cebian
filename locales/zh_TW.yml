@@ -11,6 +11,7 @@ common:
   newChat: "新對話"
   send: "傳送"
   history: "歷史記錄"
+  sidebar: "側邊欄"
   # 歷史清單依最後活動時間分組
   historyGroup:
     today: "今天"
@@ -314,6 +315,7 @@ settings:
       toggle: "啟用伺服器"
       edit: "編輯伺服器"
       delete: "刪除伺服器"
+      dragHandle: "拖曳以重新排序"
       deleteConfirmTitle: "刪除 MCP 伺服器？"
       # $1 = 伺服器名稱
       deleteConfirmDescription: "「$1」將被刪除，此操作無法復原。"
