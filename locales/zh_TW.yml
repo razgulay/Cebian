@@ -203,7 +203,7 @@ settings:
     title: "外觀"
     fontSize:
       label: "聊天字級"
-      hint: "拖動滑桿精細調整側邊欄聊天中使用者訊息和助手回覆的字級，範圍 14–15 像素（步進 0.1），預設 14 像素。"
+      hint: "拖動滑桿精細調整側邊欄聊天中使用者訊息和助手回覆的字級，範圍 15–18 像素（步進 0.5），預設 15 像素。"
       preview: "預覽 — The quick brown fox jumps over the lazy dog."
     fontFamily:
       label: "聊天字體"

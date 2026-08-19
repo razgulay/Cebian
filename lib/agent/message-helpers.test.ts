@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assertJsonSerializable, type AgentMessage } from '@earendil-works/pi-agent-core';
-import { replaceUserText, sanitizeAgentMessages, stripDirectives, extractInlineDirectives, extractInlineDirectivesFromMessage, extractUserText } from './message-helpers';
+import { replaceUserText, sanitizeAgentMessages, stripDirectives, extractInlineDirectives, extractInlineDirectivesFromMessage, extractUserText, getAssistantText, getLeakedThinking } from './message-helpers';
 
 // 用 `as unknown as AgentMessage[]` 构造违反类型契约的运行时数据（这正是本函数要兜的场景）。
 const asMessages = (arr: unknown[]) => arr as unknown as AgentMessage[];
@@ -462,5 +462,103 @@ describe('extractUserText + stripDirectives 集成', () => {
 
   it('非 user 角色返回空串', () => {
     expect(extractUserText({ role: 'assistant', content: 'x', timestamp: 1 } as any)).toBe('');
+  });
+});
+
+// `<think>...</think>` reasoning inline trong text content block (provider
+// không split thành `{type:'thinking'}` riêng) phải được tách ra thành
+// ThinkingBlock thay vì để raw tag lộ trong chat bubble.
+describe('think-tag leak handling', () => {
+  const asAssistant = (content: unknown[]) =>
+    ({ role: 'assistant', content, timestamp: 1 } as any);
+
+  describe('getAssistantText', () => {
+    it('text không có think tag → giữ nguyên', () => {
+      const msg = asAssistant([{ type: 'text', text: 'plain answer' }]);
+      expect(getAssistantText(msg)).toBe('plain answer');
+    });
+
+    it('text chứa một cặp think tag → strip tag + body, trả phần answer', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>the model is thinking</think>real answer' },
+      ]);
+      expect(getAssistantText(msg)).toBe('real answer');
+    });
+
+    it('text chỉ có think tag (chưa có answer) → trả rỗng', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>still thinking, no answer yet' },
+      ]);
+      expect(getAssistantText(msg)).toBe('');
+    });
+
+    it('nhiều cặp think tag trong cùng block → strip tất cả', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>first think</think>middle<think>second think</think>end' },
+      ]);
+      expect(getAssistantText(msg)).toBe('middleend');
+    });
+
+    it('nhiều text block → join trước khi strip', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>first think</think>hello ' },
+        { type: 'text', text: 'world<think>second think</think>' },
+      ]);
+      expect(getAssistantText(msg)).toBe('hello world');
+    });
+
+    it('mm:think prefix cũng bị strip', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<mm:think>r</mm:think>answer' },
+      ]);
+      expect(getAssistantText(msg)).toBe('answer');
+    });
+
+    it('mixed: thinking content block + leaked tag trong text → chỉ strip phần text', () => {
+      const msg = asAssistant([
+        { type: 'thinking', thinking: 'structured thinking' },
+        { type: 'text', text: '<think>leaked inline</think>real answer' },
+      ]);
+      expect(getAssistantText(msg)).toBe('real answer');
+    });
+  });
+
+  describe('getLeakedThinking', () => {
+    it('text không có think tag → trả mảng rỗng', () => {
+      const msg = asAssistant([{ type: 'text', text: 'plain answer' }]);
+      expect(getLeakedThinking(msg)).toEqual([]);
+    });
+
+    it('text có một cặp think tag → trả reasoning body', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>reasoning here</think>answer' },
+      ]);
+      expect(getLeakedThinking(msg)).toEqual(['reasoning here']);
+    });
+
+    it('text có nhiều cặp → trả từng body theo thứ tự', () => {
+      const msg = asAssistant([
+        { type: 'text', text: '<think>first</think>middle<think>second</think>' },
+      ]);
+      expect(getLeakedThinking(msg)).toEqual(['first', 'second']);
+    });
+
+    it('chỉ có tag chưa đóng (streaming mid-flight) → reasoning đoạn đang stream', () => {
+      const msg = asAssistant([{ type: 'text', text: '<think>still streaming' }]);
+      expect(getLeakedThinking(msg)).toEqual(['still streaming']);
+    });
+
+    it('mixed: structured thinking block + leaked tag → chỉ trả leaked', () => {
+      const msg = asAssistant([
+        { type: 'thinking', thinking: 'structured' },
+        { type: 'text', text: '<think>leaked</think>' },
+      ]);
+      expect(getLeakedThinking(msg)).toEqual(['leaked']);
+    });
+
+    it('msg không có text block → trả mảng rỗng (không crash)', () => {
+      const msg = asAssistant([{ type: 'thinking', thinking: 'only structured' }]);
+      expect(getLeakedThinking(msg)).toEqual([]);
+    });
   });
 });

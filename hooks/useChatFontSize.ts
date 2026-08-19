@@ -19,11 +19,11 @@ import {
  * migration (which would race with other tabs).
  */
 const LEGACY_FONT_SIZE_PX: Record<string, ChatFontSize> = {
-  xs: 14,
-  sm: 14.25,
-  md: 14.5,
-  lg: 14.75,
-  xl: 15,
+  xs: 15,
+  sm: 15.5,
+  md: 16,
+  lg: 16.5,
+  xl: 17,
 };
 
 /** Clamp + round to the slider step (default 0.1 px). */

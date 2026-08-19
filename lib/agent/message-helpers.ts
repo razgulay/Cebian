@@ -9,6 +9,7 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { unescapeXml } from '@/lib/utils';
+import { stripThinkTags } from './think-tags';
 
 // ─── Parsed attachment metadata for UI display ───
 
@@ -19,12 +20,38 @@ export interface ParsedUserAttachments {
   recordings: { name: string; eventCount: number; durationMs: number; truncated: boolean; json: string }[];
 }
 
-/** Extract plain text from an AssistantMessage's content blocks */
+/** Extract plain text from an AssistantMessage's content blocks, with inline
+ *  `<think>...</think>` tags stripped out. Some providers / models (notably
+ *  MiniMax M3, DeepSeek-distill, etc.) emit the reasoning inline in a `text`
+ *  content block instead of a separate `{type: 'thinking'}` block. Without
+ *  this strip, the raw `<think>...` literal would leak into the chat bubble.
+ *  Callers that want the leaked reasoning body should pair this with
+ *  `getLeakedThinking`. The parser is idempotent: title generation, which
+ *  also calls `stripThinkTags` internally, sees already-clean text and
+ *  short-circuits via the fast-path. */
 export function getAssistantText(msg: AssistantMessage): string {
-  return msg.content
+  const raw = msg.content
     .filter((b): b is TextContent => b.type === 'text')
     .map((b) => b.text)
     .join('');
+  return stripThinkTags(raw).text;
+}
+
+/** Reasoning bodies that the upstream provider put inline in `text` content
+ *  blocks (instead of structured `{type: 'thinking'}` blocks) and that
+ *  `getAssistantText` just stripped out. Returns an array of reasoning
+ *  strings in source order, or `[]` when there was no leak — so the chat
+ *  renderer can safely map this into one `<ThinkingBlock>` per entry without
+ *  duplicating the provider-channel thinking that `getThinkingBlocks` already
+ *  surfaces. A single message may legitimately contain both: provider-channel
+ *  thinking blocks AND inline-tag leaks in the same text, depending on how
+ *  pi-agent-core's adapter split the stream. */
+export function getLeakedThinking(msg: AssistantMessage): string[] {
+  const raw = msg.content
+    .filter((b): b is TextContent => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
+  return stripThinkTags(raw).reasoning;
 }
 
 /** Extract thinking blocks from an AssistantMessage (skips empty summaries) */

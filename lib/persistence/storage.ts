@@ -493,11 +493,11 @@ export const debugLogSettings = defineLoggedItem<DebugLogSettings>(
 export type ChatFontSize = number;
 
 /** Slider bounds — kept in sync with the UI control in AppearanceSection. */
-export const CHAT_FONT_SIZE_MIN = 14;
-export const CHAT_FONT_SIZE_MAX = 15;
-export const CHAT_FONT_SIZE_STEP = 0.1;
+export const CHAT_FONT_SIZE_MIN = 15;
+export const CHAT_FONT_SIZE_MAX = 18;
+export const CHAT_FONT_SIZE_STEP = 0.5;
 
-export const DEFAULT_CHAT_FONT_SIZE: ChatFontSize = 14;
+export const DEFAULT_CHAT_FONT_SIZE: ChatFontSize = 15;
 
 export const chatFontSize = defineLoggedItem<ChatFontSize>(
   'local:chatFontSize',

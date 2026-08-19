@@ -210,7 +210,7 @@ settings:
     title: "Appearance"
     fontSize:
       label: "Chat font size"
-      hint: "Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 14–15 px (step 0.1). Default 14 px."
+      hint: "Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 15–18 px (step 0.5). Default 15 px."
       preview: "Preview — The quick brown fox jumps over the lazy dog."
     fontFamily:
       label: "Chat font family"

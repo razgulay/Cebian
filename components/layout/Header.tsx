@@ -43,20 +43,20 @@ export function Header({ title, isNewChat, theme, onToggleTheme, onOpenSettings,
         <div className="flex items-center gap-2">
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon-xs" onClick={handleNewChat}>
-                <SquarePen className="size-4.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{t('common.newChat')}</TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
               <Button variant="ghost" size="icon-xs" onClick={handleOpenSidebar}>
                 <PanelLeft className="size-4.5" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t('common.sidebar')}</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon-xs" onClick={handleNewChat}>
+                <SquarePen className="size-4.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t('common.newChat')}</TooltipContent>
           </Tooltip>
         </div>
 

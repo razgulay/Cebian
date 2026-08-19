@@ -2,7 +2,7 @@
  * AppearanceSection — chat appearance settings.
  *
  * Exposes:
- *  - Chat font size: continuous slider 14–15 px (step 0.1), default 14.
+ *  - Chat font size: slider 15–18 px (step 0.5), default 15.
  *  - Chat font family: 4 common sans-serifs (Geist, Inter, Roboto, System).
  *
  * Both values are persisted via `chatFontSize` / `chatFontFamily` and

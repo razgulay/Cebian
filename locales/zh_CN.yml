@@ -203,7 +203,7 @@ settings:
     title: "外观"
     fontSize:
       label: "聊天字号"
-      hint: "拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 14–15 像素（步长 0.1），默认 14 像素。"
+      hint: "拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 15–18 像素（步长 0.5），默认 15 像素。"
       preview: "预览 — The quick brown fox jumps over the lazy dog."
     fontFamily:
       label: "聊天字体"

@@ -466,7 +466,7 @@ export function ThinkingBlock({ content, isLive }: { content: string; isLive?: b
     wasLive.current = !!isLive;
   }, [isLive]);
 
-  const isOpen = isLive || manualOpen;
+  const isOpen = manualOpen;
 
   return (
     <div className="border border-border rounded-lg overflow-hidden text-xs bg-card/30">
