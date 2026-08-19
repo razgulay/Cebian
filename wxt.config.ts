@@ -81,7 +81,7 @@ export default defineConfig({
             "sandbox allow-scripts allow-forms allow-popups allow-modals; " +
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob:; " +
             "style-src 'self' 'unsafe-inline' https: data:; " +
-            "connect-src 'self' https: wss: data: blob:; " +
+            "connect-src 'self' https: wss: data: blob: http://localhost:* http://127.0.0.1:*; " +
             "img-src 'self' data: blob: https:; " +
             "font-src 'self' data: https:; " +
             "media-src 'self' data: blob: https:; " +
@@ -98,12 +98,17 @@ export default defineConfig({
           // "Insecure CSP value"). Our entry points ship as external scripts via
           // WXT/Vite's bundler, so `'self'` is sufficient; no inline <script>
           // or eval() lives on these pages.
+          //
+          // `connect-src` also widened to `http://localhost:* http://127.0.0.1:*`
+          // so custom OpenAI-compatible providers pointing at local proxies
+          // (9router, LM Studio, Ollama, etc.) can be reached. Loopback only —
+          // doesn't extend to arbitrary `http://*`.
           extension_pages:
             "script-src 'self'; " +
             "style-src 'self' 'unsafe-inline' https:; " +
             "font-src https: data:; " +
             "img-src 'self' data: blob: https:; " +
-            "connect-src 'self' https: wss: data: blob:; " +
+            "connect-src 'self' https: wss: data: blob: http://localhost:* http://127.0.0.1:*; " +
             "media-src 'self' data: blob: https:;",
         },
   }),
