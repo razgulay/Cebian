@@ -618,13 +618,14 @@ chat:
     pinReadFailed: "已固定的上下文读取失败——本轮跳过：$1"
     # $1 = 固定项名称, $2 = 连续失败次数
     pinAutoRemoved: "已取消固定「$1」——连续 $2 条消息未找到来源"
-    # 把 prompt / skill 钉在本次聊天里：本会话每条消息都会自动附带其内容；
-    # 换到新会话清空，需重新钉选。
+    # 把 prompt / skill 固定到全局：每条对话的每条消息都会自动附带其内容；
+    # 跨会话持久生效，取消前会在所有对话中同步显示；文件夹 / 文件 / RAG
+    # 固定仍仅限当前会话。
     sectionPinned: "已固定"
     pinnedAutoHint: "自动"
-    pinnedChips: "本次聊天自动附带"
-    togglePin: "钉到本次聊天"
-    unpin: "从本次聊天取消固定"
+    pinnedChips: "每条对话自动附带"
+    togglePin: "固定到所有对话"
+    unpin: "从所有对话取消固定"
   mention:
     builtinSkill:
       funFactsName: "趣味冷知识"

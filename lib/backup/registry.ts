@@ -33,6 +33,7 @@ import {
   chatFontSize,
   chatFontFamily,
   lastOpenSessionId,
+  composerPinnedContexts,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -410,6 +411,8 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: chatFontFamily, storageClass: 'exclude' }),
   // 上次打开的会话 id（设备本地 UI 状态，备份无意义）。
   entry({ item: lastOpenSessionId, storageClass: 'exclude' }),
+  // 聊天输入框固定的 Prompt / Skill（全局偏好，跨会话生效；无密钥）。
+  entry({ item: composerPinnedContexts, storageClass: 'settings' }),
 ];
 
 /** BACKUP_REGISTRY 中所有已登记的 storage key 集合（供覆盖性测试比对）。 */

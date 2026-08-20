@@ -618,13 +618,14 @@ chat:
     pinReadFailed: "已釘選的內容讀取失敗——本輪略過：$1"
     # $1 = 釘選項目名稱, $2 = 連續失敗次數
     pinAutoRemoved: "已取消釘選「$1」——連續 $2 則訊息找不到來源"
-    # 把 prompt / skill 釘選到本次聊天：本對話每則訊息都會自動附帶其內容；
-    # 換到新對話會清空，需重新釘選。
+    # 把 prompt / skill 釘選為全域：每個對話的每則訊息都會自動附帶其內容；
+    # 跨對話持續生效，取消前會在所有對話中同步顯示；資料夾 / 檔案 / RAG
+    # 釘選仍僅限目前對話。
     sectionPinned: "已釘選"
     pinnedAutoHint: "自動"
-    pinnedChips: "本次聊天自動附帶"
-    togglePin: "釘選到本次聊天"
-    unpin: "從本次聊天取消釘選"
+    pinnedChips: "每個對話自動附帶"
+    togglePin: "釘選到所有對話"
+    unpin: "從所有對話取消釘選"
   mention:
     builtinSkill:
       funFactsName: "趣味冷知識"

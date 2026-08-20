@@ -626,14 +626,15 @@ chat:
     pinReadFailed: "Pinned context couldn't be read — this turn: $1"
     # $1 = pin name, $2 = consecutive failure count
     pinAutoRemoved: "Pin '$1' removed — source not found for the last $2 messages"
-    # Pin a prompt or skill so it rides along on every message in the
-    # current chat (auto-included in <attachments>). Per-chat scope: a
-    # new session starts with an empty pin list.
+    # Pin a prompt or skill so it rides along on every message in every
+    # chat (auto-included in <attachments>). Global scope: pinned prompts
+    # and skills persist across all sessions until unpinned. Folder / file
+    # / RAG pins are still session-scoped.
     sectionPinned: "Pinned"
     pinnedAutoHint: "auto"
-    pinnedChips: "Auto-included in this chat"
-    togglePin: "Pin to current chat"
-    unpin: "Unpin from this chat"
+    pinnedChips: "Auto-included in every chat"
+    togglePin: "Pin across chats"
+    unpin: "Unpin from all chats"
   mention:
     builtinSkill:
       funFactsName: "Fun facts"

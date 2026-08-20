@@ -251,6 +251,36 @@ export const expandPromptsInline = defineLoggedItem<boolean>(
   { fallback: false },
 );
 
+/** Shape of a prompt / skill entry persisted in `composerPinnedContexts`.
+ *  We intentionally inline the two variants here (rather than importing
+ *  `PinnedMention` from `lib/agent/mention-resolver.ts`) so the persistence
+ *  layer does not grow a reverse dependency on agent code — the
+ *  consumer-side is the only thing that ever cares about the rich union
+ *  (vfs-dir / vfs-file / rag-collection variants exist there but are NOT
+ *  persisted, since folder / file / RAG pins stay session-scoped). */
+export type ComposerPinnedContext =
+  | { kind: 'prompt'; id: string; name: string; fileName: string }
+  | {
+      kind: 'skill';
+      id: string;
+      name: string;
+      filePath: string;
+      body: string;
+      isBuiltIn: boolean;
+    };
+
+/** Globally pinned prompts / skills for the chat composer. Once pinned,
+ *  the same item rides along on every chat (existing or new) until the
+ *  user unpins it; unpinning removes it everywhere at once. Real-time
+ *  sync across already-open sidepanels comes free via `useStorageItem`'s
+ *  `watch` subscription. Folder / file / RAG pins are deliberately NOT
+ *  stored here — they stay session-scoped React state in ChatInput
+ *  (transient VFS paths would be a poor roaming preference). */
+export const composerPinnedContexts = defineLoggedItem<ComposerPinnedContext[]>(
+  'local:composerPinnedContexts',
+  { fallback: [] },
+);
+
 /** Width of the file-tree panel inside FileWorkspace (Prompts / Skills sections). */
 export const settingsFilePanelWidth = defineLoggedItem<number>(
   'local:settingsFilePanelWidth',

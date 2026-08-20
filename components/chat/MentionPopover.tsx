@@ -45,7 +45,7 @@ interface MentionPopoverProps {
   /** Lookup so each CommandItem can render the right Pin icon state. */
   isPinned?: (id: string) => boolean;
   /** Add / remove a pin — called from the per-item Pin toggle button. */
-  onTogglePin?: (item: PinnedMention) => void;
+  onTogglePin?: (item: PinnedMention) => void | Promise<void>;
 }
 
 interface FolderListing {
@@ -290,7 +290,10 @@ export function MentionPopover({ disabled, onSelect, pinned = [], isPinned, onTo
                 latest content at send time. Per-kind icon makes it
                 obvious whether a prompt, skill, folder listing, or single
                 file is riding along — the filled Pin glyph stays amber so
-                "pinned" has a consistent visual cue regardless of kind. */}
+                "pinned" has a consistent visual cue regardless of kind.
+                Prompt / skill rows here are global (they outlive any
+                chat switch); folder / file / RAG rows are session-scoped
+                and disappear when the user leaves the chat. */}
             {pinned.length > 0 && (
               <CommandGroup heading={t('chat.composer.sectionPinned')}>
                 {pinned.map((p) => {

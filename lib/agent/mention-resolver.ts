@@ -49,13 +49,15 @@ export type MentionChip =
   | { kind: 'vfs-file'; id: string; path: string; label: string; size?: number }
   | { kind: 'rag-collection'; id: string; collection: string };
 
-/** "Pin" an item for the lifetime of the current chat — its full content
- *  (prompt body, skill body, directory listing, or single file) rides along
- *  on every message until the chat ends or the user unpins it. Per-chat
- *  scope by design (state lives in the composer; a new session starts
- *  with an empty pin list). Defined as the same shape as `MentionChip`
- *  because the resolver path is identical — pin vs. mention is purely a
- *  UI lifetime concern (persistent across sends vs. dropped after send). */
+/** "Pin" an item so its content rides along on every outgoing message of
+ *  the chat. Pin lifetime depends on the chip kind:
+ *    • prompt / skill → global (stored in `local:composerPinnedContexts`,
+ *      survives chat switches / new chats, syncs across sidepanels).
+ *    • vfs-dir / vfs-file / rag-collection → session-scoped React state in
+ *      ChatInput (cleared on chat switch).
+ *  Defined as the same shape as `MentionChip` because the resolver path is
+ *  identical — pin vs. mention is purely a UI lifetime concern (persistent
+ *  across sends vs. dropped after send). */
 export type PinnedMention = MentionChip;
 
 export type ResolvedMentionAttachment =

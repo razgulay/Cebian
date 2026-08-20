@@ -12,7 +12,7 @@ import { RecordButton } from '@/components/chat/RecordButton';
 import { MicButton } from '@/components/chat/MicButton';
 import { MentionPopover } from '@/components/chat/MentionPopover';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
+import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { startElementPicker, cancelElementPicker } from '@/lib/browser/element-picker';
@@ -718,9 +718,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
         // Auto-unpin pins that have hit the threshold. We collect them
         // first so a single togglePin call handles removal cleanly.
+        // `togglePin` is async for the global branch (re-reads storage to
+        // avoid rapid-click races) — awaiting keeps auto-unpin ordered
+        // when several pins cross the threshold in the same send.
         for (const { item, count } of autoUnpinned) {
           toast.warning(t('chat.composer.pinAutoRemoved', [pinLabel(item), String(count)]));
-          togglePin(item);
+          await togglePin(item);
         }
 
         debugLog.info('ui', 'pin:resolve:done', {
@@ -861,21 +864,18 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // previous session can't append into the new session's composer
   // （speech.stop 在空闲时是无副作用的 no-op）。
   //
-  // Pin-clearing policy: pins are tied to the chat the user is IN, not to
-  // the lifecycle of the sessionId React prop. The sessionId prop goes
-  // from `null` → real id on the very first send of a chat that was
-  // opened with an empty composer — that's NOT a chat switch, it's the
-  // moment the chat gets born. We must not wipe the user's pins at that
-  // moment or they "vanish after the first send" (the bug that
-  // motivated this branch). The clearing rule is asymmetric:
-  //   - prev === null (we weren't in a chat): never clear, even if
-  //     `next` is non-null. This covers the "first send" case above
-  //     and also preserves any in-memory pins across a fresh page load
-  //     before the user has opened any chat.
-  //   - prev !== null (we WERE in a chat) and prev !== next: always
-  //     clear. This covers both "user clicked New Chat" (prev → null)
-  //     and "user switched to a different chat" (prev → other id).
-  //     Leaving a chat means the pins belong to a context that's gone.
+  // Pin-clearing policy (two lifetimes):
+  //   • **Global pins** (prompts / skills) live in `local:composerPinnedContexts`
+  //     and are intentionally NOT cleared here — they ride along into every
+  //     chat until the user unpins them.
+  //   • **Session pins** (folders / files / RAG) are React-local and DO clear
+  //     when the user leaves a chat. The rule is asymmetric so a first-send
+  //     birth (`null → realId`) does not wipe in-flight session pins:
+  //       - prev === null: never clear (first send of a brand-new chat, or
+  //         page load before any chat is open).
+  //       - prev !== null && prev !== next: clear session pins (covers both
+  //         "New Chat" prev→null and "switch to other chat" prev→otherId).
+  // Failure bookkeeping is always session-local and clears with session pins.
   const previousSessionIdRef = useRef<string | null>(sessionId ?? null);
   useEffect(() => {
     setHistoryIndex(null);
@@ -888,9 +888,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     const next = sessionId ?? null;
     if (prev !== null && prev !== next) {
       // Genuine exit from a chat (either to null, or to a different
-      // chat id) — drop the pins that belonged to the previous chat.
-      setPinned([]);
-      pinnedRef.current = [];
+      // chat id) — drop only the session-scoped pins. Global pins stay.
+      setPinnedSession([]);
       setFailedPins(new Set());
       pinFailCountsRef.current.clear();
     }
@@ -1051,16 +1050,31 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setHistoryIndex(null);
   }, []);
 
-  // ─── Pinned context (per-chat) ───
-  // A pinned prompt or skill rides along on EVERY message of the current
-  // chat — handy when the user wants the LLM to keep a long-running
-  // instruction (e.g. "explain in character", "always respond in
-  // Vietnamese", the translate prompt) without re-mentioning it on every
-  // turn. Scope is intentionally per-chat: switching to a new session
-  // clears the list (handled by the session-reset effect below), so the
-  // user must re-pin if they want the same context in a fresh chat.
-  const [pinned, setPinned] = useState<PinnedMention[]>([]);
-  const pinnedRef = useRef<PinnedMention[]>([]);
+  // ─── Pinned context ───
+  // Pin membership is split by lifetime:
+  //   • **Global** (prompts + skills): persisted in `local:composerPinnedContexts`
+  //     via `useStorageItem`. Once pinned, every chat (existing or new) keeps
+  //     it; once unpinned, every chat drops it; the change syncs in real
+  //     time across open sidepanels (WXT `watch`).
+  //   • **Session-scoped** (folders / files / RAG collections): plain React
+  //     state, cleared by the session-reset effect below. Transient VFS
+  //     paths don't make sense as a roaming preference.
+  // The merged `pinned` array (global-first) drives every existing render /
+  // resolver call site — the split is invisible outside this block.
+  const [pinnedGlobal, setPinnedGlobal] = useStorageItem(composerPinnedContexts, []);
+  const [pinnedSession, setPinnedSession] = useState<PinnedMention[]>([]);
+  const pinned = useMemo(
+    () => [...pinnedGlobal, ...pinnedSession],
+    [pinnedGlobal, pinnedSession],
+  );
+  // Mirror for handleSend: reads the latest pinned list without waiting
+  // for React to flush, so post-await resolver calls see the up-to-date
+  // set. Updated by an effect (not inline at declaration time) so the
+  // ref stays in sync after `pinned` rebuilds from either bucket changing.
+  const pinnedRef = useRef<PinnedMention[]>(pinned);
+  useEffect(() => {
+    pinnedRef.current = pinned;
+  }, [pinned]);
 
   // Pin health tracking — surfaces failures in the strip chip and triggers
   // auto-cleanup. `failedPins` is the set of pin ids that failed to resolve
@@ -1069,6 +1083,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // transient VFS race heals automatically. `pinFailCounts` tracks
   // consecutive failures per id and drives auto-unpin at
   // PIN_AUTO_UNPIN_THRESHOLD — a single success resets the counter.
+  // Local to ChatInput — failure counts are per-conversation, not a
+  // cross-session setting (a deleted prompt in chat A is the same in chat B).
   const [failedPins, setFailedPins] = useState<Set<string>>(() => new Set());
   const pinFailCountsRef = useRef<Map<string, number>>(new Map());
 
@@ -1097,28 +1113,60 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     });
   }, []);
 
-  // Toggle a pin: if the item is already pinned, remove it; otherwise
-  // append. The popover passes a fresh id per pick so toggling a single
-  // item stays well-defined (each pick is a unique PinnedMention). The
-  // id-based match means built-in skills can be pinned and unpinned
-  // freely even though they share the same `name`/`filePath` (and the
-  // same is true for folders/files keyed on path).
-  const togglePin = useCallback((item: PinnedMention) => {
-    setPinned((prev) => {
+  // Toggle a pin: branches on the item kind to decide where it lives.
+  //
+  //   prompt | skill  → `local:composerPinnedContexts` (global, cross-session)
+  //   other kinds     → session-scoped `pinnedSession` (cleared on chat switch)
+  //
+  // The popover stamps a stable id per source (`prompt-${fileName}`,
+  // `builtin-${id}`, `skill-${filePath}`) so toggling stays well-defined.
+  //
+  // The global branch re-reads `composerPinnedContexts` from storage before
+  // computing `next` rather than reading `pinnedGlobal` from this render's
+  // closure. Reason: `useStorageItem.setValue` takes the full next value
+  // (not an updater function), and two rapid clicks within one render
+  // cycle (e.g. user pressing Enter then clicking another pin in <16ms)
+  // share the same `pinnedGlobal` snapshot and would both compute `next`
+  // from the same baseline — silently dropping the second pin. Reading
+  // from storage resolves to the latest committed value (including any
+  // pending writes) so each click sees the result of the previous one.
+  // The session branch uses a functional updater and doesn't have this
+  // race (single source of truth in React state).
+  const togglePin = useCallback(async (item: PinnedMention) => {
+    const clearFailBookkeeping = () => {
+      pinFailCountsRef.current.delete(item.id);
+      setFailedPins((prevSet) => {
+        if (!prevSet.has(item.id)) return prevSet;
+        const nextSet = new Set(prevSet);
+        nextSet.delete(item.id);
+        return nextSet;
+      });
+    };
+
+    if (item.kind === 'prompt' || item.kind === 'skill') {
+      // Read the freshest committed list — covers both intra-component
+      // (rapid double-click) and cross-tab races. `pinnedGlobal` from the
+      // closure would only see values committed in earlier renders.
+      const current = await composerPinnedContexts.getValue();
+      const exists = current.some((p) => p.id === item.id);
+      const next = exists
+        ? current.filter((p) => p.id !== item.id)
+        : [...current, item];
+      await setPinnedGlobal(next);
+      if (exists) clearFailBookkeeping();
+      debugLog.info('ui', 'pin:toggle', {
+        kind: item.kind,
+        label: pinLabel(item),
+        action: exists ? 'unpin' : 'pin',
+        total: next.length,
+      });
+      return;
+    }
+
+    setPinnedSession((prev) => {
       const exists = prev.some((p) => p.id === item.id);
       const next = exists ? prev.filter((p) => p.id !== item.id) : [...prev, item];
-      pinnedRef.current = next;
-      // When a pin is removed (manually or via auto-unpin), drop its
-      // failure bookkeeping so a re-pin starts with a clean slate.
-      if (exists) {
-        pinFailCountsRef.current.delete(item.id);
-        setFailedPins((prevSet) => {
-          if (!prevSet.has(item.id)) return prevSet;
-          const nextSet = new Set(prevSet);
-          nextSet.delete(item.id);
-          return nextSet;
-        });
-      }
+      if (exists) clearFailBookkeeping();
       debugLog.info('ui', 'pin:toggle', {
         kind: item.kind,
         label: pinLabel(item),
@@ -1127,7 +1175,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       });
       return next;
     });
-  }, []);
+  }, [setPinnedGlobal]);
 
   /** Cheap helper for the popover to know if an item is currently pinned.
    *  State-based (not ref-based) so the icon can re-render when pins
@@ -1782,7 +1830,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                   <span className="truncate max-w-32">{label}</span>
                   <button
                     type="button"
-                    onClick={() => togglePin(p)}
+                    onClick={() => { void togglePin(p); }}
                     title={t('chat.composer.unpin')}
                     aria-label={t('chat.composer.unpin')}
                     className="shrink-0 -mr-0.5 p-0.5 rounded opacity-60 hover:opacity-100 hover:bg-foreground/10 cursor-pointer transition-opacity"
