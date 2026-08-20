@@ -1,7 +1,9 @@
-import { createContext, memo, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
+import katex from 'katex';
 import type { Components } from 'react-markdown';
 import { showDialog } from '@/lib/ui/dialog';
 import { CopyButton } from './CopyButton';
@@ -70,6 +72,53 @@ function CodeBlock({ node, children }: { node?: HastElement; children?: ReactNod
       </pre>
     </div>
   );
+}
+
+/**
+ * Render LaTeX to a KaTeX HTML string. `displayMode=true` produces the
+ * centered block form; `false` produces inline math. Errors are downgraded
+ * to KaTeX's own `katex-error` span instead of throwing — a single bad
+ * expression in a long reply shouldn't kill the whole bubble.
+ */
+function renderKatex(source: string, displayMode: boolean): string {
+  // Default `output` is `htmlAndMathml` — keep it so screen readers get the
+  // MathML annotation while sighted users see the HTML glyphs.
+  return katex.renderToString(source, {
+    displayMode,
+    throwOnError: false,
+    strict: 'ignore',
+  });
+}
+
+/**
+ * Block math container — header shows "Math" label plus a copy button that
+ * copies the original LaTeX source (not the rendered glyphs). The body
+ * horizontally scrolls on narrow viewports so wide equations stay usable.
+ */
+function MathBlock({ source }: { source: string }) {
+  const html = useMemo(() => renderKatex(source, true), [source]);
+  return (
+    <div className="my-2 overflow-hidden rounded-md border border-border/60 bg-background">
+      <div className="flex items-center justify-between pl-3 pr-1 py-0.5 text-xs text-muted-foreground border-b border-border/40">
+        <span className="font-mono">{t('common.math')}</span>
+        <CopyButton text={source} />
+      </div>
+      <div className="overflow-x-auto px-3 py-3 text-[0.9rem]">
+        <div
+          className="math math-display text-center"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** True when the element carries the `language-math` class (set by `remark-math`
+ *  via `remark-rehype`'s default mapping for `math` MDAST nodes). */
+function isMathClass(props: HastElement['properties']): boolean {
+  const cls = props?.className;
+  const list = Array.isArray(cls) ? cls : typeof cls === 'string' ? cls.split(/\s+/) : [];
+  return list.includes('language-math');
 }
 
 /**
@@ -510,15 +559,43 @@ const components: Components = {
     <blockquote className="border-l-2 border-primary/60 pl-3 my-2 text-muted-foreground/90 text-[length:var(--chat-font-size)] italic" {...props}>{children}</blockquote>
   ),
 
-  // Code blocks with header (language + copy button).
-  pre: ({ node, children }) => <CodeBlock node={node as unknown as HastElement | undefined}>{children}</CodeBlock>,
+  // Code blocks with header (language + copy button). When the wrapped
+  // <code> carries `language-math`, this is a block (`$$…$$`) math node;
+  // route to MathBlock so we render KaTeX in display mode and copy the
+  // original LaTeX source (not the rendered glyphs).
+  pre: ({ node, children }) => {
+    // Cast through unknown: react-markdown's ElementContent is stricter than
+    // our structural HastElement (properties optional vs required).
+    const hastNode = node as unknown as HastElement | undefined;
+    const codeNode = hastNode?.children.find(
+      (c): c is HastElement => c.type === 'element' && (c as HastElement).tagName === 'code',
+    );
+    if (codeNode && isMathClass(codeNode.properties)) {
+      return <MathBlock source={hastToText(codeNode.children)} />;
+    }
+    return <CodeBlock node={hastNode}>{children}</CodeBlock>;
+  },
 
   // Inline code (block code is rendered inside `pre`/`CodeBlock` above).
   // NOTE: rehype-highlight rewrites block code's className to `"hljs language-xxx ..."`,
   // so we test for the `language-` token anywhere in the class list — checking only
   // `startsWith('language-')` would misclassify highlighted blocks as inline and apply
   // inline-code styling per text fragment (causing per-character "shadows").
-  code: ({ className, children, ...props }) => {
+  // `remark-math` produces two variants — `math-inline` (inline `$…$`) and
+  // `math-display` (block `$$…$$`, handled by `pre`). Inline is rendered
+  // through KaTeX here so it stays in-flow with surrounding text.
+  code: ({ className, children, node, ...props }) => {
+    const cls = typeof className === 'string' ? className : '';
+    if (/(?:^|\s)math-inline\b/.test(cls)) {
+      const source = hastToText((node as unknown as HastElement | undefined)?.children);
+      const html = renderKatex(source, false);
+      return (
+        <span
+          className="math math-inline align-middle"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+    }
     const isBlock = !!className && /(?:^|\s)(?:hljs|language-)/.test(className);
     if (isBlock) {
       return (
@@ -644,7 +721,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
     <MarkdownVfsPathContext.Provider value={currentVfsPath}>
       <div className={`max-w-none wrap-break-word ${className ?? ''}`}>
         <Markdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeHighlight]}
           components={components}
           urlTransform={(url) => resolveMarkdownHref(url, currentVfsPath) ?? urlTransform(url)}

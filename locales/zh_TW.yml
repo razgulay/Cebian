@@ -37,6 +37,7 @@ common:
     add: "新增 Header"
     remove: "移除 Header"
   code: "代碼"
+  math: "公式"
   copy: "複製"
   copied: "已複製"
   copyFailed: "複製失敗"

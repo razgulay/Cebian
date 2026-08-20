@@ -38,6 +38,7 @@ common:
     add: "Add header"
     remove: "Remove header"
   code: "Code"
+  math: "Math"
   copy: "Copy"
   copied: "Copied"
   copyFailed: "Copy failed"
