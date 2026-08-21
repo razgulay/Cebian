@@ -494,14 +494,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // comment in the slash block below.
     let text = outgoingText.trim();
     // `displayText` is what shows in the user's bubble in chat history.
-    // The chips already previewed the quoted text, so the bubble only
-    // needs the user's own typed words — no need to echo the quote back.
-    // Slash commands (`/foo bar`) now produce a `[DIRECTIVE — ATTACHED
-    // COMMAND: "<name>"]...` prefix (same shape as mention chips); the
-    // slash block below overwrites both `text` and `displayText` so the
-    // bubble shows the user's typed words after the command (`bar`),
-    // never the expanded prompt body. The chip in the bubble's chip
-    // strip carries the command name visually.
+    // Slash commands (`/foo bar`) overwrite both `text` and `displayText`
+    // below so the bubble shows the user's typed words after the command
+    // (`bar`), never the expanded prompt body. Quote chips render as their
+    // own inline-directive shape on send — see the splice block below —
+    // so the bubble's `extractUserText` strips the directive via the same
+    // path that strips mention / slash directives, and the bubble body
+    // shows just the user's typed words. The quote chip itself surfaces
+    // above the bubble via `extractInlineDirectivesFromMessage` (same
+    // pipeline as mention chips).
     let displayText = outgoingText.trim();
     const dispatchSessionId = sessionIdRef.current;
 
@@ -561,17 +562,48 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         }
       }
 
-      // Prepend any quote chips above the textarea so the LLM actually
-      // receives the quoted content. The chips are the source of truth
-      // (textarea stays clean), so we splice them in here at the last
-      // possible moment — AFTER slash-command resolution so a `/foo` text
-      // becomes its expanded prompt body before the chip is added. Newline-
-      // separated; if there's nothing else, the chip text is the entire
-      // outgoing message.
+      // Prepend any quote chips above the textarea as a QUOTE inline directive
+      // — same shape as the slash COMMAND directive and the mention PROMPT /
+      // SKILL directives. Treating quote as a directive has two effects:
+      //   1. The LLM still receives the full quoted text (inside the
+      //      directive body), but in a positionally-stable prefix that the
+      //      rewrite helper preserves verbatim — there is no race against
+      //      mention/slash directives that also splice into `text`.
+      //   2. The bubble parser peels the directive off via `stripDirectives`,
+      //      so the bubble body shows only the user's typed words; the
+      //      quote chip surfaces above the bubble via
+      //      `extractInlineDirectivesFromMessage` (same pipeline as mention
+      //      chips). No more echo of the quote inside the bubble, no more
+      //      duplicate quote when slash or mention directives are also
+      //      present — the structural identity with mention chips erases the
+      //      entire class of duplication bugs.
+      // The `name` slot in the directive header carries a single-line
+      // preview of the first quote chip's body so the bubble chip has a
+      // short label to display (multi-chip case shows only the first
+      // chip's text in the header; the full body still goes to the LLM
+      // verbatim inside the directive body). When there are multiple
+      // quote chips, append a `· N excerpts` count suffix so the bubble
+      // chip communicates the multiplicity — the preview is shortened to
+      // keep the count suffix inside the 48-char name budget and avoid
+      // being truncated by the bubble chip's `truncate max-w-24` slot.
+      // The directive-header regex uses `"..."` as the name delimiter
+      // with `[^"]*` as the capture, so raw `"` in the preview would
+      // terminate the match early and corrupt the entire wire format —
+      // we substitute `"` with the typographically-similar `＂`
+      // (FULLWIDTH QUOTATION MARK) so the preview still reads as a quote
+      // character to the user but stays inside the parser's safe ASCII
+      // range. The directive BODY is sent verbatim, so the LLM still
+      // sees the original text with `"`.
       const chipTexts = quoteChipsRef.current.map((c) => c.text.trimEnd()).filter(Boolean);
       if (chipTexts.length > 0) {
         const quoted = chipTexts.join('\n');
-        text = text.length > 0 ? `${quoted}\n\n${text}` : quoted;
+        const firstPreview = (chipTexts[0] ?? '').replace(/\s+/g, ' ');
+        const countSuffix = chipTexts.length > 1 ? ` · ${chipTexts.length} excerpts` : '';
+        const previewBudget = Math.max(0, 48 - countSuffix.length);
+        const safePreview = firstPreview.slice(0, previewBudget).replace(/"/g, '＂');
+        const nameField = chipTexts.length > 1 ? `${safePreview}${countSuffix}` : safePreview;
+        const quoteDirective = `[DIRECTIVE — ATTACHED QUOTE: "${nameField}"]\n\n${quoted}\n\n[END DIRECTIVE]`;
+        text = text.length > 0 ? `${quoteDirective}\n\n---\n\n${text}` : quoteDirective;
       }
 
       // Resolve mention chips (prompt/skill/dir) into attachments. Each chip
@@ -1193,9 +1225,46 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       quoteChipsRef.current = next;
       return next;
     });
+    // 不在这里直接 focus：synchronously 调用 focus() 经常被后续的事件循环
+    // / React commit 偷走（在 Quote 按钮 onClick 内 setState 触发 commit，
+    // button 的 focus restore / MentionPopover 的 focus trap 都会跟它赛跑）。
+    // 用下面 `useEffect` 监听 quoteChips 增长，在 commit 之后 refocus —
+    // DOM 已稳定，textarea 仍在 mount，没有元素再抢焦点。只在 chip 数量
+    // 增长时触发，移除 chip 不触发；mention chip 走的是 setMentions 不会
+    // 经过这里，popover 不会被这次 focus 关闭。
   }, []);
 
   useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
+
+  // Quote 按钮 click 后把焦点送回 textarea — 在 quoteChips 增长时 commit 后
+  // 触发 focus（synchronously 在 onClick 内调 focus() 会被后续 commit 偷走）。
+  // `preventScroll: true` 防止 sidepanel 滚到 textarea（一般不需要，但避免
+  // 边界 case 把焦点框带出 viewport）。Mention chip 走 setMentions 不进
+  // 这里，popover 的「连选多个」流程不受影响。
+  const prevQuoteChipCountRef = useRef(0);
+  useEffect(() => {
+    if (quoteChips.length > prevQuoteChipCountRef.current) {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
+    prevQuoteChipCountRef.current = quoteChips.length;
+  }, [quoteChips]);
+
+  // Attach 按钮（pick element / pick region / screenshot / file upload /
+  // record）click 后焦点都离开 textarea。同步路径上 `focus()` 经常被后续
+  // commit 偷走（pick 还要等用户在页面上点完元素才完成，commit / focus trap
+  // 跟它赛跑）—— 在 attachments 数量增长时 trigger，commit 之后 DOM 已稳定、
+  // 没有元素再抢焦点；stream 开始时 attachments 被清零（count 减少）不会
+  // 误触发；picker 的 cancelled / error / dedup 等「没加 attachment」分支
+  // 仍由各 handler 的 `finally` 块里的 sync focus 兜底，success 分支这里
+  // 会再调一次（两次都是同一个 textarea 的 `focus()`，幂等无害：第二次
+  // 会顶掉 commit 期间任何偷走的 focus）。
+  const prevAttachmentCountRef = useRef(0);
+  useEffect(() => {
+    if (attachments.length > prevAttachmentCountRef.current) {
+      textareaRef.current?.focus({ preventScroll: true });
+    }
+    prevAttachmentCountRef.current = attachments.length;
+  }, [attachments]);
 
   // Scan prompts when slash menu opens
   useEffect(() => {

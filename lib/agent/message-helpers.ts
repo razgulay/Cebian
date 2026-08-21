@@ -79,9 +79,9 @@ export function findToolResult(
 
 const USER_REQUEST_RE = /<user-request>\s*([\s\S]*?)\s*<\/user-request>/;
 
-// ─── 内联指令块（mention chip + slash command）───
-// 三种指令共享同一个开头格式：
-//   [DIRECTIVE — ATTACHED (PROMPT|SKILL|COMMAND): "name"( pinned="true")?]
+// ─── 内联指令块（mention chip + slash command + quote）───
+// 共享同一个开头格式：
+//   [DIRECTIVE — ATTACHED (PROMPT|SKILL|COMMAND|QUOTE): "name"( pinned="true")?]
 //   <body>
 //   [END DIRECTIVE]
 //   ---\n
@@ -89,8 +89,14 @@ const USER_REQUEST_RE = /<user-request>\s*([\s\S]*?)\s*<\/user-request>/;
 // 这里解析出头行的 kind/name/pinned；`stripDirectives` 用来把整个块（连同
 // 块与块之间、块与用户字之间的 `---` 分隔线）一并剥掉，让气泡只显示用户
 // 自己敲的文字。模型侧仍按原样接收完整文本（见 rewrite-last-user-message.ts）。
+//
+// QUOTE 跟其他三类的区别：name 字段存的是引用 body 的截断预览（48 字符、单行
+// 化），让 bubble chip 有短标签可显示。其它三类的 name 是语义名称
+// （prompt 名 / skill 名 / 命令名）。Open RE 的 `"..."` delimiter 不允许
+// 嵌入 raw `"`，所以 ChatInput 在塞 name 之前把 `"` 替换成全角引号 `＂`，
+// 保证 wire format 始终可解析。
 
-export type InlineDirectiveKind = 'prompt' | 'skill' | 'command';
+export type InlineDirectiveKind = 'prompt' | 'skill' | 'command' | 'quote';
 
 export interface InlineDirective {
   kind: InlineDirectiveKind;
@@ -99,11 +105,11 @@ export interface InlineDirective {
 }
 
 const INLINE_DIRECTIVE_OPEN_RE =
-  /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND):\s+"([^"]*)"(\s+pinned="true")?\]/g;
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND|QUOTE):\s+"([^"]*)"(\s+pinned="true")?\]/g;
 
 // 匹配完整的指令块（开头行 + 中间任意字符 + 关闭标记）
 const INLINE_DIRECTIVE_BLOCK_RE =
-  /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND|QUOTE):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
 
 /** 从用户消息文本里抽取出所有内联指令的开头元信息（按出现顺序） */
 export function extractInlineDirectives(text: string): InlineDirective[] {
@@ -153,7 +159,7 @@ export function extractUserText(msg: Message): string {
   return stripDirectives(inner);
 }
 
-/** 从 user 消息的 `<user-request>` 内文里抽出所有内联指令（PROMPT/SKILL/COMMAND）。
+/** 从 user 消息的 `<user-request>` 内文里抽出所有内联指令（PROMPT/SKILL/COMMAND/QUOTE）。
  *  与 `extractUserText` 不同：这里返回「指令长什么样」，而非「用户敲了什么」，
  *  供 UI（气泡上方 chip 条）渲染。文本本身仍由 `extractUserText` 提供。 */
 export function extractInlineDirectivesFromMessage(msg: Message): InlineDirective[] {

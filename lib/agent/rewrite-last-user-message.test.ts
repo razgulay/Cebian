@@ -173,6 +173,83 @@ describe('rewriteLastUserMessage', () => {
     expect(rewriteLastUserMessage(messages, 'typing')).toBe(messages);
   });
 
+  it('preserves a QUOTE-only directive on the bubble when user typed words follow', () => {
+    // Regression for HIGH #1 from the Subtask A review: when a QUOTE
+    // directive is the only directive in the message (no slash, no
+    // mention), `rewriteLastUserMessage.DIRECTIVE_OPEN_RE` must include
+    // `QUOTE` in its alternation — otherwise `.test(text)` misses it and
+    // the helper falls into the no-directive branch, wiping the whole
+    // QUOTE directive to `displayText` and leaving the bubble with no
+    // quote chip (the chip extractor reads the persisted text, which
+    // would now be just "user input").
+    const quoteDirective =
+      '[DIRECTIVE — ATTACHED QUOTE: "quote preview"]\n\nquote <X> quote\n\n[END DIRECTIVE]';
+    const text = `${quoteDirective}\n\n---\n\nuser input\n</user-request>`;
+    const messages = asAgentMessages([
+      { role: 'user', content: [{ type: 'text', text }], timestamp: 1 },
+    ]);
+    const out = rewriteLastUserMessage(messages, 'user input');
+    const newText = (out[0] as any).content[0].text as string;
+    expect(newText).toContain('[DIRECTIVE — ATTACHED QUOTE: "quote preview"]');
+    expect(newText).toContain('[END DIRECTIVE]');
+    expect(newText).toContain('---');
+    expect(newText.endsWith('</user-request>')).toBe(true);
+    expect(newText).toMatch(/user input\s*<\/user-request>$/);
+  });
+
+  it('preserves a QUOTE-only directive on the bubble when user typed nothing', () => {
+    // Same regression as above for the empty-typed-words case: text is
+    // JUST the QUOTE directive, no `\n\n---\n\n` separator. The directive-
+    // only branch must recognize QUOTE and keep the directive as-is.
+    const quoteDirective =
+      '[DIRECTIVE — ATTACHED QUOTE: "preview"]\n\nquote <X> quote\n\n[END DIRECTIVE]';
+    const messages = asAgentMessages([
+      { role: 'user', content: [{ type: 'text', text: `${quoteDirective}\n</user-request>` }], timestamp: 1 },
+    ]);
+    const out = rewriteLastUserMessage(messages, '');
+    const newText = (out[0] as any).content[0].text as string;
+    expect(newText).toContain('[DIRECTIVE — ATTACHED QUOTE: "preview"]');
+    expect(newText).toContain('[END DIRECTIVE]');
+  });
+
+  it('does not duplicate a quote directive stacked before other directives (slash + quote regression)', () => {
+    // Regression for the bubble "quote text twice" bug. When slash AND
+    // quote are both present, ChatInput now produces the shape
+    //   [QUOTE directive]---[COMMAND directive]---userInput
+    // Both directives precede the user-typed words. The rewrite helper
+    // preserves everything before the last `\n\n---\n\n` (i.e. both
+    // directives) verbatim in `beforeUser` and only rewrites the
+    // user-typed suffix from `displayText`. The bubble must see exactly
+    // one occurrence of the quoted text — once, inside the QUOTE
+    // directive block, which `stripDirectives` then peels off so the
+    // bubble body itself shows just "user input".
+    const quoteDirective =
+      '[DIRECTIVE — ATTACHED QUOTE: "quote preview"]\n\nquote <X> quote\n\n[END DIRECTIVE]';
+    const commandDirective =
+      '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody\n\n[END DIRECTIVE]';
+    const text = `${quoteDirective}\n\n---\n\n${commandDirective}\n\n---\n\nuser input\n</user-request>`;
+    const messages = asAgentMessages([
+      { role: 'user', content: [{ type: 'text', text }], timestamp: 1 },
+    ]);
+    // displayText mirrors what ChatInput ships for slash + quote +
+    // user input: just the user-typed words after the slash, no quote.
+    const out = rewriteLastUserMessage(messages, 'user input');
+    const newText = (out[0] as any).content[0].text as string;
+    // Both directive prefixes preserved verbatim so the bubble parser can find them.
+    expect(newText).toContain('[DIRECTIVE — ATTACHED QUOTE: "quote preview"]');
+    expect(newText).toContain('[DIRECTIVE — ATTACHED COMMAND: "english"]');
+    expect(newText).toContain('[END DIRECTIVE]');
+    expect(newText).toContain('---');
+    // BG wrapper's `\n</user-request>` close is preserved.
+    expect(newText.endsWith('</user-request>')).toBe(true);
+    // Quote body appears EXACTLY ONCE — the `beforeUser` segment carries
+    // the QUOTE directive (and `displayText` does NOT carry a second copy).
+    const quoteMatches = newText.match(/quote <X> quote/g) ?? [];
+    expect(quoteMatches.length).toBe(1);
+    // User-typed segment was rewritten to the displayText value.
+    expect(newText).toMatch(/user input\s*<\/user-request>$/);
+  });
+
   it('does not touch non-text blocks (e.g. image attachments)', () => {
     const image = { type: 'image', data: 'abc', mimeType: 'image/png' };
     const messages = asAgentMessages([

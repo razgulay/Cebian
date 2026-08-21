@@ -30,7 +30,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
  * - No directive → whole-text replacement.
  */
 
-const DIRECTIVE_OPEN_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND):/;
+const DIRECTIVE_OPEN_RE = /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND|QUOTE):/;
 const DIRECTIVE_USER_SEP = '\n\n---\n\n';
 const USER_REQUEST_CLOSE = '</user-request>';
 

@@ -1,4 +1,4 @@
-import { Bot, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, ShieldAlert, Sparkles, Zap } from 'lucide-react';
+import { Bot, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -161,13 +161,20 @@ export function UserMessageBubble({
       className="self-end max-w-[95%] group/user"
       {...(isLast ? { 'data-user-message': 'last' as const } : {})}
     >
-      {/* Inline directive chip strip: slash commands (COMMAND) and mention
-          chips (PROMPT/SKILL) render above the bubble so the bubble only
-          shows the user's typed words. Pinned directives (carrying
-          `pinned="true"`) are skipped — the pin is already visible in the
-          composer strip at the bottom of every send, so repeating it on
-          every bubble would just clutter chat history. The LLM still
-          receives the full directive body via the agent runtime. */}
+      {/* Inline directive chip strip: slash commands (COMMAND), mention
+          chips (PROMPT/SKILL), and quote chips (QUOTE) render above the
+          bubble so the bubble only shows the user's typed words. Pinned
+          directives (carrying `pinned="true"`) are skipped — the pin is
+          already visible in the composer strip at the bottom of every send,
+          so repeating it on every bubble would just clutter chat history.
+          The LLM still receives the full directive body via the agent
+          runtime. Quote chips use a neutral zinc tone so they read as a
+          distinct fourth kind without colliding with the slash-command
+          amber or the prompt/skill blues. The QUOTE chip's `name` slot
+          carries the first quote chip's body preview plus, when multiple
+          chips were merged at send time, a `· N excerpts` count suffix —
+          the count is rendered in a separate non-truncating span so it
+          stays visible even when the preview itself is truncated. */}
       {inlineDirectives.some((d) => !d.pinned) && (
         <div className="flex gap-1.5 flex-wrap items-center justify-end mb-1.5 px-1">
           {inlineDirectives.map((d, i) => {
@@ -175,15 +182,40 @@ export function UserMessageBubble({
             if (d.pinned) return null;
             const isCommand = d.kind === 'command';
             const isPrompt = d.kind === 'prompt';
+            const isQuote = d.kind === 'quote';
             // command: Zap + amber (same tone as recorder chip — "action triggered" feel)
             // prompt:  FileText + purple (same tone as image attachment chip — "reference" feel)
             // skill:   Sparkles + blue (reserved — d8cd54a implementation used blue)
+            // quote:   Quote + zinc (neutral fourth kind — distinguishes from the
+            //          other three without competing with slash-command amber)
             const className = isCommand
               ? 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-amber-400 border-amber-400/20 bg-amber-400/5'
               : isPrompt
                 ? 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-purple-400 border-purple-400/20 bg-purple-400/5'
-                : 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-blue-400 border-blue-400/20 bg-blue-400/5';
-            const Icon = isCommand ? Zap : isPrompt ? FileText : Sparkles;
+                : isQuote
+                  ? 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-zinc-400 border-zinc-400/20 bg-zinc-400/5'
+                  : 'shrink-0 text-[0.65rem] font-mono gap-1 h-5 rounded pl-1 pr-1 text-blue-400 border-blue-400/20 bg-blue-400/5';
+            const Icon = isCommand ? Zap : isPrompt ? FileText : isQuote ? Quote : Sparkles;
+            // 多 chip 合并时 ChatInput 把 `· N excerpts` 后缀塞进 name。把它从
+            // 预览里拆出来渲染成一个独立的、不会 truncate 的 span，让 count
+            // 在 preview 被截断时仍可见（之前 `· N excerpts` 整段进了
+            // `truncate max-w-24`，长 preview 会把 count 一起截掉，只能在
+            // tooltip 里看到）。tooltip (title) 仍保留完整的 wire 文本。
+            let chipLabel: string;
+            let quoteCount: string | null = null;
+            if (isCommand) {
+              chipLabel = `/${d.name}`;
+            } else if (isQuote) {
+              const m = d.name.match(/^(.+) · (\d+) excerpts$/);
+              if (m) {
+                chipLabel = m[1];
+                quoteCount = ` · ${m[2]}`;
+              } else {
+                chipLabel = d.name;
+              }
+            } else {
+              chipLabel = d.name;
+            }
             return (
               <Badge
                 key={`${d.kind}-${d.name}-${i}`}
@@ -192,7 +224,10 @@ export function UserMessageBubble({
                 className={className}
               >
                 <Icon className="size-2.5 shrink-0" />
-                <span className="truncate max-w-24">{isCommand ? `/${d.name}` : d.name}</span>
+                <span className="truncate max-w-24">{chipLabel}</span>
+                {quoteCount && (
+                  <span className="shrink-0 tabular-nums opacity-70">{quoteCount}</span>
+                )}
               </Badge>
             );
           })}

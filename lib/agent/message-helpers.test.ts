@@ -342,6 +342,17 @@ describe('stripDirectives', () => {
     const text = '[DIRECTIVE — ATTACHED COMMAND: "x"]\n\nbody\n\n[END DIRECTIVE]';
     expect(stripDirectives(text)).toBe('');
   });
+
+  it('剥掉单个 QUOTE 块，保留用户敲的字（与其它 kind 同走 BLOCK_RE）', () => {
+    // quote 现在也是 inline directive，所以 bubble body 不再含 quote
+    // 文本——这是 Subtask A 把 quote 改成 inline directive 形状的直接
+    // 效果（slash / mention 重复 bug 也由此彻底消失）。
+    const text =
+      '[DIRECTIVE — ATTACHED QUOTE: "preview"]\n\n' +
+      'quote <Trung Quốc> quote\n\n' +
+      '[END DIRECTIVE]\n\n---\n\nxin chào';
+    expect(stripDirectives(text)).toBe('xin chào');
+  });
 });
 
 describe('extractInlineDirectives', () => {
@@ -366,6 +377,72 @@ describe('extractInlineDirectives', () => {
       { kind: 'prompt', name: 'a', pinned: false },
       { kind: 'skill', name: 'b', pinned: false },
       { kind: 'command', name: 'c', pinned: false },
+    ]);
+  });
+
+  it('QUOTE 类型 — bubble chip 上展示的 name 字段是 quote body 预览（截断 + 空白归一）', () => {
+    // ChatInput 把 quote 内容塞进 directive 的 `name` 字段（escaped 后的
+    // 单行预览），这样 bubble chip 不用重新解析 body，直接复用现有的
+    // `truncate max-w-24` 渲染逻辑即可。name 字段的最大长度由 ChatInput
+    // 限到 48 字符（截断），但匹配 RE 允许更长——这里测的就是真实 wire。
+    const text =
+      '[DIRECTIVE — ATTACHED QUOTE: "quote <Trung Quốc> quote"]\n\n' +
+      'quote <Trung Quốc> quote\n\n' +
+      '[END DIRECTIVE]\n\n---\n\nuser input';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'quote', name: 'quote <Trung Quốc> quote', pinned: false },
+    ]);
+  });
+
+  it('QUOTE — preview 含 raw `"` 时 ChatInput 替换成全角引号，保证 wire format 始终可解析', () => {
+    // HIGH #2 from the Subtask A review: OPEN_RE 的 `"([^"]*)"` 抓 raw `"`
+    // 会提前终止 match，把整段 directive 解析成 0 匹配。ChatInput 在塞
+    // name 之前把 `"` 替换成 `＂` (U+FF02) — 这里测真实 wire 形态能
+    // round-trip 通过 extractInlineDirectives。注意 body 仍保留原值
+    // （LLM 看到的就是用户的原文），只有 directive header 的 name 字段
+    // 是安全子集。
+    const text =
+      '[DIRECTIVE — ATTACHED QUOTE: "He said ＂hi＂ to me"]\n\n' +
+      'He said "hi" to me\n\n' +
+      '[END DIRECTIVE]\n\n---\n\nuser input';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'quote', name: 'He said ＂hi＂ to me', pinned: false },
+    ]);
+    // stripDirectives 仍能把块剥干净，让 bubble body 只剩 user input
+    expect(stripDirectives(text)).toBe('user input');
+  });
+
+  it('QUOTE — 多 chip 合并时 name 字段追加 `· N excerpts` count 后缀', () => {
+    // Multi-chip UX: composer 有 N 个 quote chip → bubble 上 1 个 chip
+    // 带 count（如 "quote <X> quote · 3 excerpts"），让 chip 既不重复又不
+    // 丢信息。preview 截断按 48 - 后缀长度预算，确保 count 不会被
+    // bubble chip 的 `truncate max-w-24` 槽截掉。
+    const text =
+      '[DIRECTIVE — ATTACHED QUOTE: "quote <X> quote · 3 excerpts"]\n\n' +
+      'quote <X> quote\nquote <Y> quote\nquote <Z> quote\n\n' +
+      '[END DIRECTIVE]\n\n---\n\nuser input';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'quote', name: 'quote <X> quote · 3 excerpts', pinned: false },
+    ]);
+    // Body 仍包含全部 3 个 chip（LLM 看到完整内容）
+    expect(stripDirectives(text)).toBe('user input');
+  });
+
+  it('QUOTE + 其它类型混排按源顺序返回', () => {
+    // Slash + quote 重复 bug 的回归：以前 chatInput 用 raw prefix splice
+    // 路径导致 quote 内容同时进 `text` 和 `displayText`，在 rewrite 后
+    // bubble 里出现两次。现在 quote 也是 inline directive，跟 slash /
+    // mention 共用同一解析路径，不再有「raw 拼接 vs directive 拼接」的
+    // 分叉——这条测试锁住 QUOTE 在 source order 里跟其它 kind 一样被识别。
+    const text = [
+      '[DIRECTIVE — ATTACHED COMMAND: "english"]\n\nbody\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED QUOTE: "preview"]\n\nquote body\n\n[END DIRECTIVE]',
+      '[DIRECTIVE — ATTACHED PROMPT: "a"]\n\nA\n\n[END DIRECTIVE]',
+    ].join('\n\n---\n\n');
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'command', name: 'english', pinned: false },
+      { kind: 'quote', name: 'preview', pinned: false },
+      { kind: 'prompt', name: 'a', pinned: false },
     ]);
   });
 
