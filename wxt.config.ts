@@ -106,7 +106,7 @@ export default defineConfig({
           extension_pages:
             "script-src 'self'; " +
             "style-src 'self' 'unsafe-inline' https:; " +
-            "font-src https: data:; " +
+            "font-src 'self' https: data: http://localhost:* http://127.0.0.1:*; " +
             "img-src 'self' data: blob: https:; " +
             "connect-src 'self' https: wss: ws: data: blob: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; " +
             "media-src 'self' data: blob: https:;",
