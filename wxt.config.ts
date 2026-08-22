@@ -81,7 +81,7 @@ export default defineConfig({
             "sandbox allow-scripts allow-forms allow-popups allow-modals; " +
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob:; " +
             "style-src 'self' 'unsafe-inline' https: data:; " +
-            "connect-src 'self' https: wss: data: blob: http://localhost:* http://127.0.0.1:*; " +
+            "connect-src 'self' https: wss: ws: data: blob: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; " +
             "img-src 'self' data: blob: https:; " +
             "font-src 'self' data: https:; " +
             "media-src 'self' data: blob: https:; " +
@@ -108,7 +108,7 @@ export default defineConfig({
             "style-src 'self' 'unsafe-inline' https:; " +
             "font-src https: data:; " +
             "img-src 'self' data: blob: https:; " +
-            "connect-src 'self' https: wss: data: blob: http://localhost:* http://127.0.0.1:*; " +
+            "connect-src 'self' https: wss: ws: data: blob: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; " +
             "media-src 'self' data: blob: https:;",
         },
   }),
