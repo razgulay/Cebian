@@ -380,9 +380,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     return () => { cancelElementPicker(); };
   }, []);
 
-  // Cancel picker on Esc key (sidepanel has focus, not the page)
+  // Cancel picker on Esc key (sidepanel has focus, not the page).
+  // 同时覆盖 click-pick 和 region-pick：只要任一 picker 处于激活态、
+  // focus 又在 sidepanel 里，ESC 都要能撤销当前会话并切回空闲态。
+  // 页面侧的 capture-phase handler（lib/browser/element-picker.ts）只接
+  // 页面焦点事件，sidepanel 焦点的事件需要在这里自己监听。
   useEffect(() => {
-    if (!isPicking) return;
+    if (!isPicking && !isPickingRegion) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
         cancelElementPicker();
@@ -390,7 +394,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [isPicking]);
+  }, [isPicking, isPickingRegion]);
 
   // 点空白处关闭 slash 菜单：mousedown 在菜单外且不在 textarea 内 → 关闭。
   // 用 mousedown 而非 click：1) 响应更早；2) 避免依赖 textarea 的 focus/blur
