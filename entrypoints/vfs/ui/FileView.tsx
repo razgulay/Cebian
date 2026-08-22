@@ -411,16 +411,14 @@ function renderFrontmatterValue(value: unknown): React.ReactNode {
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return <span>{String(value)}</span>;
   }
-  // Dates come back from `front-matter`/js-yaml as real Date instances for
-  // ISO-8601 scalars (`date: 2024-05-15` etc.). Render the ISO string
-  // directly rather than letting them fall into the JSON branch where
-  // they'd render as quoted strings inside a <pre>.
-  if (value instanceof Date) {
-    return <span>{value.toISOString()}</span>;
-  }
   // Objects and arrays: pretty-print as JSON inside a pre. Wrapping in
   // <pre> keeps newlines/indentation; `whitespace-pre-wrap` lets very long
   // lines wrap instead of pushing the table wider than the viewport.
+  // (yaml@2 follows YAML 1.2, so bare `date: 2024-05-15` parses to the
+  // string "2024-05-15" and falls into the `string` branch above —
+  // explicit `!!timestamp` tags still produce `Date` instances and route
+  // through the JSON branch, which `JSON.stringify`s them to ISO format
+  // inside the <pre>.)
   return (
     <pre className="font-mono text-xs text-foreground/80 whitespace-pre-wrap wrap-break-word">
       {JSON.stringify(value, null, 2)}
