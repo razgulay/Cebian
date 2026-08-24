@@ -2,18 +2,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "./code-highlight.css";
-/* KaTeX math fonts — swap variant keeps glyphs visible (fallback) while
- *  the woff2 files load, avoiding a FOIT blank flash on first chat paint. */
-@import "katex/dist/katex-swap.min.css";
+@import "./math.css";
 
 /* Geist Sans (default) + Inter + Roboto — hosted on Google Fonts. The CSS
  *  picks one cascade via `:root[data-chat-font="<id>"]` (set by
- *  `useChatFontSize`). Loads on demand the first time the sidepanel /
- *  settings / VFS pages mount; the browser cache keeps subsequent loads
- *  instant. Falls back gracefully to system-ui if the CDN is blocked. */
-
-/* @tailwindcss/typography — the `prose` utility, used by VFS markdown
- *  preview for GitHub-style document rendering. */
+ *  `useChatFontSize`). Falls back gracefully to system-ui if the CDN is blocked. */
 @plugin "@tailwindcss/typography";
 
 /*

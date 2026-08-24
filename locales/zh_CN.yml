@@ -27,6 +27,7 @@ common:
   cancel: "取消"
   confirm: "确认"
   save: "保存"
+  reset: "重置"
   delete: "删除"
   rename: "重命名"
   edit: "编辑"
@@ -93,11 +94,21 @@ pageActions:
     explain: "解释"
     translate: "翻译"
     summarize: "总结"
+  prompts:
+    # $1 = {{ui_language}}，$2 = {{context}}
+    explain: "用$1清晰、简洁地解释用户提供的文本，说明其含义以及读者需要了解的重要背景。回答应简短，使用纯文本，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行解释：\n\n$2"
+    # $1 = {{ui_language}}，$2 = {{context}}
+    translate: "将用户提供的文本翻译为$1，保留原意和语气。只输出翻译后的纯文本，不使用 Markdown，不添加解释、注释或引号。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行翻译：\n\n$2"
+    # $1 = {{ui_language}}，$2 = {{context}}
+    summarize: "用$1简洁地总结用户提供的文本，保留关键要点。使用纯文本或紧凑列表，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行总结：\n\n$2"
   result:
     loading: "思考中…"
     error: "出错了，请重试。"
     close: "关闭"
     continue: "在侧边栏继续"
+    # $1 = 脚本抛出的错误
+    transformFailed: "后处理脚本执行失败，显示原始输出——$1"
+    empty: "没有输出。"
 
 # ─── 设置 ───
 settings:
@@ -127,6 +138,7 @@ settings:
   about:
     title: "关于"
     tagline: "AI 浏览器侧边栏助手"
+    website: "官网"
     feedback: "反馈"
     checkUpdate: "检查更新"
     checking: "检查中…"
@@ -186,15 +198,62 @@ settings:
       off: "关闭"
   pageInteraction:
     title: "页面交互"
+    pageScope:
+      include: "仅在这些页面生效"
+      includeHint: "留空则在所有页面生效。"
+      exclude: "排除以下页面"
+      excludeHint: "排除规则优先于包含规则。"
+      addExclude: "添加排除规则"
+      syntax: "使用 Chrome 页面匹配规则，例如 *://*.example.com/*。URL 中 ? 和 # 后的内容不参与匹配。"
+      syntaxDocs: "查看配置规则"
+    pagePattern:
+      placeholder: "*://*.example.com/*"
+      # $1 = 该行的 match pattern
+      edit: "编辑规则 $1"
+      # $1 = 该行的 match pattern
+      remove: "移除规则 $1"
+    actions:
+      title: "工具条操作"
+      hint: "操作按此顺序显示。内置操作可自定义系统提示词、设置生效范围或关闭，也可以添加带自定义名称和提示词的操作。"
+      builtin: "内置"
+      custom: "自定义"
+      pageScoped: "限定页面"
+      create: "新建操作"
+      # $1 = 动作名称
+      more: "「$1」的更多操作"
+      # $1 = 动作名称
+      moveUp: "上移「$1」"
+      # $1 = 动作名称
+      moveDown: "下移「$1」"
+      # $1 = 动作名称
+      delete: "删除「$1」"
+      # $1 = 动作名称
+      edit: "编辑「$1」"
+      deleteConfirmTitle: "删除这个操作？"
+      # $1 = 动作名称
+      deleteConfirmDescription: "删除“$1”后无法恢复。"
+      editBuiltin: "内置操作"
+      editCustom: "自定义操作"
+      label: "按钮文本"
+      labelPlaceholder: "例如：提取要点"
+      prompt: "系统提示词"
+      # $1 = 变量自动完成的触发字符（“{{”）
+      promptHint: "告诉模型如何处理选中文本。输入 $1 可插入变量。"
+      # $1 / $2 = 模板变量名，渲染成字面量 {{name}}
+      promptPlaceholder: "例如：提取 $1 中的要点，并用 $2 回答。"
+      pages: "生效范围"
+      transform: "输出后处理脚本（可选）"
+      transformHint: "对生成完毕的输出做加工的 JavaScript。定义名为 transform(text, vars) 的函数，返回要显示的字符串。vars 与提示词模板同一套环境变量：selected_text、context、page_url、page_title、date、ui_language。脚本出错时原样显示原始输出。"
+      transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
     ball:
       label: "悬浮球"
       hint: "在网页上显示一个贴边的悬浮球，单击可打开或关闭侧边栏。"
     toolbar:
       label: "划词工具条"
-      hint: "在网页上选中文本时，显示包含复制、解释、翻译的小工具条。"
+      hint: "选中文本时显示快捷工具条。"
     model:
       label: "工具条模型"
-      hint: "划词工具条的解释、翻译所用模型，通常小而省的模型就够，默认与对话模型相同。"
+      hint: "划词工具条使用的模型。通常选择速度快、成本低的模型即可，默认与对话模型相同。"
       followMain: "与对话模型相同"
     translate:
       label: "翻译目标语言"
@@ -231,6 +290,14 @@ settings:
       date: "当前日期"
       clipboard: "剪贴板内容"
       input: "斜杠命令后输入的文本"
+  templateVars:
+    selectedText: "页面选中文本"
+    context: "选中文本的上下文"
+    pageUrl: "当前页面 URL"
+    pageTitle: "当前页面标题"
+    date: "当前日期"
+    uiLanguage: "界面语言"
+    clipboard: "剪贴板内容"
   memory:
     title: "记忆"
     enable: "启用记忆"
@@ -1043,6 +1110,11 @@ permission:
 
 # ─── 错误（toast、抛出的错误信息）───
 errors:
+  pagePattern:
+    invalid: "页面匹配规则格式错误。"
+    duplicate: "该规则已存在。"
+  pageActionGone: "找不到该操作。"
+  pageActionSaveFailed: "保存失败，请重试。"
   oauth:
     cancelled: "已取消"
     timeout: "授权超时"

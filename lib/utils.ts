@@ -149,3 +149,39 @@ export function base64ToBytes(b64: string): Uint8Array {
 export function assertNever(x: never): never {
   throw new Error(`Unexpected value: ${String(x)}`);
 }
+
+/**
+ * 语言代码 → 英文语言名（如 `zh-CN` → `Chinese (China)`）；无法解析时回退代码本身。
+ *
+ * 给模型看的语言一律用英文名而不是 BCP-47 代码——"Reply in Chinese" 比
+ * "Reply in zh-CN" 稳当。内置划词动作与用户模板的 `{{ui_language}}` 共用此函数，
+ * 保证同一个变量在不同场景含义一致。
+ */
+export function languageName(code: string): string {
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/**
+ * 把连续空白折叠成单个空格并去掉首尾——多行内容压成一行。
+ *
+ * 常与 {@link truncate} 组合：先压成一行再截断，否则换行会先把可见长度撑爆
+ * （错误堆栈、页面正文预览都是这个场景）。
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 超过 max 个字符就截断，并以 `…` 结尾。
+ *
+ * 注意：经 `chrome.scripting.executeScript({ func })` 注入页面的代码**用不了**这个函数
+ * ——那种函数会被序列化、丢掉所有 import，故 lib/tools/inspect.ts 与
+ * lib/browser/element-picker.ts 里同样的截断是有意保留的内联副本，别「顺手」改成调用它。
+ */
+export function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}

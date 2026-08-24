@@ -1,6 +1,8 @@
 // 采集有界上下文（页面标题 + 选区周边文本），供翻译 / 解释 / 总结消歧用。内容脚本侧
 // 逻辑（需要选区的 DOM 上下文）。刻意有界：控制 token、成本与隐私。
 
+import { truncate } from '@/lib/utils';
+
 const MAX_CONTEXT = 800;
 const SIDE_WINDOW = 350;
 
@@ -36,7 +38,7 @@ function windowAroundRange(block: Element, range: Range): string {
  * 截窗口）。输入框选区只带标题（其值本身即内容）。总长上限 {@link MAX_CONTEXT}。
  * 全程容错：任何 DOM 异常都退回仅标题，绝不影响动作点击。
  */
-export function gatherContext(): string {
+function gatherContext(): string {
   const title = (document.title ?? '').trim();
 
   let surrounding = '';
@@ -64,5 +66,19 @@ export function gatherContext(): string {
   if (title) parts.push(`Page title: ${title}`);
   if (surrounding) parts.push(surrounding);
   const joined = parts.join('\n');
-  return joined.length > MAX_CONTEXT ? `${joined.slice(0, MAX_CONTEXT)}…` : joined;
+  return truncate(joined, MAX_CONTEXT);
+}
+
+/**
+ * 页面侧能采集到的模板变量。其余环境常量（date / ui_language）由 background 补齐，
+ * 内置动作只消费其中的 `context`。
+ *
+ * 在点击那一刻采集：此后选区可能变化、SPA 可能跳走，快照才对得上用户当时看到的内容。
+ */
+export function gatherPageVars(): Record<string, string> {
+  return {
+    context: gatherContext(),
+    page_url: location.href,
+    page_title: document.title ?? '',
+  };
 }

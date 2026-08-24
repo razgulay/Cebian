@@ -28,6 +28,7 @@ common:
   cancel: "Cancel"
   confirm: "Confirm"
   save: "Save"
+  reset: "Reset"
   delete: "Delete"
   rename: "Rename"
   edit: "Edit"
@@ -97,11 +98,21 @@ pageActions:
     explain: "Explain"
     translate: "Translate"
     summarize: "Summarize"
+  prompts:
+    # $1 = {{ui_language}}, $2 = {{context}}
+    explain: "Explain the user's text clearly and concisely in $1. Cover its meaning and any important context a reader would need. Keep the response brief and use plain prose without Markdown. The surrounding page context below is only for disambiguation; do not explain it as part of the selected text:\n\n$2"
+    # $1 = {{ui_language}}, $2 = {{context}}
+    translate: "Translate the user's text into $1 while preserving its meaning and tone. Output only the translated plain text, without Markdown, explanations, notes, or surrounding quotation marks. The surrounding page context below is only for disambiguation; do not translate it as part of the selected text:\n\n$2"
+    # $1 = {{ui_language}}, $2 = {{context}}
+    summarize: "Summarize the user's text concisely in $1, preserving its key points. Use plain prose or a compact list without Markdown. The surrounding page context below is only for disambiguation; do not summarize it as part of the selected text:\n\n$2"
   result:
     loading: "Thinking…"
     error: "Something went wrong. Please try again."
     close: "Close"
     continue: "Continue in sidebar"
+    # $1 = the error thrown by the script
+    transformFailed: "Post-process script failed, showing the original output — $1"
+    empty: "No output."
 
 # ─── Settings hub ───
 settings:
@@ -131,6 +142,7 @@ settings:
   about:
     title: "About"
     tagline: "AI browser sidebar assistant"
+    website: "Website"
     feedback: "Feedback"
     checkUpdate: "Check for updates"
     checking: "Checking…"
@@ -193,15 +205,62 @@ settings:
       off: "Off (disabled)"
   pageInteraction:
     title: "Page interaction"
+    pageScope:
+      include: "Show only on these pages"
+      includeHint: "Leave empty to apply on every page."
+      exclude: "Except on these pages"
+      excludeHint: "Takes precedence over the list above."
+      addExclude: "Add an exception"
+      syntax: "Chrome match patterns, e.g. *://*.example.com/*. Query strings and fragments are ignored."
+      syntaxDocs: "View configuration rules"
+    pagePattern:
+      placeholder: "*://*.example.com/*"
+      # $1 = the match pattern on that row
+      edit: "Edit pattern $1"
+      # $1 = the match pattern on that row
+      remove: "Remove pattern $1"
+    actions:
+      title: "Toolbar actions"
+      hint: "Buttons appear on the toolbar in this order. Built-in actions can use a custom system prompt, be scoped or turned off; add your own actions with a custom name and prompt."
+      builtin: "Built-in"
+      custom: "Custom"
+      pageScoped: "Scoped"
+      create: "New action"
+      # $1 = action name
+      more: "More actions for “$1”"
+      # $1 = action name
+      moveUp: "Move “$1” up"
+      # $1 = action name
+      moveDown: "Move “$1” down"
+      # $1 = action name
+      delete: "Delete “$1”"
+      # $1 = action name
+      edit: "Edit “$1”"
+      deleteConfirmTitle: "Delete this action?"
+      # $1 = action name
+      deleteConfirmDescription: "\"$1\" will be removed from the toolbar. This cannot be undone."
+      editBuiltin: "Built-in action"
+      editCustom: "Custom action"
+      label: "Button text"
+      labelPlaceholder: "e.g. Key points"
+      prompt: "System prompt"
+      # $1 = the trigger characters for variable autocomplete ("{{")
+      promptHint: "Tells the model what to do with the selected text. Type $1 to insert a variable."
+      # $1 / $2 = template variable names, rendered literally as {{name}}
+      promptPlaceholder: "e.g. Extract the key points from $1 and reply in $2."
+      pages: "Where it applies"
+      transform: "Post-process script (optional)"
+      transformHint: "JavaScript for post-processing the completed output. Define a function named transform(text, vars) that returns the string to display. vars provides the same environment variables as prompt templates: selected_text, context, page_url, page_title, date, ui_language. If the script fails, the original output is displayed unchanged."
+      transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
     ball:
       label: "Floating ball"
       hint: "Show a pinned ball on web pages; click it to open or close the sidebar."
     toolbar:
       label: "Selection toolbar"
-      hint: "When you select text on a page, show a small toolbar with Copy, Explain and Translate."
+      hint: "Show a quick-action toolbar when you select text on a page."
     model:
       label: "Toolbar model"
-      hint: "The model used by the toolbar's Explain and Translate. A small, cheap model is usually enough. Defaults to the conversation model."
+      hint: "The model used by all toolbar actions. A fast, low-cost model is usually enough. Defaults to the conversation model."
       followMain: "Same as conversation model"
     translate:
       label: "Translation target language"
@@ -238,6 +297,14 @@ settings:
       date: "Current date"
       clipboard: "Clipboard content"
       input: "Text typed after the slash command"
+  templateVars:
+    selectedText: "Selected text on page"
+    context: "Text around the selection"
+    pageUrl: "Current page URL"
+    pageTitle: "Current page title"
+    date: "Current date"
+    uiLanguage: "Interface language"
+    clipboard: "Clipboard content"
   memory:
     title: "Memory"
     enable: "Enable memory"
@@ -1067,6 +1134,11 @@ permission:
 
 # ─── Errors (toasts, thrown messages) ───
 errors:
+  pagePattern:
+    invalid: "Not a valid match pattern."
+    duplicate: "This pattern is already in the list."
+  pageActionGone: "This action no longer exists."
+  pageActionSaveFailed: "Could not save the action."
   oauth:
     cancelled: "Cancelled"
     timeout: "Authorization timed out"

@@ -4,6 +4,7 @@
 import { Readability } from '@mozilla/readability';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
+import { runScriptHookInFreshSandbox, type ScriptHook } from './transform-sandbox';
 import {
   handlePdfInfo,
   handlePdfText,
@@ -28,6 +29,13 @@ export type OffscreenRequest =
   | { type: 'composite-vertical'; chunks: { base64: string }[]; mimeType?: 'image/jpeg' | 'image/png' }
   | { type: 'pdf-info'; url: string }
   | { type: 'pdf-text'; url: string; pageRange?: string; maxChars?: number }
+  | {
+      type: 'transform:run';
+      /** 用户脚本原文（包装与校验在宿主侧做，见 transform-sandbox.ts）。 */
+      script: string;
+      hook: ScriptHook;
+      args: Record<string, unknown>;
+    }
   | {
       type: 'pdf-search';
       url: string;
@@ -231,6 +239,10 @@ chrome.runtime.onMessage.addListener(
 
     // ─── Original offscreen handlers ───
     const req = message as OffscreenRequest;
+    if (req.type === 'transform:run') {
+      void runScriptHookInFreshSandbox(req.script, req.hook, req.args).then(sendResponse);
+      return true;
+    }
     if (req.type === 'crop-image') {
       cropImage(req.imageData, req.crop)
         .then(result => sendResponse({ result } satisfies OffscreenResponse))
@@ -327,6 +339,10 @@ function ensureSandboxFrame(): void {
 window.addEventListener('message', (event) => {
   const msg = event.data;
   if (!msg || typeof msg.type !== 'string') return;
+  // 只中继共享 skill 沙箱那一个实例的消息：用白名单而不是「排除一次性沙箱」，否则
+  // 它的后代 iframe、弹出窗口或销毁后迟到的消息都会漏进来，被按 run id 转发给
+  // background 并撞进别人的 pendingRuns 授权。
+  if (event.source !== sandboxFrame?.contentWindow) return;
 
   if (msg.type === 'sandbox:ready') {
     sandboxReady = true;

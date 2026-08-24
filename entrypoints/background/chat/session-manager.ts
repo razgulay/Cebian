@@ -82,6 +82,7 @@ import { broadcastToViewers } from './viewers';
 import { generateSessionTitle } from '@/lib/agent/title-generation';
 import { renameSession } from '@/lib/persistence/db';
 import { startTrace, type TraceHandle } from '@/lib/debug/trace';
+import { queueStreamEvent, snapshotStreamingTail, dropStreamBroadcast } from './stream-broadcast';
 
 // ─── Types ───
 
@@ -783,39 +784,44 @@ class SessionManager {
 
       case 'message_update':
         if (event.message.role === 'assistant') {
-          // 临时诊断：首 token latency（agent_start → 第一字符抵达 = 网络 +
-          // 推理 + 序列化总时间）。同一会话每轮只打一次：firstTokenSeen 守
-          // 卫；agent_start 处会清空该集合。
-          const trace = this.pendingTraces.get(sessionId);
-          if (trace && !this.firstTokenSeen.has(sessionId)) {
-            const text = (event.message.content ?? [])
-              .filter((b) => b.type === 'text')
-              .map((b) => (b as { text?: string }).text ?? '').join('');
-            trace.mark('bg:first_token', { contentLen: text.length });
-            this.firstTokenSeen.add(sessionId);
-          }
-          // 临时诊断：每 10 个 token 打一次采样（verbose 模式可见逐 token
-          // 节奏）。不进 NOISY_PREFIXES，因为前缀是 `bg:token_` 而非
-          // `event:message_update` / `recv:message_update`。
-          if (trace) {
-            const n = (this.tokenCounts.get(sessionId) ?? 0) + 1;
-            this.tokenCounts.set(sessionId, n);
-            if (n % 10 === 0) {
-              const text = (event.message.content ?? [])
-                .filter((b) => b.type === 'text')
-                .map((b) => (b as { text?: string }).text ?? '').join('');
-              trace.mark('bg:token_n', { n, contentLen: text.length });
+          const streamEvent = event.assistantMessageEvent;
+          // 压缩成 StreamOp 增量帧并按时间窗合并——逐条全量克隆整条消息的
+          // 成本随回复长度二次增长，见 stream-broadcast.ts 头注释。
+          queueStreamEvent(sessionId, streamEvent);
+          // 临时诊断：首 token（模型 TTFB）——本轮流里第一次出现 text_delta
+          // 或 thinking_delta 就打点（text / thinking 取最先到的那个）。
+          // `bg:first_token` / `bg:token_n` 前缀不在 `debugLog.NOISY_PREFIXES`
+          // 白名单内（见 lib/debug/log），所以 verbose 关闭也会落盘。
+          if (
+            streamEvent.type === 'text_delta' ||
+            streamEvent.type === 'thinking_delta'
+          ) {
+            if (!this.firstTokenSeen.has(sessionId)) {
+              this.firstTokenSeen.add(sessionId);
+              this.pendingTraces.get(sessionId)?.mark('bg:first_token', {
+                firstKind: streamEvent.type,
+              });
+            }
+            // 文本 token 采样：每 10 个 text_delta 打一次 `bg:token_n`。
+            // 一条 delta 通常 ~1 个 token，「每 10 token」≈「每 10 次
+            // text_delta」。thinking_delta 不计入——用户感知的是可见文本节奏。
+            if (streamEvent.type === 'text_delta') {
+              const next = (this.tokenCounts.get(sessionId) ?? 0) + 1;
+              if (next >= 10) {
+                this.pendingTraces.get(sessionId)?.mark('bg:token_n', { n: next });
+                this.tokenCounts.set(sessionId, 0);
+              } else {
+                this.tokenCounts.set(sessionId, next);
+              }
             }
           }
-          broadcastToViewers(sessionId, {
-            type: 'message_update',
-            sessionId,
-            message: event.message,
-          });
         }
         break;
 
       case 'message_end': {
+        // 消息已定稿：待发的流式帧必须丢弃，否则晚到的 trailing 帧会用
+        // 过期 partial 覆盖下面这条包含最终内容的广播
+        dropStreamBroadcast(sessionId);
         const messages = [...agent.state.messages];
         // 临时诊断：message_end 抵达——从首 token 到 message_end 的耗时是
         // 「模型推理 + 流式输出」的总耗时，是「这个回复有多长」的最直接度量。
@@ -829,6 +835,7 @@ class SessionManager {
       }
 
       case 'agent_end': {
+        dropStreamBroadcast(sessionId);
         agentSession.phase = 'idle';
         this.updateKeepAlive();
         // Cancel any pending interactive tools on this session
@@ -1852,6 +1859,8 @@ class SessionManager {
     // content and bump `updatedAt`, reordering the session in the history
     // list with no real change.
     const preLen = agentSession.agent.state.messages.length;
+    // 取消路径随后自行广播 agent_end 快照，待发流式帧同样必须丢弃
+    dropStreamBroadcast(sessionId);
     agentSession.agent.abort();
     agentSession.unsubscribeAgent();
     agentSession.toolCtx.dispose();
@@ -1954,8 +1963,17 @@ class SessionManager {
   } | null {
     const agentSession = this.sessions.get(sessionId);
     if (!agentSession) return null;
+    // 快照补上流式中的 partial 尾巴（pi 把它放在 streamingMessage、不进
+    // messages）——mid-stream subscribe 的 session_state 若缺尾巴，会把
+    // 该窗口已收到的流式帧回退掉，要等下一个合并窗才恢复。尾巴须经
+    // snapshotStreamingTail 出口（注入协议维护的工具参数续写基底）
+    const { messages, streamingMessage } = agentSession.agent.state;
+    const withTail =
+      streamingMessage !== undefined
+        ? [...messages, snapshotStreamingTail(sessionId, streamingMessage)]
+        : messages;
     return {
-      messages: this.annotate(agentSession, agentSession.agent.state.messages),
+      messages: this.annotate(agentSession, withTail),
       isRunning: agentSession.phase !== 'idle',
       isCompacting: agentSession.phase === 'compacting',
       pendingTools: this.getPendingToolSnapshot(agentSession),
@@ -1979,6 +1997,7 @@ class SessionManager {
       agentSession.toolCtx.dispose();
       agentSession.permissionBridge.cancel();
       agentSession.agent.abort();
+      dropStreamBroadcast(sessionId);
       this.sessions.delete(sessionId);
       // 临时诊断：destroySession 不会触发 `agent_end` 事件（我们主动 abort +
       // delete），`handleAgentEvent` 路径不会调 `releaseTrace`。显式释放，避免

@@ -1,7 +1,12 @@
 // 页面交互（悬浮球 + 划词工具条）跨上下文消息契约。
 //
+// 页面生效范围（PageScope）的形状与判定住在同目录的 match.ts——它同时服务悬浮球 /
+// 工具条的设置与单个动作的配置，不专属于动作。
+//
 // 内容脚本 / 侧边栏 ↔ background 走独立于 AGENT_PORT 的一次性 runtime 消息通道。
 // 这里只放「与执行上下文无关」的消息形状与守卫，供三边共享。
+
+import type { PageScope } from './match';
 
 /** 页面交互 runtime 消息的统一 kind 标记（区分于 recorder 等其它 runtime 消息）。 */
 export const PAGE_ACTION_KIND = 'cebian_page_action';
@@ -82,12 +87,107 @@ export function isSuppressMessage(m: unknown): m is SuppressMessage {
 
 // ─── 划词动作（翻译 / 解释）流式契约 ───
 
-/** 内置动作 id。数据驱动：动作差异收敛成一份定义（见 lib/page-actions/actions.ts），
- *  扩展只需往注册表加条目，IPC 契约用 id + params，无需改协议。 */
-export type PageActionId = 'translate' | 'explain' | 'summarize';
+/**
+ * 内置动作 id 的单一真理源：类型由数组推导，守卫复用同一数组，注册表用
+ * `satisfies Record<BuiltinPageActionId, …>` 保持穷尽——三处不会各自漂移。
+ * 数组顺序即工具条上内置动作的缺省顺序。
+ *
+ * 内置动作的缺省提示词定义在 i18n 文案里（见 lib/page-actions/actions.ts），用户可通过
+ * overlay 覆盖；未覆盖时随界面语言使用本地化默认值。
+ */
+export const BUILTIN_PAGE_ACTION_IDS = ['explain', 'translate', 'summarize'] as const;
 
+export type BuiltinPageActionId = (typeof BUILTIN_PAGE_ACTION_IDS)[number];
+
+export function isBuiltinPageActionId(v: unknown): v is BuiltinPageActionId {
+  return typeof v === 'string' && (BUILTIN_PAGE_ACTION_IDS as readonly string[]).includes(v);
+}
+
+/**
+ * 动作 id：内置固定字面量，或用户自定义动作的 `custom-<hex>`。类型放宽成 string
+ * （用户数据里的 id 搬不进字面量联合），但**格式**仍是收紧的白名单——见
+ * `isPageActionId`。「这个 id 有没有对应定义」另由 background 查表时诚实报错。
+ */
+export type PageActionId = string;
+
+/** 自定义动作 id 的形态；与 `newCustomPageActionId` 是同一约定的两面，必须同步改。 */
+const CUSTOM_PAGE_ACTION_ID_RE = /^custom-[a-z0-9]{8,}$/;
+
+/** 生成一个自定义动作 id。创建时调用一次，之后永不变（order / overlay 按它索引）。 */
+export function newCustomPageActionId(): string {
+  return `custom-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
+/**
+ * id 格式校验。只认内置 id 与 `custom-<hex>`，故 `__proto__` / `constructor` 这类
+ * 原型键不可能通过——它们曾能绕过「查得到定义」那道防线（注册表按 id 索引普通对象），
+ * 在这里就地挡住比依赖每个查表点自己防御更可靠。
+ */
 export function isPageActionId(v: unknown): v is PageActionId {
-  return v === 'translate' || v === 'explain' || v === 'summarize';
+  if (typeof v !== 'string') return false;
+  return isBuiltinPageActionId(v) || CUSTOM_PAGE_ACTION_ID_RE.test(v);
+}
+
+// ─── 划词动作配置（用户可配置层） ───
+
+/**
+ * 用户自定义划词动作。`systemPrompt` 是模板，支持 `{{变量}}`（见
+ * lib/ai-config/template.ts 的环境变量表）；user turn 固定为选中文本，与内置动作
+ * 保持同一架构，「在侧边栏继续」固化的历史才读起来自然。
+ */
+export interface CustomPageAction {
+  /** `custom-<随机串>`，创建时生成后永不改（order / overlay 都按它索引）。 */
+  id: string;
+  /** 按钮文本。用户原样输入，不走 i18n。 */
+  label: string;
+  /** 是否显示在工具条上。缺省 = true（与内置动作的 overlay 同语义，设置里共用一列开关）。 */
+  enabled?: boolean;
+  /** system 提示词模板。 */
+  systemPrompt: string;
+  /** 页面生效范围；缺省 = 不限制（所有页面）。 */
+  pages?: PageScope;
+  /** 输出后处理脚本：定义一个完整的 `transform(text, vars)` 函数；缺省 = 不做后处理。 */
+  transform?: string;
+}
+
+/** 内置动作的用户覆盖层。字段缺省即「用默认」，不写就是没改过。 */
+export interface BuiltinActionOverlay {
+  /** 是否显示在工具条上。缺省 = true。 */
+  enabled?: boolean;
+  /** 旧版本的按钮文本覆盖，仅兼容读取，运行时忽略。 */
+  label?: string;
+  /** 覆盖 system 提示词模板；缺省 / 空串 = 回落 i18n 默认提示词。 */
+  systemPrompt?: string;
+  /** 页面生效范围；缺省 = 不限制（所有页面）。 */
+  pages?: PageScope;
+  /** 输出后处理脚本；缺省 = 不做后处理。 */
+  transform?: string;
+}
+
+/**
+ * 编辑中的动作（设置页表单的形状）。内置与自定义共用一份表单，`kind` 只决定写回配置时
+ * 落到 overlay 还是 custom 数组。内置的空 prompt 即「使用本地化默认值」，页面范围两个
+ * 列表都空即「不限制」，写回时都会被省略。
+ */
+export interface PageActionDraft {
+  id: string;
+  kind: 'builtin' | 'custom';
+  label: string;
+  systemPrompt: string;
+  /** 内置动作是否显式覆盖 system prompt；缺省时按内容与默认值比较 */
+  systemPromptOverridden?: boolean;
+  pages: PageScope;
+  transform: string;
+}
+
+/** 划词动作的全量配置。 */
+export interface PageActionsConfig {
+  /** 内置动作覆盖层，按内置 id 索引。 */
+  builtin: Partial<Record<BuiltinPageActionId, BuiltinActionOverlay>>;
+  /** 用户自定义动作。 */
+  custom: CustomPageAction[];
+  /** 工具条按钮顺序（内置 + 自定义 id 混排）；缺省 / 未列出的按内置在前、自定义按数组序补在后。 */
+  order?: string[];
 }
 
 /** 划词动作的流式端口名（独立于 AGENT_PORT）。 */
@@ -95,8 +195,8 @@ export const PAGE_ACTION_PORT = 'cebian-page-action';
 
 /**
  * 内容脚本 → background 的动作请求（经 PAGE_ACTION_PORT 端口发送）。只带原始素材，
- * 由 background 侧按 actionId 查定义、解析 params、构造提示词（「转换在 handler」）。
- * `params` 泛化预留给将来的自定义动作参数；v1 内置动作的参数由 background 读设置解析。
+ * 由 background 侧按 actionId 查定义，并把 params 与运行时环境变量合并后渲染提示词。
+ * `params` 泛化预留给将来的自定义动作参数。
  */
 export interface PageActionRequest {
   actionId: PageActionId;
@@ -104,10 +204,30 @@ export interface PageActionRequest {
   params: Record<string, unknown>;
 }
 
-/** background → 内容脚本的流式回传（同一端口）。 */
+/**
+ * background → 内容脚本的流式回传（同一端口）。
+ *
+ * `done` 上的 transform 结果只能在全文生成完后才有，且三种结局互斥（建模成联合，
+ * 避免「两个字段同时出现时该信谁」这种协议歧义）：
+ * - 都不带：动作没配 transform，展示原始输出
+ * - `transformed`：用它替换展示与复制内容（原始输出仍用于「在侧边栏继续」的固化）
+ * - `transformError`：脚本执行失败，展示降级为原文 + 提示
+ */
+/**
+ * 一次动作跑完后的收尾结局：输出后处理（transform）的三种互斥结果。`done` 消息、
+ * background 侧 runner 的返回值、内容脚本的 onDone 回调共用这一个类型，避免同一
+ * 概念在三处各写一份、其中一处又把互斥约束放宽。
+ */
+export type PageActionOutcome =
+  | { transformed?: undefined; transformError?: undefined }
+  | { transformed: string; transformError?: undefined }
+  | { transformed?: undefined; transformError: string };
+
 export type PageActionStreamMessage =
   | { type: 'chunk'; delta: string }
-  | { type: 'done' }
+  | { type: 'done'; transformed?: undefined; transformError?: undefined }
+  | { type: 'done'; transformed: string; transformError?: undefined }
+  | { type: 'done'; transformed?: undefined; transformError: string }
   | { type: 'error'; message?: string };
 
 export function isPageActionRequest(m: unknown): m is PageActionRequest {
@@ -125,7 +245,14 @@ export function isPageActionStreamMessage(m: unknown): m is PageActionStreamMess
   if (typeof m !== 'object' || m === null) return false;
   const r = m as Record<string, unknown>;
   if (r.type === 'chunk') return typeof r.delta === 'string';
-  if (r.type === 'done') return true;
+  if (r.type === 'done') {
+    // 两个字段互斥：同时出现视为非法消息，不让歧义流进展示层。
+    if (r.transformed !== undefined && r.transformError !== undefined) return false;
+    return (
+      (r.transformed === undefined || typeof r.transformed === 'string') &&
+      (r.transformError === undefined || typeof r.transformError === 'string')
+    );
+  }
   if (r.type === 'error') return r.message === undefined || typeof r.message === 'string';
   return false;
 }

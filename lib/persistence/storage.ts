@@ -5,6 +5,10 @@ import type { WxtStorageItem } from 'wxt/utils/storage';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { debugLog, withSession } from '@/lib/debug/log';
 
+// 划词动作配置与页面范围的形状归属其概念（lib/page-actions），这里只声明持久化位置。
+import type { PageActionsConfig } from '@/lib/page-actions/types';
+import { resolvePageScope, type PageScope } from '@/lib/page-actions/match';
+
 // ─── Debug-log chokepoint ───
 
 /** Wrap `storage.defineItem` so every `setValue(...)` emits a debug log entry.
@@ -415,8 +419,6 @@ export const memoryOrganizeState = defineLoggedItem<MemoryOrganizeState>(
  * 翻译）。两块 UI 各有显示开关；工具条的 AI 单独配置，缺省回退对话主模型。
  *
  * `toolbarModel` 缺省（undefined）= 跟随主模型，语义同压缩模型的「跟随对话模型」。
- * `translateTarget` 是翻译目标语言的 BCP-47 代码；空串 = 跟随界面语言（读取时由调用
- * 方解析成具体语言），语义同「自动」。
  */
 export interface PageInteractionSettings {
   /** 悬浮球显示开关。默认 true */
@@ -425,27 +427,92 @@ export interface PageInteractionSettings {
   showSelectionToolbar: boolean;
   /** 工具条专用模型；缺省回退主模型 */
   toolbarModel?: ModelIdentity;
-  /** 翻译目标语言 BCP-47 代码；空串 = 跟随界面语言 */
-  translateTarget: string;
+  /** 悬浮球的页面生效范围（include 空 = 所有页面，exclude 优先扣除） */
+  ballPages: PageScope;
+  /** 划词工具条的页面生效范围。与悬浮球各存一份——两块 UI 的干扰场景不同 */
+  toolbarPages: PageScope;
 }
 
 /** 页面交互设置默认值（新装机 fallback + 旧装机字段回填共用单一真理源）。 */
 const DEFAULT_PAGE_INTERACTION: PageInteractionSettings = {
   showFloatingBall: true,
   showSelectionToolbar: true,
-  translateTarget: '',
+  ballPages: { include: [], exclude: [] },
+  toolbarPages: { include: [], exclude: [] },
 };
 
-/** 取规范的页面交互设置：补齐旧装机 / 部分写入缺失的字段。读设置的唯一入口。 */
+/**
+ * 未发布的开发版本里，两块 UI 的范围各是一份「隐藏页面」列表。读取时按 exclude 映射
+ * 过来，免得开发期配过的规则静默失效（发布用户没有这份数据）。
+ *
+ * 这层兼容只在**读**路径上：备份采集 / 恢复原样读写值，未编辑过的数据会一直是旧形状，
+ * 故它得留着，除非哪天真写一次持久化迁移。
+ */
+interface LegacyHiddenPages {
+  ballHiddenPages?: string[];
+  toolbarHiddenPages?: string[];
+}
+
+/**
+ * 取规范的页面交互设置：补齐旧装机 / 部分写入缺失的字段。读设置的唯一入口。
+ *
+ * 两点要紧：
+ * 1. 版本判据是「存的值里**有没有**新字段」，而不是「新字段是否为空」。用户把范围清空
+ *    也是一种明确选择，若按「空就回读旧列表」处理，旧规则会被一次次复活、永远删不掉。
+ * 2. 返回值显式只含规范字段，把旧字段丢掉——主面板是整个对象写回 storage 的，带着旧
+ *    字段就会把它一直存下去。
+ */
 export function resolvePageInteractionSettings(
   s: Partial<PageInteractionSettings> | undefined,
 ): PageInteractionSettings {
-  return { ...DEFAULT_PAGE_INTERACTION, ...s };
+  const merged = { ...DEFAULT_PAGE_INTERACTION, ...s };
+  const legacy = s as LegacyHiddenPages | undefined;
+  const scopeOf = (
+    key: 'ballPages' | 'toolbarPages',
+    legacyHidden: string[] | undefined,
+  ): PageScope =>
+    s && Object.hasOwn(s, key)
+      ? resolvePageScope(merged[key])
+      : { include: [], exclude: [...(legacyHidden ?? [])] };
+
+  return {
+    showFloatingBall: merged.showFloatingBall,
+    showSelectionToolbar: merged.showSelectionToolbar,
+    ...(merged.toolbarModel ? { toolbarModel: merged.toolbarModel } : {}),
+    ballPages: scopeOf('ballPages', legacy?.ballHiddenPages),
+    toolbarPages: scopeOf('toolbarPages', legacy?.toolbarHiddenPages),
+  };
 }
 
 export const pageInteractionSettings = defineLoggedItem<PageInteractionSettings>(
   'local:pageInteractionSettings',
   { fallback: { ...DEFAULT_PAGE_INTERACTION } },
+);
+
+/**
+ * 划词工具条上的动作配置：内置动作的覆盖层（启停 / 改名 / 限定页面 / 后处理脚本）
+ * 与用户自定义动作。与 `pageInteractionSettings` 分开存——前者是「功能开关」，
+ * 这里是随用户编辑频繁增删的内容集合，混在一起会让每次改动都重写整份开关。
+ */
+export const DEFAULT_PAGE_ACTIONS_CONFIG: PageActionsConfig = {
+  builtin: {},
+  custom: [],
+};
+
+/** 取规范的划词动作配置：补齐缺失字段并复制集合，读配置的唯一入口。 */
+export function resolvePageActionsConfig(
+  c: Partial<PageActionsConfig> | undefined,
+): PageActionsConfig {
+  return {
+    builtin: { ...(c?.builtin ?? {}) },
+    custom: [...(c?.custom ?? [])],
+    ...(c?.order ? { order: [...c.order] } : {}),
+  };
+}
+
+export const pageActionsConfig = storage.defineItem<PageActionsConfig>(
+  'local:pageActionsConfig',
+  { fallback: { ...DEFAULT_PAGE_ACTIONS_CONFIG } },
 );
 
 /**

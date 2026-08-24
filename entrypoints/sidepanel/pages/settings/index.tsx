@@ -49,7 +49,7 @@ export function SettingsRoutes({ basePath, showBackButton = false, showOpenInTab
         <Route path="memory/*" element={<MemorySection />} />
         <Route path="rag" element={<RagSection />} />
         <Route path="mcp" element={<MCPSection />} />
-        <Route path="page-interaction" element={<PageInteractionSection />} />
+<Route path="page-interaction/*" element={<PageInteractionSection />} />
         <Route path="appearance" element={<AppearanceSection />} />
         <Route path="backup" element={<BackupSection />} />
         <Route path="storage" element={<StorageSection />} />

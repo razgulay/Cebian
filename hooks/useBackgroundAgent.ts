@@ -17,6 +17,7 @@ import {
   type TurnSettings,
 } from '@/lib/ipc/protocol';
 import type { Attachment } from '@/lib/agent/attachments';
+import { applyStreamOps } from '@/lib/agent/stream-replica';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { replaceUserText, truncateForRetry } from '@/lib/agent/message-helpers';
 import { rewriteLastUserMessage } from '@/lib/agent/rewrite-last-user-message';
@@ -108,6 +109,21 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   const sessionIdRef = useRef<string | null>(null);
   const connectedWaitersRef = useRef<Set<(connected: boolean) => void>>(new Set());
   const scheduleRetryRef = useRef<(() => void) | null>(null);
+  // 流式副本漂移时的重同步：重发 subscribe 拉权威快照（session_state）。
+  // 幂等 + 1s 时间去重——它可能从 setState updater 里被调用（含 StrictMode
+  // 双调用），重复触发的代价只是一帧多余的快照。
+  const lastResyncAtRef = useRef(0);
+  const requestResyncRef = useRef<((sessionId: string) => void) | null>(null);
+  requestResyncRef.current = (sessionId: string) => {
+    // updater 可能延迟到会话已切换后才执行——重发过期会话的 subscribe 会把
+    // background 的 viewer 路由改回旧会话，新会话从此收不到广播。只为当前
+    // 会话重同步
+    if (sessionIdRef.current !== sessionId) return;
+    const now = Date.now();
+    if (now - lastResyncAtRef.current < 1_000) return;
+    lastResyncAtRef.current = now;
+    portRef.current?.postMessage({ type: 'subscribe', sessionId } satisfies ClientMessage);
+  };
   // Stable callback refs to avoid re-creating the port listener
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
@@ -214,50 +230,51 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
           setState(prev => ({ ...prev, isAgentRunning: true, isCompacting: false }));
           break;
 
-        case 'message_start' as never: {
-          // Forward-compatible stub: BG's IPC protocol doesn't currently
-          // emit a dedicated `message_start` event — message lifecycle is
-          // bounded by `message_update` / `message_end`. Kept here so that
-          // if/when BG adds a start-of-message broadcast, the sidepanel
-          // hook will log it without further code changes. Cast the label
-          // to `never` so TS doesn't reject the unknown case label.
-          const m = msg as unknown as { sessionId?: string; role?: string };
-          debugLog.info('bg', 'recv:message_start',
-            withSession({ role: m.role ?? '' }, m.sessionId ?? ''));
-          break;
-        }
-
-        case 'message_update':
+case 'stream_ops':
           if (!isCurrentSession(msg.sessionId)) break;
-          debugLog.info('hook', 'recv:message_update', {
+          debugLog.info('hook', 'recv:stream_ops', {
             sessionId: msg.sessionId,
-            msgRole: msg.message.role,
-            stopReason: (msg.message as { stopReason?: string }).stopReason,
+            opsLen: msg.ops.length,
+            opKinds: msg.ops.map((o) => o.kind),
           });
-          // 临时诊断：首条 message_update 在 hook 端被收到时打 `hook:first_token`
-          // ——首 token 延迟（time-to-first-token）是用户感知「LLM 是否在响应」
-          // 的最直接指标，agent_start → 第一字符抵达 = 网络 + 推理 + 序列化总
-          // 时间。`hookFirstTokenSeenRef` 守卫确保每个会话每轮只打一次。
-          if (msg.message.role === 'assistant' && !hookFirstTokenSeenRef.current.has(msg.sessionId)) {
-            hookFirstTokenSeenRef.current.add(msg.sessionId);
-            const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
-            if (t0 !== undefined) {
-              const trace = startTrace('hook', msg.sessionId, t0);
-              const text = (msg.message.content ?? [])
-                .filter((b: { type: string }) => b.type === 'text')
-                .map((b) => (b as { text?: string }).text ?? '').join('');
-              trace.mark('hook:first_token', { contentLen: text.length });
+          // 临时诊断：stream_ops 路径下「首 token 抵达」改为检测 ops 里是否带
+          // 文本增量（首次 tail_replace 引入 assistant 文本块、或第一条
+          // tail_append text/thinking）。`hookFirstTokenSeenRef` 守卫同前，
+          // 每个会话每轮只打一次。
+          if (!hookFirstTokenSeenRef.current.has(msg.sessionId)) {
+            const hasTextOp = msg.ops.some((op) => {
+              if (op.kind === 'tail_append' && (op.field === 'text' || op.field === 'thinking')) {
+                return true;
+              }
+              if (op.kind === 'tail_replace') {
+                const m = op.message;
+                return m.role === 'assistant' && (m.content ?? []).some(
+                  (b) => b.type === 'text' || b.type === 'thinking',
+                );
+              }
+              return false;
+            });
+            if (hasTextOp) {
+              hookFirstTokenSeenRef.current.add(msg.sessionId);
+              const t0 = pendingTraceT0Ref.current.get(msg.sessionId);
+              if (t0 !== undefined) {
+                const trace = startTrace('hook', msg.sessionId, t0);
+                trace.mark('hook:first_token', { opsLen: msg.ops.length });
+              }
             }
           }
           setState(prev => {
-            const msgs = [...prev.messages];
-            const last = msgs[msgs.length - 1];
-            if (last && last.role === 'assistant') {
-              msgs[msgs.length - 1] = msg.message;
-            } else {
-              msgs.push(msg.message);
+            const next = applyStreamOps(prev.messages, msg.ops);
+            if (next === null) {
+              // 副本漂移（正常流程不该发生）：保持现状，请求重新订阅拉取
+              // 权威快照。副本在 message_end / agent_end 的全量 transcript
+              // 边界也会被整体校正，这里只是提前自愈。
+              // 在 updater 里发起副作用不理想，但 requestResync 幂等且带
+              // 时间去重（StrictMode 双调用也只发一次），坏处有界。
+              requestResyncRef.current?.(msg.sessionId);
+              return prev;
             }
-            return { ...prev, messages: msgs };
+            return { ...prev, messages: next };
           });
           break;
 

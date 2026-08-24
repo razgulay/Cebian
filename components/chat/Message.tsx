@@ -393,6 +393,14 @@ function extractSpeakText(el: HTMLElement | null): string {
     const container = pre.parentElement ?? pre;
     container.replaceWith(document.createTextNode(`${period}${notice}${period}`));
   }
+  // KaTeX 公式（MathML 输出）：textContent 会把 MathML 结构文本和 annotation
+  // 里的 LaTeX 源码各读一遍，念出来是乱码般的重复符号。整体替换成 LaTeX
+  // 源码——朗读出来至少是可理解的公式描述。
+  for (const katex of Array.from(target.querySelectorAll('.katex'))) {
+    const source =
+      katex.querySelector('annotation[encoding="application/x-tex"]')?.textContent ?? '';
+    katex.replaceWith(document.createTextNode(source));
+  }
   return (target.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
 
@@ -479,11 +487,15 @@ export function AgentMessage({
  *  markdown surface were tried but the discrete commit pops felt
  *  jarring against the smooth reading-speed stream the model already
  *  provides. data-speech-content keeps extractSpeakText focused on
- *  the response body (skips thinking / tool cards in sibling blocks). */
-export function AgentTextBlock({ content }: { content: string }) {
+ *  the response body (skips thinking / tool cards in sibling blocks).
+ *  streaming=true 走 MarkdownRenderer 的分块 memo 路径，末尾块单独重渲染，
+ *  前面已定稿块全部跳过——长回复流式期间的 CPU 占用显著降低。 */
+export function AgentTextBlock({ content, streaming }: { content: string; streaming?: boolean }) {
+  // data-speech-content：标记「可朗读的回复正文」，供 extractSpeakText 只读此子树，
+  // 从而跳过 thinking / 工具卡片 / 错误提示等同处一个容器下的其它块。
   return (
     <div data-speech-content>
-      <MarkdownRenderer content={content} />
+      <MarkdownRenderer content={content} normalizeMath streaming={streaming} />
     </div>
   );
 }
@@ -522,7 +534,7 @@ export function ThinkingBlock({ content, isLive }: { content: string; isLive?: b
       >
         <div className="overflow-hidden">
           <div className="px-3 py-3 border-t border-dashed border-border text-muted-foreground font-mono text-[0.75rem] leading-relaxed bg-card/50">
-            <MarkdownRenderer content={content} />
+            <MarkdownRenderer content={content} normalizeMath streaming={isLive} />
           </div>
         </div>
       </div>

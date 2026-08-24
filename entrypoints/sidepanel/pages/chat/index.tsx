@@ -624,7 +624,7 @@ export function ChatPage({
                   {leakedThinking.map((reasoning, i) => (
                     <ThinkingBlock key={`tl-${idx}-${i}`} content={reasoning} isLive={isStreaming} />
                   ))}
-                  {text && <AgentTextBlock content={text} />}
+                  {text && <AgentTextBlock content={text} streaming={isStreaming} />}
                   {isError && (
                     <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mt-2 whitespace-pre-wrap break-all">
                       {assistantMsg.errorMessage ?? t('chat.session.modelError')}
