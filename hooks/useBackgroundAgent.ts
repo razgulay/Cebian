@@ -25,6 +25,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
+import { compactionChannel } from '@/lib/agent/compaction-sidepanel-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
@@ -53,6 +54,15 @@ export interface AgentPortState {
   connected: boolean;
   /** Last error message from the agent, cleared on next prompt. */
   lastError: string | null;
+  /**
+   * 400 context-overflow recovery state. Set when the BG broadcasts
+   * `context_overflow` (auto-recovery failed twice and handed control to
+   * the user). The chat panel renders a card with Retry/Stop buttons
+   * when this is non-null; the agent remains idle until the user picks
+   * one. Cleared when the user responds (Retry/Stop) or sends a new
+   * prompt, which resets the BG counter.
+   */
+  contextOverflow: { attempts: number; lastError: string } | null;
 }
 
 // ─── Pending interactive tool info (for UI rendering) ───
@@ -96,6 +106,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     sessionTitle: '',
     connected: false,
     lastError: null,
+    contextOverflow: null,
   });
 
   const [pendingTools, setPendingTools] = useState<Map<string, PendingToolInfo>>(new Map());
@@ -443,6 +454,24 @@ case 'stream_ops':
           }
           break;
 
+        case 'context_overflow':
+          // 400-out-of-context. The agent already auto-retried twice; this
+          // broadcast hands control to the user via the recovery card.
+          // We clear the same trace sentinel as `error` so a subsequent
+          // Retry/Stop starts a clean timing window.
+          if (msg.sessionId && !isCurrentSession(msg.sessionId)) break;
+          setState(prev => ({
+            ...prev,
+            isAgentRunning: false,
+            isCompacting: false,
+            contextOverflow: { attempts: msg.attempts, lastError: msg.lastError },
+          }));
+          if (msg.sessionId) {
+            pendingTraceT0Ref.current.delete(msg.sessionId);
+            hookFirstTokenSeenRef.current.delete(msg.sessionId);
+          }
+          break;
+
         case 'recorder_status':
           recorderChannel.publishStatus({
             isRecording: msg.isRecording,
@@ -460,6 +489,18 @@ case 'stream_ops':
 
         case 'recorder_start_rejected':
           recorderChannel.publishRejection({ reason: msg.reason });
+          break;
+
+        case 'compaction_skipped':
+          // Subtask 5：BG 主动 80% 预检想压缩但找不到可用切点时通知。前端把这个
+          // 透给 toast 订阅者；这是 fire-and-forget，不动 `AgentPortState`、
+          // 不清 trace 哨兵（事件发生在 agent.prompt() 真正开始之前，trace t0
+          // 还没记上）。
+          if (msg.sessionId && !isCurrentSession(msg.sessionId)) break;
+          compactionChannel.publishSkipped({
+            tokens: msg.tokens,
+            contextWindow: msg.contextWindow,
+          });
           break;
 
         case 'mcp_resource_result':
@@ -718,6 +759,22 @@ case 'stream_ops':
     if (sessionId) postMessage({ type: 'cancel', sessionId });
   }, [postMessage]);
 
+  /**
+   * User response to a 400 context-overflow card. Retry triggers a fresh
+   * attempt on the BG with a deeper (50%) message drop; Stop clears the
+   * card and re-enables the composer so the user can start a new turn.
+   * In both cases we clear local `contextOverflow` so the card hides
+   * immediately, before the BG acknowledges — the BG's reply will be
+   * a fresh agent_start (Retry) or a session_state with the cleared
+   * state (Stop).
+   */
+  const sendContextOverflowResponse = useCallback((action: 'retry' | 'stop') => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    postMessage({ type: 'context_overflow_response', sessionId, action });
+    setState(prev => ({ ...prev, contextOverflow: null }));
+  }, [postMessage]);
+
   /** 编辑一条已发送的 user 消息并从该点重新生成（issue #44）。乐观更新：本地按
    *  entryId 截断到该消息之前、放入换好文案的 user 气泡（复用后台同款
    *  replaceUserText，附件徽标不闪），随后的权威广播完成收敛。 */
@@ -887,6 +944,7 @@ case 'stream_ops':
       sessionTitle: '',
       connected: true,
       lastError: null,
+      contextOverflow: null,
     });
     setPendingTools(new Map());
     setPendingPermissions(new Map());
@@ -974,5 +1032,6 @@ case 'stream_ops':
     resolveTool,
     cancelTool,
     resolvePermission,
+    sendContextOverflowResponse,
   };
 }

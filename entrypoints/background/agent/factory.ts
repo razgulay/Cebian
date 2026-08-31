@@ -17,7 +17,13 @@ import type { Api, Model, Message } from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { ThinkingLevel } from '@/lib/persistence/storage';
 import { resolveProviderApiKey } from '../providers/credentials';
-import { getRetainedTail, isCompactionSummary, type CompactionSummaryMessage } from '@/lib/agent/compaction';
+import {
+  clampedCompactionReserve,
+  findCompactionCutPoint,
+  getRetainedTail,
+  isCompactionSummary,
+  type CompactionSummaryMessage,
+} from '@/lib/agent/compaction';
 import { sanitizeAgentMessages } from '@/lib/agent/message-helpers';
 
 // ─── Agent factory ───
@@ -91,14 +97,27 @@ function createCebianAgent(options: CreateAgentOptions): Agent {
       return out;
     },
 
-    // 上下文窗口管理：若存在压缩摘要，LLM 视图 = 最后一条摘要 + 其保留区副本
-    // （retainedTail）+ 其后的全部消息——摘要之前的历史已被摘要覆盖，无需再发。
-    // 两种摘要形态由同一条公式统一处理：
-    // - 新压缩（树化后）：摘要尾部追加，保留区原文在摘要**之前**、副本挂在
-    //   retainedTail 上 → 公式展开副本；
-    // - v1 迁移来的旧摘要：无 retainedTail（保留区本就在摘要之后）→ 公式退化为
-    //   原来的「从摘要起切片」。
-    // state.messages 仍保留完整历史（无损），此处只是 LLM 边界的视图变换，不写回 state。
+    // 上下文窗口管理：两步流水线，都只是 LLM 视图变换、不写回 state.messages
+    // （agent.d.ts 的契约：返回数组只用于 LLM call，state 由主循环独立维护）。
+    //
+    // Step 1 — 压缩摘要视角展开：若存在压缩摘要，LLM 视图 = 最后一条摘要 +
+    // 其保留区副本（retainedTail）+ 其后的全部消息——摘要之前的历史已被摘要
+    // 覆盖，无需再发。两种摘要形态由同一条公式统一处理：
+    //  - 新压缩（树化后）：摘要尾部追加，保留区原文在摘要**之前**、副本挂在
+    //    retainedTail 上 → 公式展开副本；
+    //  - v1 迁移来的旧摘要：无 retainedTail（保留区本就在摘要之后）→ 公式
+    //    退化为原来的「从摘要起切片」。
+    //
+    // Step 2 — sliding-window 硬上限（Subtask 3）：在 Step 1 的基础上按
+    // `contextWindow - reserveTokens - systemPrompt footprint` 算出消息预算，
+    // 超出时从最早丢弃、沿用 `findCompactionCutPoint` 的 turn-start 对齐，
+    // 复用 issue #9 修过的 tool_call/toolResult 配对安全。摘要钉在 head
+    // 不丢。`state.messages` 仍保留完整历史（无损），此处只是 LLM 边界
+    // 的视图变换，不写回 state。
+    //
+    // 闭包里的 `model.contextWindow` 是 agent 创建时的值；若
+    // session-manager 在中途换 model（见 session-manager.ts 的 model
+    // 切换点），本预算会迟到一刷新——Subtask 2 的 400 恢复兜底捕获。
     transformContext: async (msgs: AgentMessage[]): Promise<AgentMessage[]> => {
       let lastSummaryIdx = -1;
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -107,9 +126,51 @@ function createCebianAgent(options: CreateAgentOptions): Agent {
           break;
         }
       }
-      if (lastSummaryIdx < 0) return msgs;
-      const summary = msgs[lastSummaryIdx] as CompactionSummaryMessage;
-      return [summary, ...getRetainedTail(summary), ...msgs.slice(lastSummaryIdx + 1)];
+      const summary =
+        lastSummaryIdx >= 0 ? (msgs[lastSummaryIdx] as CompactionSummaryMessage) : undefined;
+      const baseMsgs: AgentMessage[] = summary
+        ? [summary, ...getRetainedTail(summary), ...msgs.slice(lastSummaryIdx + 1)]
+        : msgs;
+
+      const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
+      const reserveTokens = clampedCompactionReserve(model.contextWindow);
+      const budget = Math.max(
+        1024,
+        model.contextWindow - reserveTokens - systemPromptTokens,
+      );
+      // DIAG (Subtask 3)：每轮 transformContext 记录一次预算数学，便于现场
+      // 核对 sliding-window 是否在该转窗口的模型上如期触发。
+      console.warn(
+        `[diag:slidingWindow] model=${model.id} contextWindow=${model.contextWindow} systemPromptTokens=${systemPromptTokens} budget=${budget} baseLen=${baseMsgs.length}`,
+      );
+
+      // 太短就不动：与 `autoRecoverFromOverflow` 同口径（< 4 条消息没有压缩
+      // 与裁剪的必要）。
+      if (baseMsgs.length < 4) return baseMsgs;
+
+      // 摘要钉在 head 不丢；预算扣减仅作用于摘要之后的「真实」消息。
+      const pinnedHead: AgentMessage[] = summary ? [summary] : [];
+      const tail: AgentMessage[] = summary
+        ? [...getRetainedTail(summary), ...msgs.slice(lastSummaryIdx + 1)]
+        : msgs;
+      const summaryTokens = summary
+        ? Math.ceil((summary.summary?.length ?? 0) / 4)
+        : 0;
+      const tailBudget = Math.max(0, budget - summaryTokens);
+
+      // findCompactionCutPoint 语义是「第一条 token 累计 ≥ 预算的 user 消息
+      // 下标」——与 sliding-window 的 turn-start 对齐目标一致。
+      // 返回 <= 0 时整段 tail 已经装得下（或没有 user 可对齐），无需裁剪。
+      const cutInTail = findCompactionCutPoint(tail, tailBudget);
+      if (cutInTail <= 0) return baseMsgs;
+      const pruned = [...pinnedHead, ...tail.slice(cutInTail)];
+      // DIAG：只有真正发生裁剪时才打「pruned」行，便于从日志区分「无 op」。
+      if (pruned.length !== baseMsgs.length) {
+        console.warn(
+          `[diag:slidingWindow] pruned from=${baseMsgs.length} to=${pruned.length}`,
+        );
+      }
+      return pruned;
     },
 
     // 发送 LLM 请求的 stream 函数。pi 0.81 起 streamFn 必填（内置默认回退被移除），

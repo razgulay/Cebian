@@ -26,9 +26,14 @@ import { composeUserMessage, composeSystemPrompt } from '../agent/prompt-compose
 import { resolveProviderApiKey } from '../providers/credentials';
 import {
   COMPACTION_SETTINGS,
+  buildArchiveFilename,
+  buildCompactionArchiveEntry,
+  clampedCompactionKeepRecent,
+  clampedCompactionReserve,
   findCompactionCutPoint,
   getRetainedTail,
   runCompaction,
+  parseStructuredSummary,
   createCompactionSummaryMessage,
   isCompactionSummary,
   usableCompactionTarget,
@@ -81,7 +86,10 @@ import { broadcastAll } from '../ipc/port-registry';
 import { broadcastToViewers } from './viewers';
 import { generateSessionTitle } from '@/lib/agent/title-generation';
 import { renameSession } from '@/lib/persistence/db';
+import { vfs } from '@/lib/persistence/vfs';
+import { WORKSPACES_ROOT } from '@/lib/persistence/vfs-paths';
 import { startTrace, type TraceHandle } from '@/lib/debug/trace';
+import { debugLog, withSession } from '@/lib/debug/log';
 import { queueStreamEvent, snapshotStreamingTail, dropStreamBroadcast } from './stream-broadcast';
 
 // ─── Types ───
@@ -116,6 +124,40 @@ import { queueStreamEvent, snapshotStreamingTail, dropStreamBroadcast } from './
  * is exactly the bug this phase machine fixes.
  */
 type AgentPhase = 'idle' | 'preparing' | 'running' | 'compacting';
+
+// ─── 400 context-overflow recovery constants ───
+
+/**
+ * Regex matching provider 400 errors that mean "the request was too big to
+ * fit in this model's context window". Phrases are deliberately permissive:
+ * Gemini returns `INVALID_ARGUMENT` / "exceeds the maximum number of tokens
+ * allowed N" / includes the literal limit (e.g. `1048576`); Anthropic returns
+ * "input is too long for this model" / "context length"; OpenAI returns
+ * "context_length_exceeded" / "maximum context length". Matching on the
+ * concrete numbers (1048576, 200000, 1000000) catches region-specific
+ * error variants that use a different code word.
+ */
+const CONTEXT_OVERFLOW_ERROR = /exceeds the maximum number of tokens|INVALID_ARGUMENT|context length|maximum context length|input is too long|context_length_exceeded|1048576|1000000|200000/i;
+
+/** Max auto-retry attempts before handing control to the user (3-strikes). */
+const MAX_AUTO_RECOVERY_ATTEMPTS = 2;
+
+/** Fraction of oldest messages to drop on each auto-retry (by char count). */
+const AUTO_RECOVERY_DROP_RATIO = 0.25;
+
+/** Fraction of `contextWindow` at which `maybeCompact` proactively runs a
+ *  compaction before any LLM call. Below the regular `shouldCompact` threshold
+ *  (which is `tokens > contextWindow - reserveTokens`, i.e. ~98% on Gemini 1M
+ *  with the default 16k reserve) but well above the 400 line. Catches the
+ *  "agent accumulated a lot of small tool results" case before the next
+ *  prompt() would hit the wall. */
+const PROACTIVE_COMPACT_RATIO = 0.8;
+
+/** Fraction of `contextWindow` to keep as a hard ceiling when slicing the
+ *  auto-recovery drop target. Keeps us from accidentally truncating to
+ *  `ratio * totalChars` when the messages are uniformly large — we want to
+ *  *land* at ~75% of context, not at a fixed ratio of the existing text. */
+const AUTO_RECOVERY_TARGET_RATIO = 0.75;
 
 /**
  * 注册了执行前授权门禁的工具策略（ToolGate）集合。policy 对象本身是
@@ -194,6 +236,19 @@ interface AgentSession {
    * 由「assistant 数 ≥ 1」二次兜底避免重启后重复触发。详见 `maybeGenerateTitle`。
    */
   titleGenerated: boolean;
+  /**
+   * 400 context-overflow 3-strikes counter. Incremented by
+   * `autoRecoverFromOverflow`, reset to 0 by `prompt()` after a fresh user
+   * turn. When it reaches 2, the next 400 hands control back to the user
+   * via a `context_overflow` ServerMessage. Pure in-memory; SW restart
+   * means the user starts fresh on the next 400.
+   *
+   * The reset belongs on `prompt()` (not `agent_start`) because a user
+   * turn is the only event that semantically clears the overflow state —
+   * a retry of the same turn re-uses the counter, an auto-recovered run
+   * that succeeds carries the count forward until the next user turn.
+   */
+  recoveryAttempts?: number;
 }
 
 // ─── Session Manager ───
@@ -580,6 +635,13 @@ class SessionManager {
     const model = resolveModel(modelCfg, creds, customProvs ?? []);
     if (!model) return null;
 
+    // DIAG (Subtask 2 feedback): surface the resolved model's contextWindow
+    // so we can confirm whether the user's UI override reached the live
+    // agent state (vs being shadowed by the built-in default).
+    console.warn(
+      `[diag:resolveModel] provider=${modelCfg.provider} modelId=${modelCfg.modelId} resolved.contextWindow=${model.contextWindow}`,
+    );
+
     return { model, provider: modelCfg.provider, modelId: modelCfg.modelId };
   }
 
@@ -870,6 +932,69 @@ class SessionManager {
         // 轮 stale 复用。firstTokenSeen / tokenCounts 同步清理。
         this.releaseTrace(sessionId);
 
+        // ─── 400 context-overflow 3-strikes recovery ───
+        // pi-agent-core encodes 400 (and any provider error) as a synthetic
+        // assistant message with stopReason 'error' + errorMessage set; the
+        // agent loop ends cleanly with `agent_end` rather than throwing.
+        // Here we catch that specific failure mode and try to recover in
+        // place: drop the oldest 25% of messages and `agent.continue()`. The
+        // user never sees anything on the first two strikes; the third one
+        // surfaces a card with Retry/Stop buttons.
+        //
+        // 80% pre-check (see `maybeCompact`) is the cheaper first line of
+        // defense — this branch only fires when compaction failed or the
+        // 25% drop wasn't enough (e.g. one user turn bulk-pasted a huge
+        // payload that bypassed every other guard).
+        //
+        // Success-path counter reset: if the run ended cleanly (no
+        // stopReason 'error'), the strike chain is broken. We reset
+        // recoveryAttempts so the very next 400 starts a fresh 2-strike
+        // auto-recovery instead of going straight to the user card. The
+        // user-prompt reset (L1085) is a separate path that handles
+        // "user just started a new turn" — this is "the agent finished
+        // a turn, including a recovered one".
+        const lastMsg = messages.at(-1) as AssistantMessage | undefined;
+        if (
+          lastMsg?.stopReason === 'error' &&
+          lastMsg.errorMessage &&
+          CONTEXT_OVERFLOW_ERROR.test(lastMsg.errorMessage)
+        ) {
+          const current = agentSession.recoveryAttempts ?? 0;
+          if (current < MAX_AUTO_RECOVERY_ATTEMPTS) {
+            agentSession.recoveryAttempts = current + 1;
+            // Fire-and-forget: the continue() will eventually emit a fresh
+            // agent_start + agent_end, and any later `agent_end` with
+            // stopReason 'error' will hit this branch again. We intentionally
+            // don't await — the outer `agent_end` broadcast above has
+            // already told the UI the failed turn ended.
+            void this.autoRecoverFromOverflow(
+              agentSession,
+              lastMsg.errorMessage,
+              AUTO_RECOVERY_DROP_RATIO,
+            );
+          } else {
+            // Out of auto-retries — hand control to the user. UI renders a
+            // card with Retry (drops 50%) / Stop (set phase=idle so the
+            // composer re-enables). The counter is NOT reset here; the
+            // prompt() reset path is the only legitimate way to clear it.
+            broadcastToViewers(sessionId, {
+              type: 'context_overflow',
+              sessionId,
+              attempts: current,
+              lastError: lastMsg.errorMessage,
+            });
+          }
+        } else if (lastMsg?.stopReason !== 'error' && (agentSession.recoveryAttempts ?? 0) > 0) {
+          // Success-path counter reset: if the run ended cleanly (no
+          // stopReason 'error'), the strike chain is broken. We reset
+          // recoveryAttempts so the very next 400 starts a fresh 2-strike
+          // auto-recovery instead of going straight to the user card. The
+          // user-prompt reset (L1085) is a separate path that handles
+          // "user just started a new turn" — this is "the agent finished
+          // a turn, including a recovered one".
+          agentSession.recoveryAttempts = 0;
+        }
+
         // ─── One-shot auto-title（仅首条 assistant 消息）───
         // Heuristic 标题来自 prompt() 的 `text.slice(0, 50)`，slash 命令展开后
         // 那一行经常是 `[DIRECTIVE — ...]` 字面块（侧边栏看上去像乱码）。在第一
@@ -1068,6 +1193,13 @@ class SessionManager {
     // 临时诊断：把 trace handle 按 sessionId 暂存，让 `handleAgentEvent` 复用
     // 同一锚点打 `bg:agent_start` 等标记；agent_end 消费完后 `delete` 释放。
     this.pendingTraces.set(sessionId, trace);
+
+    // Reset the 400-overflow strike counter on every fresh user turn. The
+    // counter is per-turn because each new prompt is the user's signal that
+    // the previous 400 is no longer relevant (even if the auto-recovery
+    // eventually succeeded, the user already saw the success and now expects
+    // a clean slate).
+    agentSession.recoveryAttempts = 0;
 
     // 兑现 brand-new 标记：把 prompt() 当时写入的 heuristic 标题注入 AgentSession。
     // `Map.get` 仅命中一次（`delete` 紧接其后），并发 prompt() 不会重复设。
@@ -1283,11 +1415,136 @@ class SessionManager {
     // token 估算：与 LLM 视图同形（摘要 + 自上次摘要以来的序列）；优先读最后一条
     // assistant 的真实 usage，尾部按 char/4 估算。
     const { tokens } = estimateContextTokens(lastSummary ? [lastSummary, ...sinceLast] : messages);
-    if (!shouldCompact(tokens, model.contextWindow, COMPACTION_SETTINGS)) return false;
+
+    // DIAG (Subtask 2 feedback): dump the actual contextWindow + tokens before
+    // every compact decision so we can verify the 80% pre-check fires when
+    // expected. Log is one line so it's easy to grep in the Live log view.
+    console.warn(
+      `[diag:compact] model=${model.id} contextWindow=${model.contextWindow} tokens=${tokens} threshold=${PROACTIVE_COMPACT_RATIO * model.contextWindow} reserveTokens=${COMPACTION_SETTINGS.reserveTokens}`,
+    );
+
+    // Clamp `reserveTokens` / `keepRecentTokens` against the live context
+    // window. The pi-agent-core defaults (16384 / 20000) are tuned for
+    // 100k+ models; on a custom provider with `contextWindow: 8192` they
+    // exceed the model itself, which collapses `shouldCompact` to "always
+    // true" (since contextWindow - reserveTokens < 0) AND makes
+    // `findCompactionCutPoint` bail with `cut <= 0` (since the recent
+    // budget already swallows the whole transcript). Both defaults are
+    // silently dead below 32k. 公式抽到 `@/lib/agent/compaction` 的
+    // `clampedCompactionReserve` / `clampedCompactionKeepRecent`，与
+    // Subtask 3 的 transformContext sliding-window 共享同一份夹紧值。
+    const effectiveReserveTokens = clampedCompactionReserve(model.contextWindow);
+    const effectiveKeepRecentTokens = clampedCompactionKeepRecent(model.contextWindow);
+    // DIAG (Subtask 2 follow-up)：打实夹紧值，便于后续 reviewer 核对小
+    // 上下文模型上是否如期收敛。
+    if (effectiveReserveTokens !== COMPACTION_SETTINGS.reserveTokens || effectiveKeepRecentTokens !== COMPACTION_SETTINGS.keepRecentTokens) {
+      console.warn(
+        `[diag:compact] clampedSettings reserve=${effectiveReserveTokens} keepRecent=${effectiveKeepRecentTokens} for contextWindow=${model.contextWindow}`,
+      );
+    }
+    const effectiveSettings = {
+      ...COMPACTION_SETTINGS,
+      reserveTokens: effectiveReserveTokens,
+      keepRecentTokens: effectiveKeepRecentTokens,
+    };
+
+    // 80% pre-check is the FIRST gate, independent of `shouldCompact`.
+    // Original Subtask 2 design nested it inside `!shouldCompact`, which
+    // was unreachable on small-context models because their clamped
+    // reserveTokens still left `shouldCompact` perpetually true. Promoting
+    // it here makes the pre-check the primary trigger on tiny models
+    // (where there's no regular `shouldCompact` "below threshold" zone)
+    // while preserving the original behaviour on large models (where the
+    // pre-check fires *before* the 98% reserve threshold).
+    const proactive = tokens > PROACTIVE_COMPACT_RATIO * model.contextWindow;
+    const regular = shouldCompact(tokens, model.contextWindow, effectiveSettings);
+    if (proactive) {
+      console.warn(`[diag:compact] 80% pre-check firing (forced compact) for ${model.id}`);
+      // Tighten reserveTokens just enough for the re-evaluated predicate
+      // to pass; keepRecentTokens stays at the clamped value so we still
+      // slice the same way.
+      const proactiveSettings = {
+        ...effectiveSettings,
+        reserveTokens: Math.max(0, model.contextWindow - tokens + 1024),
+      };
+      const cut = findCompactionCutPoint(sinceLast, proactiveSettings.keepRecentTokens);
+      if (cut <= 0) {
+        // Subtask 5：主动预检触发了但 `cut <= 0`——单条 user 消息就超过 keepRecent
+        // 没有可摘要的历史。Agent 仍然继续发请求，下一发极易 400；这里把
+        // 情况以 `compaction_skipped` 形式广播给前端，让用户能在撞墙前知情。
+        // 常规路径的 `cut <= 0`（line 1488）继续静默——它要么成功压缩，要么最终
+        // 走 `context_overflow` 卡片，不重复提醒。
+        broadcastToViewers(agentSession.sessionId, {
+          type: 'compaction_skipped',
+          sessionId: agentSession.sessionId,
+          reason: 'cut_no_op',
+          tokens,
+          contextWindow: model.contextWindow,
+          keepRecentTokens: proactiveSettings.keepRecentTokens,
+          messagesCount: sinceLast.length,
+        });
+        return false;
+      }
+      return this.runCompactionWith(
+        agentSession,
+        pendingUserMessage,
+        proactiveSettings,
+        lastSummary,
+        sinceLast,
+        tokens,
+        messages,
+        cut,
+      );
+    }
+    if (!regular) return false;
 
     // 切点对齐到 user turn-start（排除 toolResult 中间），修 issue #9。
     // cut <= 0：无 user 可切 / 从头保留即 no-op（其前没有可摘要的历史），跳过。
-    const cut = findCompactionCutPoint(sinceLast, COMPACTION_SETTINGS.keepRecentTokens);
+    const cut = findCompactionCutPoint(sinceLast, effectiveSettings.keepRecentTokens);
+    if (cut <= 0) return false;
+
+    return this.runCompactionWith(
+      agentSession,
+      pendingUserMessage,
+      effectiveSettings,
+      lastSummary,
+      sinceLast,
+      tokens,
+      messages,
+      cut,
+    );
+  }
+
+  /**
+   * The actual compaction body, extracted from `maybeCompact` so the
+   * proactive 80% pre-check (Subtask 2) can call it with tightened
+   * `reserveTokens` without duplicating the model-resolution / signal /
+   * broadcast / persistence / cancellation logic.
+   *
+   * All the preconditions (phase guard, cut point, `lastSummary` /
+   * `sinceLast` extraction, `tokens` estimate) are computed by the caller
+   * because the proactive path also needs them to decide whether to fire.
+   * `messages` here is the pre-`maybeCompact` slice — used for the
+   * `updated` array after a successful summary (we splice the new
+   * summary onto the pre-compaction state, not the post-cut one).
+   * `cut` is the user-turn-aligned slice index into `sinceLast` — same
+   * value the caller already validated, passed in to avoid recomputing.
+   */
+  private async runCompactionWith(
+    agentSession: AgentSession,
+    pendingUserMessage: AgentMessage,
+    settings: typeof COMPACTION_SETTINGS,
+    lastSummary: CompactionSummaryMessage | null,
+    sinceLast: AgentMessage[],
+    tokens: number,
+    messages: AgentMessage[],
+    cut: number,
+  ): Promise<boolean> {
+    const { sessionId } = agentSession;
+    const model = agentSession.agent.state.model;
+
+    // cut <= 0 was already guarded by the caller, but double-check here so
+    // a future caller that bypasses the early-return can't slip through.
     if (cut <= 0) return false;
 
     // 进入 compacting 阶段：占用非 idle 状态（自动保活 + 阻止并发 prompt）。
@@ -1341,14 +1598,56 @@ class SessionManager {
         // LLM 视图由 transformContext 重建为「摘要 + retainedTail + 其后消息」，
         // 与旧的中段插入形态等价；随后 agent.prompt() 追加的本轮 user 消息
         // 排在摘要之后，retry 的「截到最后一条 user」仍会保住摘要。
+        const summaryMsg = createCompactionSummaryMessage(summary, tokens, sinceLast.slice(cut));
+        // Subtask 4：从 LLM 响应里抽出围栏 JSON（若解析成功），挂到摘要消息
+        // 上作为 `structured?` 侧信道。`parseStructuredSummary` 在 JSON 解析
+        // 失败时返回 null——此时 summaryMsg.structured 保持缺席（不置 null），
+        // 与声明合并的「字段缺席即代表解析失败」约定一致。`summary` 字段继续
+        // 存原始 LLM 输出（Markdown + JSON 围栏），不重写为 JSON。
+        const parsed = parseStructuredSummary(summary);
+        if (parsed) summaryMsg.structured = parsed;
         const updated = [
           ...messages,
-          createCompactionSummaryMessage(summary, tokens, sinceLast.slice(cut)),
+          summaryMsg,
         ];
         agentSession.agent.state.messages = updated;
         // 等落树（旧「persist + flush」语义）：SW 在广播后立刻被杀也不丢摘要。
         // 失败已在链上记录，吞掉——压缩是增益路径，不因落库失败中断本轮发送
         await this.syncTail(agentSession).catch(() => undefined);
+
+        // Subtask 4：把这次压缩事件归档到 VFS，供事后审视。Best-effort——
+        // 任何一步失败都只记 warn，绝不阻塞压缩本身（phase 已在 finally
+        // 复位，broadcast 在归档之后）。原子写：先 .tmp 再 rename，避免
+        // session-destroy 触发 `vfs.rm({recursive:true, force:true})` 时
+        // 把半文件留下。归档路径随会话销毁一并被 vfs.rm 清扫。
+        try {
+          // 一次性取时间戳，entry.compactedAt 与文件名后缀共用同毫秒，避免两者
+          // 在大 compaction（耗时数百 ms）里跨时间戳造成「filename 显示比 entry
+          // 早一刻」的歧义。
+          const compactedAt = Date.now();
+          const entry = buildCompactionArchiveEntry({
+            sessionId,
+            compactedAt,
+            tokensBefore: tokens,
+            messagesSummarized: messagesToSummarize.length,
+            compactingModel: compactModel,
+            llmOutput: summary,
+          });
+          const archivePath = `${WORKSPACES_ROOT}/${sessionId}/compaction/${buildArchiveFilename(compactedAt)}`;
+          const tmpPath = `${archivePath}.tmp`;
+          await vfs.writeFile(tmpPath, JSON.stringify(entry, null, 2), 'utf8');
+          await vfs.rename(tmpPath, archivePath);
+          debugLog.info('vfs', 'compaction:archive', withSession({
+            path: archivePath,
+            structured: parsed !== null,
+            parseError: entry.parseError,
+          }, sessionId));
+        } catch (err) {
+          debugLog.warn('vfs', 'compaction:archive', withSession({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }, sessionId));
+        }
         broadcastToViewers(sessionId, {
           type: 'session_state',
           sessionId,
@@ -1708,6 +2007,168 @@ class SessionManager {
         this.updateKeepAlive();
       }
     }
+  }
+
+  /**
+   * Auto-recover from a 400 context-overflow error. Drops the oldest chunk
+   * of `state.messages` (by char count) and calls `agent.continue()` so the
+   * agent loop retries against the smaller transcript. In-place mutation —
+   * no `moveLane`, no new branch, no `entryIds` adjustment — because the
+   * recovery is a *retry of the same turn*, not a new turn the user asked
+   * for.
+   *
+   * Why drop-by-oldest instead of `findCompactionCutPoint`: 400 is a hard
+   * failure. We need a result that fits the context window *now*; running
+   * `findCompactionCutPoint` would call the LLM to summarize, which itself
+   * could 400 on the same payload. The dropped history is still in the UI
+   * transcript (UI never lost it) — Subtask 3 (sliding window in
+   * `transformContext`) is the proper long-term solution; this method is
+   * the emergency brake.
+   *
+   * 25% default (override to 50% for the user-triggered retry path via
+   * `client-handlers.ts`).
+   *
+   * @returns true if messages were truncated and a continue was issued;
+   *          false if there wasn't enough to drop (we let the 400 stand).
+   */
+  private async autoRecoverFromOverflow(
+    agentSession: AgentSession,
+    lastError: string,
+    dropRatio: number,
+  ): Promise<boolean> {
+    // Defensive phase guard. The caller (agent_end) sets phase=idle right
+    // before invoking us, so this should always pass — but if a future
+    // caller re-enters while a run is still active, `agent.continue()`
+    // will throw "Agent is already processing" and we'd silently lose a
+    // strike (counter already incremented at the call site).
+    if (agentSession.phase !== 'idle') {
+      console.warn(
+        '[session-manager] auto-recover overflow: phase not idle, aborting',
+        agentSession.phase,
+      );
+      return false;
+    }
+    const messages = [...agentSession.agent.state.messages];
+    // Too short to safely truncate. Dropping here would orphan an in-flight
+    // toolCall/toolResult pair (issue #9) or remove the user turn that
+    // caused the overflow. Let the 400 stand and show the manual card.
+    if (messages.length < 4) return false;
+
+    // Pre-compute each message's JSON size once — used both for the total
+    // (drives the `dropRatio` target) and the tail-walk accumulator. A
+    // transcript can hold hundreds of tool-result messages, so two passes
+    // over the same array is wasted work.
+    const sizes = messages.map(m => JSON.stringify(m).length);
+    const totalChars = sizes.reduce((sum, s) => sum + s, 0);
+
+    // Compute the target keep-size from the *context window*, not from a
+    // fraction of the current transcript — if the current transcript is
+    // already 2x contextWindow, dropping 25% still leaves us over the
+    // limit. Land at AUTO_RECOVERY_TARGET_RATIO × contextWindow chars
+    // (4 chars/token heuristic) instead.
+    const contextWindowChars = agentSession.agent.state.model.contextWindow * 4;
+    const targetChars = Math.min(
+      contextWindowChars * AUTO_RECOVERY_TARGET_RATIO,
+      totalChars * (1 - dropRatio),
+    );
+
+    // Walk from the tail backwards, accumulating until we cross targetChars.
+    // Always keep the last message intact (it's the user turn we're
+    // re-running against); the user message that triggered this 400 is
+    // non-negotiable context.
+    let kept: AgentMessage[] = [];
+    let acc = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      kept = [messages[i], ...kept];
+      acc += sizes[i];
+      if (acc >= targetChars) break;
+    }
+    // If we ended up keeping the whole transcript, the drop wouldn't help —
+    // bail and let the 400 stand.
+    if (kept.length === messages.length) return false;
+
+    // Replace state.messages in place. The agent's setter copies the array
+    // (per Agent.js JSDoc on `state.messages`), so subsequent mutations to
+    // the local `messages` variable can't leak back. We do NOT touch the
+    // session tree / entryIds / committedCount because the dropped prefix
+    // was already committed — modifying those would create an inconsistent
+    // state where the agent has fewer messages than the tree says. The
+    // next syncTail (fired by agent_end of the recovered run) writes the
+    // new tail, but the orphaned prefix stays in the tree as dead entries
+    // reachable only via the previous agent_end's snapshot. This is
+    // acceptable: the recovery is a transient fix, and the dead entries
+    // are inert.
+    agentSession.agent.state.messages = kept;
+    console.warn(
+      `[session-manager] auto-recover overflow: ${messages.length} → ${kept.length} messages`,
+      lastError,
+    );
+    // Keep-alive: the outer agent_end just released the SW keep-alive
+    // (phase=idle). Without re-acquiring here, the SW could be torn down
+    // before the recovered agent_start fires (the synchronous bit of
+    // `continue()` is fast, but the LLM roundtrip is async). Acquire
+    // before continue() and let the next agent_end release it naturally.
+    acquireKeepAlive();
+    // Fire-and-forget the resume. If continue() itself 400s, agent_end will
+    // fire again with the new (smaller) transcript and the recovery loop
+    // either succeeds (third time lucky) or hits the 2-strike cap and
+    // surfaces the card. We don't await here so the outer `agent_end`
+    // broadcast completes promptly and the UI is not stuck on the failed
+    // assistant message.
+    void agentSession.agent.continue().catch((err) => {
+      console.warn('[session-manager] auto-recover continue() failed:', err);
+      // Balance the keep-alive we acquired — if continue() itself threw
+      // synchronously, the next agent_end won't fire and the SW would
+      // leak a keep-alive slot.
+      releaseKeepAlive();
+    });
+    return true;
+  }
+
+  /**
+   * Public entry point for the user-triggered Retry on the 400 recovery
+   * card. Drops deeper than the auto-recovery default (50% vs 25%) and
+   * does NOT increment `recoveryAttempts` — the user has explicitly
+   * opted into another attempt, so the strike count stays where it was
+   * (carried from the 2 failed auto-recoveries). The next 400 will
+   * re-broadcast the card; success means the user just keeps chatting.
+   *
+   * Returns true iff messages were truncated and continue() was issued.
+   */
+  async recoverFromUserTriggeredRetry(sessionId: string, dropRatio: number): Promise<boolean> {
+    const agentSession = this.sessions.get(sessionId);
+    if (!agentSession) return false;
+    return this.autoRecoverFromOverflow(agentSession, 'user-triggered retry', dropRatio);
+  }
+
+  /**
+   * Public entry point for the user-triggered Stop on the 400 recovery
+   * card. Resets the strike counter and broadcasts a fresh idle state
+   * so the composer re-enables and the next prompt doesn't get an
+   * immediate 400-card re-broadcast.
+   *
+   * Deliberately does NOT call `cancel()` — cancel() would destroy the
+   * live AgentSession via `sessions.delete()` (see the
+   * "grace-cancel" / `agent_end` flow), forcing the next prompt to
+   * cold-reload from DB. The agent is already idle (agent_end set it
+   * on the 400 path); we just need to clear the counter and confirm
+   * the idle state to the UI.
+   */
+  async resetOverflowState(sessionId: string): Promise<void> {
+    const agentSession = this.sessions.get(sessionId);
+    if (!agentSession) return;
+    agentSession.recoveryAttempts = 0;
+    // Re-broadcast session_state so any viewer that lost sync
+    // (e.g. disconnected during the recovery attempts) sees a clean
+    // idle transcript. The hook's local state is already updated; this
+    // is just the BG-side acknowledgement.
+    broadcastToViewers(sessionId, {
+      type: 'session_state',
+      sessionId,
+      messages: this.annotate(agentSession, agentSession.agent.state.messages),
+      isRunning: false,
+      pendingTools: this.getPendingToolSnapshot(agentSession),
+    });
   }
 
   /**

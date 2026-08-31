@@ -96,6 +96,11 @@ export type ClientMessage =
    *  an implicit "dismissed" (the user sent a new message instead) is handled
    *  by the existing steer/cancel path, not this message. */
   | { type: 'resolve_permission'; sessionId: string; toolCallId: string; decision: 'once' | 'always' | 'denied' }
+  /** User response to a 400-context-overflow recovery card. The agent already
+   *  auto-retried twice internally; the third strike hands control back. The
+   *  sidepanel renders the card (driven by `context_overflow` ServerMessage) and
+   *  posts this message when the user clicks Retry or Stop. */
+  | { type: 'context_overflow_response'; sessionId: string; action: 'retry' | 'stop' }
   | { type: 'session_list' }
   | { type: 'session_delete'; sessionId: string }
   /** Pin / unpin a session in the sidebar. Bg flips the bit on the row and
@@ -147,6 +152,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'resolve_tool',
   'cancel_tool',
   'resolve_permission',
+  'context_overflow_response',
   'switch_branch',
   'session_list',
   'session_delete',
@@ -262,6 +268,16 @@ export type ServerMessage =
       branchInfo?: Record<string, BranchEntryInfo>;
     }
   | { type: 'error'; sessionId: string | null; error: string }
+  /** 400 context-overflow recovery: agent already auto-retried twice, now asks
+   *  the user. UI surfaces a card with Retry (truncate 50% + continue) and
+   *  Stop (set phase=idle so the user can start a new turn). Bg ignores
+   *  `lastError`; it's only there so the card can show *why*. */
+  | {
+      type: 'context_overflow';
+      sessionId: string;
+      attempts: number;
+      lastError: string;
+    }
   | { type: 'tool_pending'; sessionId: string; toolName: string; toolCallId: string; args: any }
   | { type: 'tool_resolved'; sessionId: string; toolName: string }
   | { type: 'session_loaded'; sessionId: string; session: SessionSnapshot | null }
@@ -280,6 +296,23 @@ export type ServerMessage =
    *  `instanceId`. The sidepanel toasts this rather than disabling the
    *  button up front, so the click is never confusingly silent. */
   | { type: 'recorder_start_rejected'; reason: 'busy' | 'before_hello' }
+  /** Fired by the BG proactive 80% pre-check (Subtask 2) when it wanted to
+   *  compact but `findCompactionCutPoint` returned `cut <= 0` — typically
+   *  because a single user message alone exceeds `keepRecentTokens`. The
+   *  agent proceeds without compaction and the next request is at high
+   *  risk of 400. UI surfaces a transient Sonner toast (no card, no
+   *  response message). Session-scoped via `broadcastToViewers`. The
+   *  payload fields beyond what the toast needs are kept here so future
+   *  telemetry / debugging can subscribe without changing the wire. */
+  | {
+      type: 'compaction_skipped';
+      sessionId: string;
+      reason: 'cut_no_op';
+      tokens: number;
+      contextWindow: number;
+      keepRecentTokens: number;
+      messagesCount: number;
+    }
   /** Response to `mcp_read_resource`. `result` carries the full resource
    *  payload including `_meta.ui` (CSP / permissions for sandboxing).
    *  Error codes:

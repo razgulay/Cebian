@@ -32,6 +32,61 @@ import { debugLog, withSession } from '@/lib/debug/log';
  */
 export const COMPACTION_SETTINGS = DEFAULT_COMPACTION_SETTINGS;
 
+/** 喂给 pi-agent-core `generateSummary` 的 customInstructions：在既有的 6 节
+ *  Markdown 模板之外，额外要求 LLM 在响应末尾输出一个围栏 JSON 块。
+ *  Markdown 是人读视图，JSON 是工具查询视图——两者由 LLM 在一次响应里
+ *  一并输出。pi-agent-core 把这段字符串原样追加在 `Additional focus: `
+ *  之后（见 pi harness `compaction.js:387-392`），故不会破坏现有 Markdown
+ *  模板的结构，只在末尾追加 schema 描述。
+ *
+ *  schema 演进时改写本常量并同步 `isStructuredSummary` 的守门；v1 的 archive
+ *  文件仍按 v1 解析，v2 archive 走另一条路径。 */
+export const COMPACTION_STRUCTURED_INSTRUCTIONS =
+  'In addition to the structured Markdown summary above, append a single ' +
+  'JSON code block fenced as ```json ... ``` at the very end of your response. ' +
+  'The JSON is consumed by tooling; it must be valid JSON (no trailing commas, ' +
+  'no comments). Schema (all fields required; use empty arrays for empty lists):\n' +
+  '\n' +
+  '```\n' +
+  '{\n' +
+  '  "schema_version": 1,\n' +
+  '  "goal": "string",\n' +
+  '  "constraints": ["string"],\n' +
+  '  "progress": {\n' +
+  '    "done": ["string"],\n' +
+  '    "in_progress": ["string"],\n' +
+  '    "blocked": ["string"]\n' +
+  '  },\n' +
+  '  "decisions": [{"decision": "string", "rationale": "string"}],\n' +
+  '  "next_steps": ["string"],\n' +
+  '  "critical_context": ["string"]\n' +
+  '}\n' +
+  '```\n' +
+  '\n' +
+  'Emit the JSON only once, as the final block. If a section has no items, use ' +
+  'an empty array (or empty object for progress). Do not add fields beyond the ' +
+  'schema.';
+
+/** pi-agent-core 的 `reserveTokens` 默认值（16384）在 contextWindow ≤ 32k
+ *  的模型上会令 `contextWindow - reserveTokens` 翻负，使 `shouldCompact`
+ *  永远返回 true；同时 `keepRecentTokens`（20000）也会让
+ *  `findCompactionCutPoint` 在小上下文里把整段 transcript 吞进「保留区」、
+ *  切点退化为 0 ——两条默认值在 ≤ 32k 的模型上都是死代码。两个工具都是
+ *  `shouldCompact` 与 sliding-window 共同读，夹紧公式抽到一处便于同步：
+ *
+ *  - `reserve` 夹到 contextWindow 的 50%（给「真·对话」至少留一半）；
+ *  - `keepRecent` 夹到 contextWindow 的 40%（保留区预算比 reserve 大、保证
+ *    `shouldCompact` 触发时仍有空间保留尾巴）。
+ *
+ *  公式与 session-manager.ts 中原本内联的 `Math.min(COMPACTION_SETTINGS.reserveTokens, contextWindow × 0.5)` 一一对应；Subtask 3 把 inline 收敛到这里，`maybeCompact`（Subtask 2 的 80% 预检路径）与 `transformContext` 共用同一份夹紧值。 */
+export function clampedCompactionReserve(contextWindow: number): number {
+  return Math.min(COMPACTION_SETTINGS.reserveTokens, Math.floor(contextWindow * 0.5));
+}
+
+export function clampedCompactionKeepRecent(contextWindow: number): number {
+  return Math.min(COMPACTION_SETTINGS.keepRecentTokens, Math.floor(contextWindow * 0.4));
+}
+
 /**
  * 压缩摘要消息：当会话过长触发压缩时，被压缩的历史会被一段 LLM 生成的结构化
  * 摘要替代。这条消息直接作为一条普通成员存在于 `agent.state.messages` 数组里，
@@ -55,6 +110,11 @@ declare module '@earendil-works/pi-agent-core' {
     // 接口自身，真递归类型会让 Dexie 的 UpdateSpec/KeyPaths 映射类型无限展开
     // （TS2615）。读取统一走下面的 getRetainedTail 拿回具体类型。
     retainedTail?: unknown[];
+    /** Subtask 4：LLM 响应里解析出的结构化 JSON。仅当解析成功时设置；
+     *  解析失败时该字段**缺席**（不显式置 null），方便现有
+     *  `if (msg.structured)` 守卫照常工作。Markdown 摘要正文继续走
+     *  `summary` 字段，structured 是查询 / 归档用的侧信道。 */
+    structured?: StructuredSummary;
   }
 }
 
@@ -86,6 +146,98 @@ export function isCompactionSummary(
   msg: { role: string },
 ): msg is CompactionSummaryMessage {
   return msg.role === 'compactionSummary';
+}
+
+// ─── 结构化摘要（Subtask 4） ───
+
+/** LLM 在压缩摘要末尾输出的 JSON schema。`schema_version` 必为 1；
+ *  schema 演进时同步加 `isStructuredSummaryV2` 并 dispatch。
+ *  字段顺序与 JS 对象的 key order 一致，便于阅读。 */
+export interface StructuredSummary {
+  schema_version: 1;
+  goal: string;
+  constraints: string[];
+  progress: { done: string[]; in_progress: string[]; blocked: string[] };
+  decisions: { decision: string; rationale: string }[];
+  next_steps: string[];
+  critical_context: string[];
+}
+
+/** 严格守门：只接受 `schema_version === 1` 且**全部**字段结构正确的对象。
+ *  任何一项不匹配返回 false——避免 Markdown 正文里的内联 `{...}` 例子
+ *  被误判成 JSON。 */
+export function isStructuredSummary(x: unknown): x is StructuredSummary {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  if (o.schema_version !== 1) return false;
+  if (typeof o.goal !== 'string') return false;
+  if (!isStringArray(o.constraints)) return false;
+  if (!o.progress || typeof o.progress !== 'object') return false;
+  const p = o.progress as Record<string, unknown>;
+  if (!isStringArray(p.done)) return false;
+  if (!isStringArray(p.in_progress)) return false;
+  if (!isStringArray(p.blocked)) return false;
+  if (!isStringArray(o.next_steps)) return false;
+  if (!isStringArray(o.critical_context)) return false;
+  if (!Array.isArray(o.decisions)) return false;
+  for (const d of o.decisions) {
+    if (!d || typeof d !== 'object') return false;
+    const dd = d as Record<string, unknown>;
+    if (typeof dd.decision !== 'string') return false;
+    if (typeof dd.rationale !== 'string') return false;
+  }
+  return true;
+}
+
+function isStringArray(x: unknown): boolean {
+  return Array.isArray(x) && x.every((s) => typeof s === 'string');
+}
+
+/** 去掉首尾空白与首尾一对 ` ```... ` ``` 围栏。无围栏时返回原文。
+ *  仅供 `parseStructuredSummary` / 测试使用；不解析 JSON。 */
+export function stripMarkdownFence(text: string): string {
+  const trimmed = text.trim();
+  const m = /^\s*```(?:json|ts|javascript|js)?\s*\n([\s\S]*?)\n```\s*$/.exec(trimmed);
+  return m ? m[1].trim() : trimmed;
+}
+
+/** 从 LLM 输出里提取并解析结构化 JSON 摘要。优先级：
+ *  1. 最后一个 ```json (或 ```ts/js) 围栏里的内容 → JSON.parse → isStructuredSummary；
+ *     围栏语言标签大小写不敏感（个别模型会写 ```JSON），内文首行偶然是 `json` 也兼容。
+ *  2. 退而求其次：把整个 LLM 输出当 JSON 解析（覆盖 LLM 漏写围栏的情况）。
+ *  全部失败返回 null；不抛。 */
+export function parseStructuredSummary(llmOutput: string): StructuredSummary | null {
+  if (!llmOutput) return null;
+  // 1. 收集所有围栏（按出现顺序），从最后一个开始尝试
+  const fenceRe = /```(?:json|ts|javascript|js)?\s*\n([\s\S]*?)\n```/gi;
+  const blocks: string[] = [];
+  for (const m of llmOutput.matchAll(fenceRe)) blocks.push(m[1]);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const candidate = blocks[i].trim();
+    if (!candidate) continue;
+    const parsed = tryParseJson(candidate);
+    if (parsed && isStructuredSummary(parsed)) return parsed;
+    // 只在 JSON 解析失败时再试剥前缀（个别 LLM 把围栏标成 ```json 但内文首
+    // 行又写了一遍 `json` 字面）。若 JSON 已成功解析却被 schema 守门驳回（结构
+    // 性错误，不是前缀问题），剥前缀也救不回来，直接跳过避免无意义尝试。
+    if (parsed === null) {
+      const stripped = candidate.replace(/^json\s*\n/i, '');
+      const parsed2 = tryParseJson(stripped);
+      if (parsed2 && isStructuredSummary(parsed2)) return parsed2;
+    }
+  }
+  // 2. 整体当 JSON 解析（无围栏的回退）
+  const direct = tryParseJson(llmOutput.trim());
+  if (direct && isStructuredSummary(direct)) return direct;
+  return null;
+}
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 // ─── 切点计算（flat） ───
@@ -270,8 +422,11 @@ export async function runCompaction(params: RunCompactionParams): Promise<string
       model,
       reserveTokens,
       signal,
-      // customInstructions：Cebian 暂不暴露自定义摘要指令
-      undefined,
+      // customInstructions：Subtask 4 — 在既有 Markdown 模板之外追加围栏 JSON
+      // schema spec，让 LLM 一次响应里同时输出人读 Markdown 与工具可读 JSON。
+      // Markdown 摘要正文走 `summary` 字段，JSON 由 `parseStructuredSummary`
+      // 抽出后挂在 `structured?` 侧信道（见 CompactionSummaryMessage 注释）。
+      COMPACTION_STRUCTURED_INSTRUCTIONS,
       previousSummary,
       thinkingLevel,
     );
@@ -303,4 +458,63 @@ export async function runCompaction(params: RunCompactionParams): Promise<string
     durationMs: Date.now() - startedAt,
   }, sessionId ?? ''));
   return null;
+}
+
+// ─── VFS 归档（Subtask 4） ───
+
+/** 一次压缩事件在 VFS 里的存档结构。`schemaVersion` 与 LLM 输出的
+ *  `schema_version` 是两件事：前者是归档文件本身的版本，后者是 LLM 摘要
+ *  内容的 schema。两者都从 1 起跳，分别独立演进。 */
+export interface CompactionArchiveEntry {
+  schemaVersion: 1;
+  sessionId: string;
+  compactedAt: number;
+  tokensBefore: number;
+  messagesSummarized: number;
+  compactingModel: string;                       // "provider/id"
+  structured: StructuredSummary | null;          // null when JSON parse failed
+  rawOutput: string;                             // full LLM output (Markdown + JSON fence)
+  parseError?: string;                           // set only when structured === null
+}
+
+export interface BuildArchiveInput {
+  sessionId: string;
+  compactedAt: number;
+  tokensBefore: number;
+  messagesSummarized: number;
+  compactingModel: Model<Api>;
+  llmOutput: string;
+}
+
+/** 把 LLM 原始输出 + 元数据封装成可写入 VFS 的存档条目。LLM 响应解析失败的
+ *  情况仍写出（`structured: null` + `parseError`），归档是「事实日志」，不让
+ *  一次解析错误抹掉一次压缩事件的所有上下文。 */
+export function buildCompactionArchiveEntry(input: BuildArchiveInput): CompactionArchiveEntry {
+  const structured = parseStructuredSummary(input.llmOutput);
+  const entry: CompactionArchiveEntry = {
+    schemaVersion: 1,
+    sessionId: input.sessionId,
+    compactedAt: input.compactedAt,
+    tokensBefore: input.tokensBefore,
+    messagesSummarized: input.messagesSummarized,
+    compactingModel: `${input.compactingModel.provider}/${input.compactingModel.id}`,
+    structured,
+    rawOutput: input.llmOutput,
+  };
+  if (structured === null) {
+    entry.parseError = 'parseStructuredSummary returned null';
+  }
+  return entry;
+}
+
+/** 生成归档文件名：ISO 时间戳 + 6 字符十六进制后缀。同毫秒下多次调用的
+ *  冲突概率约 2^-24（`Math.random` 的 24 bit 有效精度），对压缩场景
+ *  （同会话同毫秒连续压缩两次几乎不可能）够用。
+ *
+ *  `rng` 形参是测试钩子——生产走 `Math.random`，测试可注入确定性随机源，
+ *  方便断言时间戳前缀与后缀的拼接格式。 */
+export function buildArchiveFilename(compactAt: number, rng: () => number = Math.random): string {
+  const iso = new Date(compactAt).toISOString().replace(/[:.]/g, '-');
+  const suffix = Math.floor(rng() * 0xffffff).toString(16).padStart(6, '0');
+  return `${iso}-${suffix}.json`;
 }

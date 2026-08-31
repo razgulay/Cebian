@@ -221,6 +221,37 @@ const chatClientHandlers: ClientHandlerMap = {
     sessionManager.resolvePermission(msg.sessionId, msg.toolCallId, msg.decision);
   },
 
+  /**
+   * User response to the 400 context-overflow recovery card. Retry = drop
+   * the oldest 50% of messages and continue (deeper than the 25% auto
+   * tries); Stop = reset the strike counter and broadcast a fresh idle
+   * state so the user can start a new turn (NOT cancel() — that would
+   * destroy the live AgentSession and the next prompt would cold-load
+   * a brand-new agent, see review finding).
+   *
+   * The hook already cleared `contextOverflow` locally before sending;
+   * the BG just needs to confirm phase=idle and clear the counter so a
+   * subsequent prompt doesn't get an immediate 400-card re-broadcast.
+   */
+  context_overflow_response(_port, msg) {
+    if (msg.action === 'retry') {
+      void sessionManager.recoverFromUserTriggeredRetry(msg.sessionId, 0.5).catch(err =>
+        console.warn(`[context_overflow_response] retry failed for ${msg.sessionId}:`, err),
+      );
+    } else {
+      // Stop: clear the strike counter and re-broadcast idle state.
+      // Does NOT call sessionManager.cancel() — that would destroy the
+      // live AgentSession via sessions.delete(), and the next prompt
+      // would cold-reload from DB (a subtle behavior the user didn't
+      // ask for). The agent is already idle (agent_end set it), so we
+      // just need to make sure the counter resets and the UI sees a
+      // clean session_state.
+      void sessionManager.resetOverflowState(msg.sessionId).catch(err =>
+        console.warn(`[context_overflow_response] stop failed for ${msg.sessionId}:`, err),
+      );
+    }
+  },
+
   switch_branch(port, msg) {
     // 切换分支：后台 moveLane + 重投影，结果经 session_state（带 branchInfo）广播。
     setViewing(port, msg.sessionId);

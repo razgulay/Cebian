@@ -49,6 +49,7 @@ import { uiToolRegistry } from '@/lib/tools/ui-registry';
 import { isCompactionSummary } from '@/lib/agent/compaction';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
+import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
@@ -182,6 +183,7 @@ export function ChatPage({
     clearSession,
     resolveTool,
     resolvePermission,
+    sendContextOverflowResponse,
   } = useBackgroundAgent({
     onSessionCreated: useCallback((sessionId: string, title: string) => {
       onTitleChange?.(title);
@@ -264,6 +266,10 @@ export function ChatPage({
   useEffect(() => {
     onTitleChange?.(sessionTitle);
   }, [sessionTitle, onTitleChange]);
+
+  // Subtask 5：BG 主动压缩找不到切点时弹 toast 的订阅挂在 chat 表面（与 chat
+  // 同生命周期即可），installed flag 守单例，重渲染安全。
+  useCompactionToasts();
 
   // Auto-scroll: Gemini-style prompt top-alignment.
   // When a new prompt is sent, `scrollToUserPrompt` aligns the user's question to the
@@ -822,6 +828,31 @@ export function ChatPage({
           the bubble toggles its own textarea. ChatInput is purely the
           compose surface for new messages — no edit-mode switching needed.
         */}
+        {state.contextOverflow && (
+          <div className="mx-2 mb-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2">
+            <div className="text-sm font-medium text-destructive">
+              {t('chat.session.contextOverflow.title')}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground break-all line-clamp-2">
+              {state.contextOverflow.lastError}
+            </div>
+            <div className="mt-2 flex gap-2">
+              <Button
+                size="sm"
+                onClick={() => sendContextOverflowResponse('retry')}
+              >
+                {t('chat.session.contextOverflow.retry')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => sendContextOverflowResponse('stop')}
+              >
+                {t('chat.session.contextOverflow.stop')}
+              </Button>
+            </div>
+          </div>
+        )}
         <ChatInput
           ref={inputRef}
           onSend={handleSend}

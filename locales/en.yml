@@ -845,6 +845,23 @@ chat:
   session:
     loading: "Loading session…"
     modelError: "Model returned an error"
+    # 400 context-overflow recovery card. The agent already auto-retried
+    # twice internally; this card is the third strike — user picks the
+    # outcome. Retry drops 50% of oldest messages and continues; Stop
+    # cancels the run so the user can start a new turn.
+    contextOverflow:
+      title: "Context exceeds model limit"
+      retry: "Retry (drop earlier history)"
+      stop: "Stop"
+    # Transient toast when the BG proactive 80% pre-check (Subtask 2)
+    # tried to compact but found no usable cut point — typically because
+    # a single user message alone exceeds `keepRecentTokens`. The agent
+    # proceeds without compaction and the next request is at high risk
+    # of 400. No card, no action — just heads-up so the user can drop a
+    # giant paste or start a new session before hitting the wall.
+    compactionSkipped:
+      # $1 = percent of context currently used
+      toast: "Context too full to compact ($1% used). Try dropping a large paste or starting a new conversation."
     # Shown inside an assistant bubble when the user cancelled the run
     # (either mid-stream or while a retry was rebuilding). Stays neutral
     # — cancelling isn't an error, just a stopped attempt.
