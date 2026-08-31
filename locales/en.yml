@@ -842,6 +842,29 @@ chat:
     divider: "Earlier context compacted"
     # Bottom status bar shown while the compaction LLM call is in flight.
     status: "Compacting context…"
+    # Disclosure affordance on the glass-capsule divider — click the whole
+    # capsule (or its chevron) to view the LLM-generated summary text.
+    dividerExpand: "Show summary"
+    dividerCollapse: "Hide summary"
+  context:
+    # ContextUsagePill tooltip + popover title — describes what's being shown.
+    usage: "Context usage"
+    # "$1" = integer percent (already rounded by severity.ts).
+    percent: "$1%"
+    # "$1" = token count (formatCompactCount K-suffix already applied).
+    headroom: "$1 left"
+    # Status copy shown under the radial gauge, gated by severity.
+    plenty: "Plenty of room"
+    tight: "Getting tight — consider compacting"
+    nearFull: "Context nearly full"
+    # Breakdown row labels.
+    used: "Used"
+    cached: "Cached"
+    free: "Free"
+    # Last breakdown row — total context window capacity.
+    total: "Total"
+    # Footer link in the popover — same action as the toolbar button.
+    compactNow: "Compact now"
   session:
     loading: "Loading session…"
     modelError: "Model returned an error"
@@ -862,6 +885,16 @@ chat:
     compactionSkipped:
       # $1 = percent of context currently used
       toast: "Context too full to compact ($1% used). Try dropping a large paste or starting a new conversation."
+    # CompactNowButton tooltip strings — varies by reason the action is unavailable.
+    compactNow:
+      # Idle label: button is clickable.
+      idle: "Compact now"
+      # Agent running / mid-compaction: spinner is shown, action is blocked.
+      busy: "Compacting…"
+      # messages.length < 2: a single user message can't form a cut point.
+      empty: "Need at least 2 turns to compact"
+      # Model selector is empty (no provider/model chosen yet).
+      noModel: "Select a model first"
     # Shown inside an assistant bubble when the user cancelled the run
     # (either mid-stream or while a retry was rebuilding). Stays neutral
     # — cancelling isn't an error, just a stopped attempt.

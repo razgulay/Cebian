@@ -827,6 +827,29 @@ chat:
     divider: "此前上下文已压缩"
     # 压缩 LLM 调用进行中的底部状态条
     status: "正在压缩上下文…"
+    # 玻璃胶囊分隔条上的展开 / 收起按钮：点击整条胶囊（或 chevron）查看
+    # LLM 生成的摘要原文。
+    dividerExpand: "查看摘要"
+    dividerCollapse: "收起摘要"
+  context:
+    # ContextUsagePill 的 aria-label 与 popover 标题——说明这里在展示什么。
+    usage: "上下文用量"
+    # $1 = 整数百分比（由 severity.ts 已 round）。
+    percent: "$1%"
+    # $1 = token 数（已通过 formatCompactCount 套 K 后缀）。
+    headroom: "剩余 $1"
+    # 档位状态文案，位于堆叠条下方。
+    plenty: "余量充足"
+    tight: "已偏紧——建议压缩"
+    nearFull: "上下文即将用尽"
+    # 拆分行标签。
+    used: "已用"
+    cached: "已缓存"
+    free: "空闲"
+    # 最后一行拆解——上下文窗口总容量。
+    total: "总计"
+    # popover 底部链接——与工具栏按钮同一动作。
+    compactNow: "立即压缩"
   session:
     loading: "加载会话中…"
     modelError: "模型返回错误"
@@ -843,6 +866,16 @@ chat:
     compactionSkipped:
       # $1 = 已用上下文百分比
       toast: "上下文过满无法自动压缩（已用 $1%）。可尝试删除大段粘贴内容或开启新会话。"
+    # CompactNowButton 的 tooltip 文案——按禁用原因切换。
+    compactNow:
+      # 闲置：可点击。
+      idle: "立即压缩"
+      # agent 跑 / 正在压缩：spinner 出现，按钮禁用。
+      busy: "正在压缩…"
+      # messages.length < 2：单条 user 消息无法形成切点。
+      empty: "至少需要 2 条消息才能压缩"
+      # 模型选择器为空（还没选 provider/model）。
+      noModel: "请先选择模型"
     # 用户中途点停后，在 assistant 气泡里显示的提示。
     # 保持中性语气——不是错误，只是没跑完。
     cancelled: "已取消"
