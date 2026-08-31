@@ -2,7 +2,7 @@ import { vfs } from '@/lib/persistence/vfs';
 import picomatch from 'picomatch';
 
 /** Maximum file content size (bytes) returned by fs_read_file before truncation. */
-export const MAX_READ_SIZE = 100 * 1024; // 100 KB
+export const MAX_READ_SIZE = 16 * 1024; // 16 KB
 
 /** Maximum number of results returned by fs_search. */
 export const MAX_SEARCH_RESULTS = 50;

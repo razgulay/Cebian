@@ -22,7 +22,7 @@ export const fsReadFileTool: AgentTool<typeof FsReadFileParameters> = {
   description:
     'Read the contents of a file from the virtual filesystem. ' +
     'Supports optional line range (1-based) to read a specific section. ' +
-    'Large files (>100 KB) are automatically truncated — use start_line/end_line to read specific sections.',
+    'Large files (>16 KB) are automatically truncated — use start_line/end_line to read specific sections.',
   parameters: FsReadFileParameters,
 
   async execute(_toolCallId, params, signal): Promise<AgentToolResult<{}>> {
@@ -56,7 +56,7 @@ export const fsReadFileTool: AgentTool<typeof FsReadFileParameters> = {
     const slice = lines.slice(startLine - 1, endLine);
     let text = slice.join('\n');
 
-    if (text.length > MAX_READ_SIZE) {
+    if (text.length > MAX_READ_SIZE && params.start_line == null && params.end_line == null) {
       text = text.slice(0, MAX_READ_SIZE) +
         `\n\n--- Truncated (>${formatSize(MAX_READ_SIZE)}). Use start_line/end_line to read specific sections. ---`;
     }
