@@ -109,6 +109,8 @@ type HookState = {
   sessionTitle: string;
   connected: boolean;
   lastError: string | null;
+  contextWindow: number | null;
+  contextTokenEstimate: number;
 };
 
 function clearForUnsubscribe(prev: HookState): HookState {
@@ -120,6 +122,9 @@ function clearForUnsubscribe(prev: HookState): HookState {
     sessionTitle: '',
     connected: true,
     lastError: null,
+    // 与 Subtask 2 同款语义：卸载会话清掉旧模型的 contextWindow，estimate
+    // 由 messages=[] 的 effect 重算为 0。
+    contextWindow: null,
   };
 }
 
@@ -135,6 +140,8 @@ describe('useBackgroundAgent — unsubscribe() side-effect preserves messages', 
       sessionTitle: 'xin chào',
       connected: true,
       lastError: null,
+      contextWindow: 8192,
+      contextTokenEstimate: 0,
     };
     const after = clearForUnsubscribe(before);
     // CRITICAL: messages survive.
@@ -208,6 +215,8 @@ function applyClearSession(_prev: HookState): HookState {
     sessionTitle: '',
     connected: true,
     lastError: null,
+    contextWindow: null,
+    contextTokenEstimate: 0,
   };
 }
 
@@ -224,6 +233,8 @@ describe('useBackgroundAgent — clearSession() side-effect for New Chat', () =>
       sessionTitle: 'xin chào',
       connected: true,
       lastError: null,
+      contextWindow: 32768,
+      contextTokenEstimate: 1234,
     };
     const after = applyClearSession(before);
     expect(after.messages).toEqual([]);

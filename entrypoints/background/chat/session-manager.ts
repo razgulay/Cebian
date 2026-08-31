@@ -1386,7 +1386,153 @@ class SessionManager {
   private async maybeCompact(agentSession: AgentSession, pendingUserMessage: AgentMessage): Promise<boolean> {
     if (!COMPACTION_SETTINGS.enabled) return false;
 
-    const { sessionId } = agentSession;
+    const { model, lastSummary, sinceLast, tokens, messages, effectiveSettings } =
+      this.prepareCompactionInputs(agentSession);
+    if (!model) return false;
+
+    // 80% pre-check is the FIRST gate, independent of `shouldCompact`.
+    // Original Subtask 2 design nested it inside `!shouldCompact`, which
+    // was unreachable on small-context models because their clamped
+    // reserveTokens still left `shouldCompact` perpetually true. Promoting
+    // it here makes the pre-check the primary trigger on tiny models
+    // (where there's no regular `shouldCompact` "below threshold" zone)
+    // while preserving the original behaviour on large models (where the
+    // pre-check fires *before* the 98% reserve threshold).
+    const proactive = tokens > PROACTIVE_COMPACT_RATIO * model.contextWindow;
+    const regular = shouldCompact(tokens, model.contextWindow, effectiveSettings);
+    if (proactive) {
+      console.warn(`[diag:compact] 80% pre-check firing (forced compact) for ${model.id}`);
+      // keepRecentTokens 与 effectiveSettings 同值（clamped 值仅受 contextWindow
+      // 影响，与 `proactive` 阈值无关）；切点按该值切。
+      const cut = findCompactionCutPoint(sinceLast, effectiveSettings.keepRecentTokens);
+      if (cut <= 0) {
+        // Subtask 5：主动预检触发了但 `cut <= 0`——单条 user 消息就超过 keepRecent
+        // 没有可摘要的历史。Agent 仍然继续发请求，下一发极易 400；这里把
+        // 情况以 `compaction_skipped` 形式广播给前端，让用户能在撞墙前知情。
+        // 常规路径的 `cut <= 0`（line 1488）继续静默——它要么成功压缩，要么最终
+        // 走 `context_overflow` 卡片，不重复提醒。
+        broadcastToViewers(agentSession.sessionId, {
+          type: 'compaction_skipped',
+          sessionId: agentSession.sessionId,
+          reason: 'cut_no_op',
+          tokens,
+          contextWindow: model.contextWindow,
+          keepRecentTokens: effectiveSettings.keepRecentTokens,
+          messagesCount: sinceLast.length,
+        });
+        return false;
+      }
+      return this.runCompactionWith(
+        agentSession,
+        pendingUserMessage,
+        lastSummary,
+        sinceLast,
+        tokens,
+        messages,
+        cut,
+      );
+    }
+    if (!regular) return false;
+
+    // 切点对齐到 user turn-start（排除 toolResult 中间），修 issue #9。
+    // cut <= 0：无 user 可切 / 从头保留即 no-op（其前没有可摘要的历史），跳过。
+    const cut = findCompactionCutPoint(sinceLast, effectiveSettings.keepRecentTokens);
+    if (cut <= 0) return false;
+
+    return this.runCompactionWith(
+      agentSession,
+      pendingUserMessage,
+      lastSummary,
+      sinceLast,
+      tokens,
+      messages,
+      cut,
+    );
+  }
+
+  /**
+   * Sidepanel-initiated manual context compaction (UI 6 new feature).
+   *
+   * Same cut-point / summarization / archive / broadcast pipeline as the
+   * proactive pre-check in `maybeCompact`, but skips the 80 % / `shouldCompact`
+   * threshold gate — the user asked. No-op (silent return) when the session
+   * has fewer than two user turns; in that case `findCompactionCutPoint`
+   * already returned a no-op cut, same as the proactive path.
+   *
+   * Phase guard: we only accept `phase === 'idle'`. If the agent is mid-turn
+   * (e.g. the user double-clicked Compact while streaming) the proactive
+   * `maybeCompact` would have to wait anyway; here we just refuse and let
+   * the sidepanel toast translate the rejection via the `error` ServerMessage.
+   *
+   * Manual path uses `runCompactionWith(..., pendingUserMessage=null)`: there
+   * is no real user message after the compaction, so broadcasts stay
+   * pre-compaction-shaped and cancellation drops the summary instead of
+   * leaving a stale aborted marker (no run was in flight).
+   */
+  async compactNow(sessionId: string): Promise<void> {
+    const agentSession = await this.getOrCreateAgent(sessionId);
+    if (agentSession.phase !== 'idle') {
+      throw new Error(`[compact_now] session ${sessionId} is not idle (phase=${agentSession.phase})`);
+    }
+    if (!COMPACTION_SETTINGS.enabled) return;
+
+    const { model, lastSummary, sinceLast, tokens, messages, effectiveSettings } =
+      this.prepareCompactionInputs(agentSession);
+    if (!model) return;
+
+    // 手动压缩保留 `keepRecentTokens` 与 proactive 路径相同的夹紧值；不存在
+    // 跟 proactive 一样的 80 % 阈值门（用户主动触发）。`findCompactionCutPoint`
+    // 仍按 user turn-start 对齐（修 issue #9）；cut <= 0 时沿用 proactive
+    // 路径同形状的 `compaction_skipped` 广播，让 UI 知道「按了但无事可做」。
+    const cut = findCompactionCutPoint(sinceLast, effectiveSettings.keepRecentTokens);
+    if (cut <= 0) {
+      // Inform the sidepanel so a tap of "Compact now" doesn't feel like a
+      // dead button. Same shape as the proactive 80 % pre-check skip.
+      broadcastToViewers(sessionId, {
+        type: 'compaction_skipped',
+        sessionId,
+        reason: 'cut_no_op',
+        tokens,
+        contextWindow: model.contextWindow,
+        keepRecentTokens: effectiveSettings.keepRecentTokens,
+        messagesCount: sinceLast.length,
+      });
+      return;
+    }
+    // pendingUserMessage = undefined → no trailing bubble, cancellation has
+    // nothing to commit (see commitCompactionCancel manual branch below).
+    await this.runCompactionWith(
+      agentSession,
+      undefined,
+      lastSummary,
+      sinceLast,
+      tokens,
+      messages,
+      cut,
+    );
+  }
+
+  /**
+   * Shared prefix for both the proactive 80 % pre-check (`maybeCompact`) and
+   * the manual UI-driven path (`compactNow`). Sanitizes state, locates the
+   * last `compactionSummary`, slices `sinceLast`, estimates tokens, and
+   * clamps `reserveTokens` / `keepRecentTokens` against the live model
+   * context window.
+   *
+   * `model` may be `undefined` when the agent was created but its underlying
+   * `state.model` hasn't populated yet; callers that need the model should
+   * treat `undefined` as no-op. Reaches into `agentSession` via `getter`
+   * to keep this method a single `(agentSession) -> inputs` call — no
+   * parameter juggling for every caller.
+   */
+  private prepareCompactionInputs(agentSession: AgentSession): {
+    model: AgentSession['agent']['state']['model'] | undefined;
+    lastSummary: CompactionSummaryMessage | null;
+    sinceLast: AgentMessage[];
+    tokens: number;
+    messages: AgentMessage[];
+    effectiveSettings: typeof COMPACTION_SETTINGS;
+  } {
     // 估算 / 切点 / 摘要 / 回写都基于这份消息：先整形回类型契约（null text/thinking/name
     // → ''），否则 estimateContextTokens / findCompactionCutPoint 对 assistant 块取 .length
     // 会崩（issue #43）。copy-on-write：无坏数据时返回同一引用、零分配（仅一次线性扫描）；
@@ -1416,6 +1562,18 @@ class SessionManager {
     // assistant 的真实 usage，尾部按 char/4 估算。
     const { tokens } = estimateContextTokens(lastSummary ? [lastSummary, ...sinceLast] : messages);
 
+    if (!model) {
+      // Agent not fully initialized — caller decides no-op.
+      return {
+        model: undefined,
+        lastSummary,
+        sinceLast,
+        tokens,
+        messages,
+        effectiveSettings: COMPACTION_SETTINGS,
+      };
+    }
+
     // DIAG (Subtask 2 feedback): dump the actual contextWindow + tokens before
     // every compact decision so we can verify the 80% pre-check fires when
     // expected. Log is one line so it's easy to grep in the Live log view.
@@ -1435,8 +1593,6 @@ class SessionManager {
     // Subtask 3 的 transformContext sliding-window 共享同一份夹紧值。
     const effectiveReserveTokens = clampedCompactionReserve(model.contextWindow);
     const effectiveKeepRecentTokens = clampedCompactionKeepRecent(model.contextWindow);
-    // DIAG (Subtask 2 follow-up)：打实夹紧值，便于后续 reviewer 核对小
-    // 上下文模型上是否如期收敛。
     if (effectiveReserveTokens !== COMPACTION_SETTINGS.reserveTokens || effectiveKeepRecentTokens !== COMPACTION_SETTINGS.keepRecentTokens) {
       console.warn(
         `[diag:compact] clampedSettings reserve=${effectiveReserveTokens} keepRecent=${effectiveKeepRecentTokens} for contextWindow=${model.contextWindow}`,
@@ -1448,71 +1604,14 @@ class SessionManager {
       keepRecentTokens: effectiveKeepRecentTokens,
     };
 
-    // 80% pre-check is the FIRST gate, independent of `shouldCompact`.
-    // Original Subtask 2 design nested it inside `!shouldCompact`, which
-    // was unreachable on small-context models because their clamped
-    // reserveTokens still left `shouldCompact` perpetually true. Promoting
-    // it here makes the pre-check the primary trigger on tiny models
-    // (where there's no regular `shouldCompact` "below threshold" zone)
-    // while preserving the original behaviour on large models (where the
-    // pre-check fires *before* the 98% reserve threshold).
-    const proactive = tokens > PROACTIVE_COMPACT_RATIO * model.contextWindow;
-    const regular = shouldCompact(tokens, model.contextWindow, effectiveSettings);
-    if (proactive) {
-      console.warn(`[diag:compact] 80% pre-check firing (forced compact) for ${model.id}`);
-      // Tighten reserveTokens just enough for the re-evaluated predicate
-      // to pass; keepRecentTokens stays at the clamped value so we still
-      // slice the same way.
-      const proactiveSettings = {
-        ...effectiveSettings,
-        reserveTokens: Math.max(0, model.contextWindow - tokens + 1024),
-      };
-      const cut = findCompactionCutPoint(sinceLast, proactiveSettings.keepRecentTokens);
-      if (cut <= 0) {
-        // Subtask 5：主动预检触发了但 `cut <= 0`——单条 user 消息就超过 keepRecent
-        // 没有可摘要的历史。Agent 仍然继续发请求，下一发极易 400；这里把
-        // 情况以 `compaction_skipped` 形式广播给前端，让用户能在撞墙前知情。
-        // 常规路径的 `cut <= 0`（line 1488）继续静默——它要么成功压缩，要么最终
-        // 走 `context_overflow` 卡片，不重复提醒。
-        broadcastToViewers(agentSession.sessionId, {
-          type: 'compaction_skipped',
-          sessionId: agentSession.sessionId,
-          reason: 'cut_no_op',
-          tokens,
-          contextWindow: model.contextWindow,
-          keepRecentTokens: proactiveSettings.keepRecentTokens,
-          messagesCount: sinceLast.length,
-        });
-        return false;
-      }
-      return this.runCompactionWith(
-        agentSession,
-        pendingUserMessage,
-        proactiveSettings,
-        lastSummary,
-        sinceLast,
-        tokens,
-        messages,
-        cut,
-      );
-    }
-    if (!regular) return false;
-
-    // 切点对齐到 user turn-start（排除 toolResult 中间），修 issue #9。
-    // cut <= 0：无 user 可切 / 从头保留即 no-op（其前没有可摘要的历史），跳过。
-    const cut = findCompactionCutPoint(sinceLast, effectiveSettings.keepRecentTokens);
-    if (cut <= 0) return false;
-
-    return this.runCompactionWith(
-      agentSession,
-      pendingUserMessage,
-      effectiveSettings,
+    return {
+      model,
       lastSummary,
       sinceLast,
       tokens,
       messages,
-      cut,
-    );
+      effectiveSettings,
+    };
   }
 
   /**
@@ -1532,8 +1631,7 @@ class SessionManager {
    */
   private async runCompactionWith(
     agentSession: AgentSession,
-    pendingUserMessage: AgentMessage,
-    settings: typeof COMPACTION_SETTINGS,
+    pendingUserMessage: AgentMessage | undefined,
     lastSummary: CompactionSummaryMessage | null,
     sinceLast: AgentMessage[],
     tokens: number,
@@ -1555,13 +1653,16 @@ class SessionManager {
     agentSession.compactionController = new AbortController();
     const signal = agentSession.compactionController.signal;
     this.updateKeepAlive();
+    // 手动压缩（pendingUserMessage = undefined）不携带「待投递」气泡：广播
+    // 直接展开成 pre-compaction 状态，不掺一个幽灵 user 消息。
+    const withTrailing = pendingUserMessage ? [...messages, pendingUserMessage] : messages;
     broadcastToViewers(sessionId, {
       type: 'session_state',
       sessionId,
       // 带上待投递的用户消息，压缩期间用户气泡保持可见（前端 session_state 全量
       // 替换，不带就会冲掉乐观插入的气泡）。
-      messages: this.annotate(agentSession, [...messages, pendingUserMessage]),
-      isRunning: true,
+      messages: this.annotate(agentSession, withTrailing),
+      isRunning: pendingUserMessage !== undefined,
       isCompacting: true,
       pendingTools: [],
     });
@@ -1570,6 +1671,9 @@ class SessionManager {
       // 解析压缩模型：配置了专用小模型且凭证可用就用它，否则回退主模型（静默）。
       const { model: compactModel, apiKey } = await this.resolveCompactionModel(model);
       // 取消优先：解析期间被 cancel，丢弃压缩并让调用方放弃本轮。
+      // 手动路径下 pendingUserMessage=undefined，commitCompactionCancel 走
+      // 「不补 aborted 标记」分支——手动 compact 期间被取消不应留下「已取消」
+      // 残影，因为并没有真正的 turn 在运行。
       if (signal.aborted) return await this.commitCompactionCancel(agentSession, pendingUserMessage);
       // 无凭证无法发起独立的摘要请求，本轮裸发、下一轮再尝试压缩（不致 400：
       // transformContext 仍会带上已有的最后一条摘要）。
@@ -1611,6 +1715,9 @@ class SessionManager {
           summaryMsg,
         ];
         agentSession.agent.state.messages = updated;
+        // 手动路径（pendingUserMessage === undefined）不带尾部用户气泡，广播
+        // 直接展开成「已插入摘要」状态。
+        const updatedWithTrailing = pendingUserMessage ? [...updated, pendingUserMessage] : updated;
         // 等落树（旧「persist + flush」语义）：SW 在广播后立刻被杀也不丢摘要。
         // 失败已在链上记录，吞掉——压缩是增益路径，不因落库失败中断本轮发送
         await this.syncTail(agentSession).catch(() => undefined);
@@ -1653,8 +1760,9 @@ class SessionManager {
           sessionId,
           // 同样带上待投递的用户消息，避免摘要插入后到 agent.prompt() 之间
           // 这一帧用户气泡闪掉。agent.prompt() 随后会 append 真实的同内容消息。
-          messages: this.annotate(agentSession, [...updated, pendingUserMessage]),
-          isRunning: true,
+          // 手动路径下 pendingUserMessage=undefined，只展开成「已插入摘要」状态。
+          messages: this.annotate(agentSession, updatedWithTrailing),
+          isRunning: pendingUserMessage !== undefined,
           isCompacting: true,
           pendingTools: [],
         });
@@ -1688,11 +1796,31 @@ class SessionManager {
    */
   private async commitCompactionCancel(
     agentSession: AgentSession,
-    pendingUserMessage: AgentMessage,
+    pendingUserMessage: AgentMessage | undefined,
   ): Promise<true> {
     const { sessionId } = agentSession;
     // destroySession 先 abort 再从 map 移除；命中这里说明是销毁而非用户取消，静默退出。
     if (!this.sessions.has(sessionId)) return true;
+
+    // 手动压缩（pendingUserMessage=undefined）期间被取消：本就没有真实 turn 在
+    // 运行，state 不该被「幽灵 user + 已取消 marker」污染。直接复位 phase、
+    // 广播 idle、不动 messages。
+    if (!pendingUserMessage) {
+      if (agentSession.phase === 'compacting') {
+        agentSession.phase = 'idle';
+        this.updateKeepAlive();
+      }
+      broadcastToViewers(sessionId, {
+        type: 'session_state',
+        sessionId,
+        messages: this.annotate(agentSession, agentSession.agent.state.messages),
+        isRunning: false,
+        isCompacting: false,
+        pendingTools: [],
+      });
+      this.releaseTrace(sessionId);
+      return true;
+    }
 
     const finalMessages: AgentMessage[] = [
       ...agentSession.agent.state.messages,

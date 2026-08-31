@@ -14,7 +14,6 @@ import { MentionPopover } from '@/components/chat/MentionPopover';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
-import { resolveModel } from '@/lib/providers/resolve-model';
 import { startElementPicker, cancelElementPicker } from '@/lib/browser/element-picker';
 import { scanPrompts, type PromptMeta } from '@/lib/ai-config/scanner';
 import { replaceTemplateVars } from '@/lib/ai-config/template';
@@ -41,6 +40,12 @@ import { downloadFile, formatDuration, formatCompactCount, formatBytes } from '@
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { debugLog } from '@/lib/debug/log';
+import { useResolvedModel } from '@/components/chat/context/useResolvedModel';
+import { ContextUsagePill } from '@/components/chat/context/ContextUsagePill';
+import { ContextUsagePopover } from '@/components/chat/context/ContextUsagePopover';
+import { CompactNowButton } from '@/components/chat/context/CompactNowButton';
+import type { ContextUsage } from '@/components/chat/context/useContextUsage';
+import { Popover, PopoverTrigger } from '@/components/ui/popover';
 
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
@@ -95,6 +100,15 @@ interface ChatInputProps {
   /** When provided, pressing Escape inside the textarea calls this
    *  callback. Used by the edit flow to cancel without committing. */
   onCancelEdit?: () => void;
+  /** Context-usage snapshot from `useContextUsage(agent, turnModel)` — drives
+   *  the toolbar pill (live percentage + severity color) and the adjacent
+   *  Compact Now button. When omitted, both are hidden (backward compatible
+   *  for ChatInput reused outside the chat page). */
+  usage?: ContextUsage;
+  /** 触发「手动压缩」动作——弹出 popover 内的链接、toolbar 按钮、未来快捷键
+   *  全部汇聚到这一个入口。ChatInput 自己不调 IPC，只把点击事件转发给
+   *  父组件持有的 `agent.compactNow`。 */
+  onCompact?: () => void;
 }
 
 /** 暴露给父组件的 imperative handle：允许欢迎页等外部入口填入文本并聚焦输入框，
@@ -130,6 +144,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onThinkingChange,
     initialValue,
     onCancelEdit,
+    usage,
+    onCompact,
   },
   ref,
 ) {
@@ -170,6 +186,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
+  // Context-usage pill's popover state — pill / popover / button share one
+  // source of truth at this level to avoid race conditions between three
+  // components each managing their own hover state.
+  const [usagePopoverOpen, setUsagePopoverOpen] = useState(false);
+  // CompactNowButton ref — popover's "Compact now" link focuses it after
+  // click so keyboard focus stays in the toolbar.
+  const compactButtonRef = useRef<HTMLButtonElement>(null);
   const sessionIdRef = useRef<string | null>(sessionId ?? null);
   sessionIdRef.current = sessionId ?? null;
   // Mirror of `quoteChips` for synchronous reads from handleSend.
@@ -187,12 +210,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // rather than the hook, so a settings change between renders and the
   // send click is picked up (handleSend isn't a render-bound function).
 
-  // 当前模型解析成 pi-ai Model（内置 + 自定义统一走 resolveModel）。是否支持图片 /
-  // 支持哪些思考档 等能力派生共用这一次解析，避免多份内联解析各自漂移
-  const resolvedModel = useMemo(
-    () => (currentModel ? resolveModel(currentModel, providers, customProviderList) : null),
-    [currentModel, providers, customProviderList],
-  );
+  // 当前模型解析成 pi-ai Model（内置 + 自定义统一走 useResolvedModel）。是否支持
+  // 图片 / 支持哪些思考档 等能力派生共用这一次解析。`useContextUsage` 走同一份
+  // ——避免两份 useStorageItem 监听 + 两次 resolveModel 各自漂移（review 标记过）。
+  const { model: resolvedModel } = useResolvedModel(currentModel);
 
   // 当前模型支持的思考档：pi 按模型 thinkingLevelMap 推导（非推理模型只返回 ['off']），
   // 多于一档可选时才显示选择器。存的档位可能超出当前模型上限（切到弱模型）→ 夹进支持集
@@ -2213,6 +2234,34 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 levels={thinkingLevels}
                 onSelect={handleThinkingSelect}
               />
+            )}
+            {/* Context-usage pill + Compact Now button: rendered only when the
+              * parent passes `usage`. isDispatching already grey-disables
+              * pointer events on the parent container, so individual buttons
+              * don't need their own disable. popover and button share a
+              * single usagePopoverOpen state — pill hover opens, leaving the
+              * popover keeps it open, popover's own onMouseLeave closes. */}
+            {usage && (
+              <Popover open={usagePopoverOpen} onOpenChange={setUsagePopoverOpen}>
+                <PopoverTrigger asChild>
+                  <ContextUsagePill
+                    usage={usage}
+                    popoverOpen={usagePopoverOpen}
+                    onPopoverOpenChange={setUsagePopoverOpen}
+                  />
+                </PopoverTrigger>
+                <CompactNowButton
+                  ref={compactButtonRef}
+                  usage={usage}
+                  onClick={() => onCompact?.()}
+                />
+                <ContextUsagePopover
+                  open={usagePopoverOpen}
+                  onOpenChange={setUsagePopoverOpen}
+                  usage={usage}
+                  compactButtonRef={compactButtonRef}
+                />
+              </Popover>
             )}
           </div>
 

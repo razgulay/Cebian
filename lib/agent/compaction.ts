@@ -13,11 +13,13 @@ import {
   type AgentMessage,
   type CompactionSummaryMessage,
   type ThinkingLevel,
+  estimateContextTokens,
   estimateTokens,
   generateSummary,
   DEFAULT_COMPACTION_SETTINGS,
 } from '@earendil-works/pi-agent-core';
 import { debugLog, withSession } from '@/lib/debug/log';
+import { sanitizeAgentMessages } from '@/lib/agent/message-helpers';
 
 /**
  * Cebian 的压缩配置（④：写死默认 + 留配置位）。当前直接对齐 pi 的
@@ -85,6 +87,48 @@ export function clampedCompactionReserve(contextWindow: number): number {
 
 export function clampedCompactionKeepRecent(contextWindow: number): number {
   return Math.min(COMPACTION_SETTINGS.keepRecentTokens, Math.floor(contextWindow * 0.4));
+}
+
+/**
+ * Sidepanel-UI 用的 token 估算入口：与 BG `maybeCompact` 的输入形状一致
+ * （`sanitizeAgentMessages` 之后再走 `lastSummaryIdx` / `sinceLast`），
+ * 只取 `estimateContextTokens` 的数字部分。供 `ContextUsagePill` 在消息
+ * 流变化时即时估算「当前会话占用多少 token」，不需要每条消息都广播；
+ * BG `compaction_skipped` / 下一次 send 的 `maybeCompact` 都会拿到一次
+ * 权威数，用来 refine 这个本地估算。
+ *
+ * 空消息数组返回 0（与 pi-agent-core `estimateContextTokens` 一致），
+ * 前端按 `contextWindow === 0` 的同款「未知」态渲染。
+ *
+ * 自带 `sanitizeAgentMessages` 调用：BG 路径在「可能持有损坏的 assistant
+ * 块（null text/thinking/name）」的场景必须先 sanitize，否则 issue #43
+ * 会让 `estimateContextTokens` 取 .length 时崩。本函数面向 sidepanel
+ * 的任意 `state.messages`（可能来自 v1 备份 / 旧会话行），也走同一道
+ * sanitize 关，与 BG 路径保持对齐。
+ */
+export function estimateContextTokensForUi(messages: AgentMessage[]): number {
+  // 形状与 session-manager.maybeCompact 的 L1394 同形：sanitize + 摘要寻址 +
+  // sinceLast 切片 = LLM 真实视图。摘要本身的 LLM-cost 与原文量级接近，本应
+  // 计入「当前上下文占用」；保留该形状而非直接对 `state.messages` 估算，是
+  // 为了与 BG 内部数保持可比，避免「本地估 30% / BG 判定 20% 因为它看见了
+  // 摘要」的偏离。
+  const sanitized = sanitizeAgentMessages(messages);
+  let lastSummaryIdx = -1;
+  for (let i = sanitized.length - 1; i >= 0; i--) {
+    if (sanitized[i].role === 'compactionSummary') {
+      lastSummaryIdx = i;
+      break;
+    }
+  }
+  const lastSummary =
+    lastSummaryIdx >= 0 ? (sanitized[lastSummaryIdx] as CompactionSummaryMessage) : null;
+  const sinceLast = lastSummary
+    ? [...getRetainedTail(lastSummary), ...sanitized.slice(lastSummaryIdx + 1)]
+    : sanitized;
+  const { tokens } = estimateContextTokens(
+    lastSummary ? [lastSummary, ...sinceLast] : sanitized,
+  );
+  return tokens;
 }
 
 /**

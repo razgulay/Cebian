@@ -49,6 +49,7 @@ import { uiToolRegistry } from '@/lib/tools/ui-registry';
 import { isCompactionSummary } from '@/lib/agent/compaction';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
+import { useContextUsage } from '@/components/chat/context/useContextUsage';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useStorageItem } from '@/hooks/useStorageItem';
@@ -169,22 +170,7 @@ export function ChatPage({
   }, []);
 
   // ─── Agent port (all agent/session logic via background) ───
-  const {
-    state,
-    pendingTools,
-    pendingPermissions,
-    send,
-    cancel,
-    retry,
-    editMessage,
-    switchBranch,
-    subscribe: portSubscribe,
-    unsubscribe: portUnsubscribe,
-    clearSession,
-    resolveTool,
-    resolvePermission,
-    sendContextOverflowResponse,
-  } = useBackgroundAgent({
+  const agent = useBackgroundAgent({
     onSessionCreated: useCallback((sessionId: string, title: string) => {
       onTitleChange?.(title);
       navigate(`/chat/${sessionId}`, { replace: true });
@@ -205,7 +191,30 @@ export function ChatPage({
     }, [seedTurnFromSession]),
   });
 
+  const {
+    state,
+    pendingTools,
+    pendingPermissions,
+    send,
+    cancel,
+    retry,
+    editMessage,
+    switchBranch,
+    subscribe: portSubscribe,
+    unsubscribe: portUnsubscribe,
+    clearSession,
+    resolveTool,
+    resolvePermission,
+    sendContextOverflowResponse,
+    compactNow,
+  } = agent;
+
   const { messages, branchInfo, isAgentRunning, isCompacting, sessionId: activeSessionId, sessionTitle, lastError } = state;
+
+  // Context-usage 共享视图数据——ChatInput 通过 `usage` prop 消费；调用一次，
+  // 整个组件树共享同一份 severity / headroom / compactNow 入口。turnModel 为
+  // null 时（用户尚未选模型）→ unknown = true，pill 自然隐藏。
+  const usage = useContextUsage(agent, turnModel);
 
   // Mirror activeSessionId into a ref so the subscribe-effect can read the
   // latest value WITHOUT re-running when activeSessionId changes. Putting
@@ -424,8 +433,14 @@ export function ChatPage({
 
           {!sessionLoading && messages.map((msg, idx) => {
             if (isCompactionSummary(msg)) {
+              // `msg` is CompactionSummaryMessage：summary 字段是 LLM 输出的
+              // Markdown 摘要，tokensBefore 是压缩前估算。把它们传给
+              // CompactionDivider，让它能在展开时显示摘要原文 + 节省量徽章。
               return (
-                <CompactionDivider key={`compact-${idx}`} />
+                <CompactionDivider
+                  key={`compact-${idx}`}
+                  summary={{ summary: msg.summary, tokensBefore: msg.tokensBefore }}
+                />
               );
             }
 
@@ -866,6 +881,8 @@ export function ChatPage({
           thinkingLevel={turnThinking}
           onModelChange={handleModelChange}
           onThinkingChange={handleThinkingChange}
+          usage={usage}
+          onCompact={() => { compactNow(); }}
         />
 
       {/* Floating "Quote" button — appears whenever the user selects text

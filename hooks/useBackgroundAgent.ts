@@ -21,6 +21,7 @@ import { applyStreamOps } from '@/lib/agent/stream-replica';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { replaceUserText, truncateForRetry } from '@/lib/agent/message-helpers';
 import { rewriteLastUserMessage } from '@/lib/agent/rewrite-last-user-message';
+import { estimateContextTokensForUi } from '@/lib/agent/compaction';
 import type { Message } from '@earendil-works/pi-ai';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
@@ -63,6 +64,17 @@ export interface AgentPortState {
    * prompt, which resets the BG counter.
    */
   contextOverflow: { attempts: number; lastError: string } | null;
+  /** Active model's `contextWindow`（来自 pi-ai Model 的同名字段）。caller 在
+   *  `currentModel` / provider 列表变化时通过 `setContextWindow` 推过来；初始
+   *  为 null（无模型 / 解析失败时由 `useContextUsage` 在 effect 里设回 null）。
+   *  ContextUsagePill 用它算 percent = tokens / contextWindow——无 window 就
+   *  隐藏整张 pill，不显示「未知」占位。 */
+  contextWindow: number | null;
+  /** 当前消息流的本地 token 估算。`messages` 改变时通过 effect 重算；BG
+   *  `compaction_skipped` 广播时会用权威数字覆写（BG 的 `state.messages` 采样
+   *  点可能与 hook 端有毫秒级差异，权威值更可靠），下一次 messages 变化时
+   *  本地值自然接管。空会话为 0。 */
+  contextTokenEstimate: number;
 }
 
 // ─── Pending interactive tool info (for UI rendering) ───
@@ -107,6 +119,8 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     connected: false,
     lastError: null,
     contextOverflow: null,
+    contextWindow: null,
+    contextTokenEstimate: 0,
   });
 
   const [pendingTools, setPendingTools] = useState<Map<string, PendingToolInfo>>(new Map());
@@ -501,6 +515,13 @@ case 'stream_ops':
             tokens: msg.tokens,
             contextWindow: msg.contextWindow,
           });
+          // Subtask 2：BG 在那一刻采样的 token 数是权威值——本地 estimate 可能
+          // 因为 BG 的 state.messages 与 hook 端存在毫秒级差异而漂移。把
+          // estimate 覆写为 BG 的 `tokens`，让 pill 在高负载区间不再与 toast
+          // 显示不同数字。下次 messages 改变时本地 effect 自然接管。
+          setState(prev => prev.contextTokenEstimate === msg.tokens
+            ? prev
+            : { ...prev, contextTokenEstimate: msg.tokens });
           break;
 
         case 'mcp_resource_result':
@@ -760,6 +781,29 @@ case 'stream_ops':
   }, [postMessage]);
 
   /**
+   * 手动触发上下文压缩（user clicked the pill's adjacent compact button）。
+   * 走和 proactive 80% 预检同一条流水线，只跳过阈值门。session 必须 idle；
+   // busy 时 BG 抛错并通过 `error` ServerMessage 反馈，UI 在那里打 toast 并
+   // 退出 button 的 loading 态。无 session 或断连时本地直接 return。
+   */
+  const compactNow = useCallback(() => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) return;
+    if (!portRef.current) return;
+    postMessage({ type: 'compact_now', sessionId });
+  }, [postMessage]);
+
+  /**
+   * 把当前会话的「resolved contextWindow」从 caller（一般是 useContextUsage，
+   * 通过 resolveModel + storage 推算出来的）推入 hook state。null 表示无模型
+   * / 解析失败，pill 与 popover 在 null 时隐藏整张图。effect 在 caller
+   * 里驱动——这里只管 setState。
+   */
+  const setContextWindow = useCallback((window: number | null) => {
+    setState(prev => prev.contextWindow === window ? prev : { ...prev, contextWindow: window });
+  }, []);
+
+  /**
    * User response to a 400 context-overflow card. Retry triggers a fresh
    * attempt on the BG with a deeper (50%) message drop; Stop clears the
    * card and re-enables the composer so the user can start a new turn.
@@ -888,6 +932,10 @@ case 'stream_ops':
           isCompacting: false,
           sessionTitle: '',
           lastError: null,
+          // 切到另一个已有会话：估算清零（messages 即将被新会话覆盖，保留
+          // 旧估算只会让 pill 闪一下旧数字）。contextWindow 留待 useContextUsage
+          // 在新会话的 currentModel 落定后通过 setContextWindow 推过来。
+          contextTokenEstimate: 0,
         }
       : { ...prev, sessionId });
     postMessage({ type: 'subscribe', sessionId });
@@ -903,6 +951,19 @@ case 'stream_ops':
     sessionIdRef.current = state.sessionId;
   }, [state.sessionId]);
 
+  // 用 messages 引用变化来驱动 token 估算刷新。estimateContextTokensForUi
+  // 与 BG maybeCompact 同形状（sanitize → lastSummary → sinceLast → estimate），
+  // 把 BG 的「真·视图」代价折在每次 messages 引用变的时候。一次 render 的 16ms
+  // 滞后对 pill 来说无感——它本来就是按状态变化闪的。BG `compaction_skipped`
+  // 广播会在收到时直接把数字覆写到 state（见 handleMessage 内的 case 分支），
+  // 下一次 messages 改变时本地又接管。
+  useEffect(() => {
+    setState(prev => {
+      const next = estimateContextTokensForUi(state.messages);
+      return prev.contextTokenEstimate === next ? prev : { ...prev, contextTokenEstimate: next };
+    });
+  }, [state.messages]);
+
   const unsubscribe = useCallback(() => {
     // Don't reset messages here — that wipes the optimistic user bubble
     // when the chat page re-runs the subscribe-effect after `activeSessionId`
@@ -917,6 +978,10 @@ case 'stream_ops':
       sessionTitle: '',
       connected: true,
       lastError: null,
+      // 卸载会话：contextWindow 跟着清，避免下次挂载到别的会话时短暂保留旧
+      // 模型的窗口；estimate 不在这里清——unsubscribe() 保留 prev.messages，
+      // 估计仍属当前快照，clearSession() 才是真正全清的场景。
+      contextWindow: null,
     }));
     setPendingTools(new Map());
     setPendingPermissions(new Map());
@@ -945,6 +1010,8 @@ case 'stream_ops':
       connected: true,
       lastError: null,
       contextOverflow: null,
+      contextWindow: null,
+      contextTokenEstimate: 0,
     });
     setPendingTools(new Map());
     setPendingPermissions(new Map());
@@ -1033,5 +1100,13 @@ case 'stream_ops':
     cancelTool,
     resolvePermission,
     sendContextOverflowResponse,
+    compactNow,
+    setContextWindow,
   };
 }
+
+/** `useBackgroundAgent()` 的返回类型。导出是为了让组合 hook（典型如
+ *  `useContextUsage`）能拿到精确签名——不必自己抄一遍返回 shape，也不必用
+ *  `ReturnType<typeof import(...)>` 这种绕开导出的取巧写法。签名漂移时
+ *  tsc 直接报红，比手动维护一份近似的 `interface` 更安全。 */
+export type UseBackgroundAgentReturn = ReturnType<typeof useBackgroundAgent>;

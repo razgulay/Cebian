@@ -252,6 +252,28 @@ const chatClientHandlers: ClientHandlerMap = {
     }
   },
 
+  /**
+   * Sidepanel-initiated manual context compaction. The BG runs the same
+   * `findCompactionCutPoint` → `runCompactionWith` pipeline as the
+   * proactive 80 % pre-check, but skips the threshold gate — the user
+   * asked. Progress is observed via `session_state.isCompacting` + the
+   * inserted `compactionSummary`; nothing else needs to be returned.
+   *
+   * Errors (e.g. session busy) are surfaced as an `error` ServerMessage
+   * so the sidepanel's compact-now button can flip out of loading
+   * state — same wire shape `switch_branch` / `edit_message` use.
+   */
+  compact_now(port, msg) {
+    sessionManager.compactNow(msg.sessionId).catch((err) => {
+      console.warn(`[compact_now] failed for ${msg.sessionId}:`, err);
+      post(port, {
+        type: 'error',
+        sessionId: msg.sessionId,
+        error: err.message ?? String(err),
+      });
+    });
+  },
+
   switch_branch(port, msg) {
     // 切换分支：后台 moveLane + 重投影，结果经 session_state（带 branchInfo）广播。
     setViewing(port, msg.sessionId);

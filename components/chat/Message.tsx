@@ -1,4 +1,4 @@
-import { Bot, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
+import { Bot, ChevronDown, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -328,18 +328,69 @@ export function UserMessageBubble({
 
 /* ─── Compaction Divider ─── */
 /** 历史压缩分割条：标记此处之前的上下文已被折叠成摘要——发送给模型时只保留
- *  摘要，但原始消息仍完整留在消息流里供用户向上翻阅。静态、不可折叠。
- *  注：压缩前 token 估算已暂时隐藏（仍存于 compactionSummary.tokensBefore），
- *  将来可能恢复展示。 */
-export function CompactionDivider() {
+ *  摘要，但原始消息仍完整留在消息流里供用户向上翻阅。玻璃胶囊风格：
+ *  amber 半透明边框 + 柔光阴影 + 可展开 / 折叠的摘要披露（chevron）。
+ *  「压缩前 token 数」以小号徽章形式展现在分隔条右侧；披露框里渲染
+ *  `compactionSummary.summary` 原文（不解析 Markdown——避免引入额外依赖，
+ *  与 AGENTS.md §"Cohesion, coupling" 的「一文件一职责」一致）。 */
+export interface CompactionDividerProps {
+  /** Summary 内容 + tokensBefore。token 数缺失时省略右侧徽章。 */
+  summary?: {
+    summary: string;
+    tokensBefore?: number;
+  };
+}
+
+export function CompactionDivider({ summary }: CompactionDividerProps = {}) {
+  // 披露展开状态——只在自身实例内持有，不与其他分隔条联动（多段压缩时
+  // 各自独立展开 / 收起；如需「一次只展开一个」是后续迭代）。
+  const [open, setOpen] = useState(false);
+  const summaryText = summary?.summary ?? '';
+  const hasTokens = typeof summary?.tokensBefore === 'number' && summary.tokensBefore > 0;
+
   return (
-    <div className="flex items-center gap-2 my-1 select-none" role="separator">
-      <div className="h-px flex-1 bg-border" />
-      <span className="flex items-center gap-1.5 text-[0.7rem] text-muted-foreground/70 font-medium whitespace-nowrap">
-        <FoldVertical className="size-3 shrink-0" />
-        {t('chat.compaction.divider')}
-      </span>
-      <div className="h-px flex-1 bg-border" />
+    // flex-wrap lets the disclosure block drop onto a new row beneath the
+    // capsule; without it, basis-full would compete with flex-1 hairlines on
+    // the same row and the disclosure would render to the right of the
+    // capsule, never below it.
+    <div className="flex flex-wrap items-stretch my-3 select-none" role="separator">
+      {/* Left hairline: muted to avoid clashing with the amber capsule. */}
+      <div className="h-px flex-1 bg-border self-center" />
+
+      <button
+        type="button"
+        // 胶囊本体：amber 半透 + 柔光。点击整条胶囊就展开 / 收起——
+        // 比单点 chevron 触控区域更大、移动端友好。
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={open ? t('chat.compaction.dividerCollapse') : t('chat.compaction.dividerExpand')}
+        className="group/divider mx-2 inline-flex items-center gap-1.5 rounded-full border border-amber-400/30 bg-amber-400/5 px-2.5 py-0.5 text-[0.65rem] font-medium text-amber-600 dark:text-amber-300 backdrop-blur-sm shadow-[0_0_24px_-12px_rgba(245,158,11,0.4)] hover:border-amber-400/60 transition-colors"
+      >
+        <Sparkles className="size-2.5 shrink-0" />
+        <span className="whitespace-nowrap">{t('chat.compaction.divider')}</span>
+        {hasTokens && (
+          <span className="text-[0.6rem] text-amber-700/70 dark:text-amber-300/70 font-mono tabular-nums border-l border-amber-400/30 pl-1.5">
+            −{formatCompactCount(summary!.tokensBefore!)}
+          </span>
+        )}
+        <ChevronDown
+          className={`size-3 shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      <div className="h-px flex-1 bg-border self-center" />
+
+      {/* Disclosure block: rendered only when expanded. Spans the full width
+        * to give the summary its own reading area; dashed border + mono font
+        * mirrors ThinkingBlock so users see this is an internal record, not
+        * the actual conversation. */}
+      {open && summaryText && (
+        <div className="basis-full mt-2">
+          <pre className="text-[0.7rem] font-mono text-muted-foreground/80 bg-amber-500/5 border border-dashed border-amber-400/30 rounded-md p-2 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+            {summaryText}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

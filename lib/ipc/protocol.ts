@@ -101,6 +101,18 @@ export type ClientMessage =
    *  sidepanel renders the card (driven by `context_overflow` ServerMessage) and
    *  posts this message when the user clicks Retry or Stop. */
   | { type: 'context_overflow_response'; sessionId: string; action: 'retry' | 'stop' }
+  /** Sidepanel-initiated manual context compaction. The BG runs the
+   *  same cut-point / summarization pipeline as the proactive 80 %
+   *  pre-check, but skips the threshold gate — the user asked.
+   *
+   *  Session must be idle (`phase === 'idle'`); BG throws otherwise
+   *  and the handler converts the rejection to an `error` ServerMessage.
+   *  When `findCompactionCutPoint` returns `<= 0` (no usable cut), the
+   *  BG broadcasts `compaction_skipped` and returns silently — no summary
+   *  inserted. On success the BG enters `compacting` (broadcast via
+   *  `session_state.isCompacting`) and appends a `compactionSummary`
+   *  message; the next prompt proceeds normally. */
+  | { type: 'compact_now'; sessionId: string }
   | { type: 'session_list' }
   | { type: 'session_delete'; sessionId: string }
   /** Pin / unpin a session in the sidebar. Bg flips the bit on the row and
@@ -153,6 +165,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'cancel_tool',
   'resolve_permission',
   'context_overflow_response',
+  'compact_now',
   'switch_branch',
   'session_list',
   'session_delete',

@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import type { Api, Model } from '@earendil-works/pi-ai';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import {
   buildArchiveFilename,
   buildCompactionArchiveEntry,
+  createCompactionSummaryMessage,
+  estimateContextTokensForUi,
   isStructuredSummary,
   parseStructuredSummary,
   stripMarkdownFence,
@@ -220,5 +223,53 @@ describe('buildCompactionArchiveEntry', () => {
     });
     const round: CompactionArchiveEntry = JSON.parse(JSON.stringify(entry));
     expect(round).toEqual(entry);
+  });
+});
+
+describe('estimateContextTokensForUi', () => {
+  // 最小可用的 user / assistant 消息工厂；只关心文本量，不关心真实 LLM 形状。
+  const user = (text: string): AgentMessage =>
+    ({ role: 'user', content: [{ type: 'text', text }], timestamp: 0 }) as unknown as AgentMessage;
+  const assistant = (text: string): AgentMessage =>
+    ({ role: 'assistant', content: [{ type: 'text', text }], timestamp: 0 }) as unknown as AgentMessage;
+
+  it('空消息数组 → 0（避免 UI 展示「未使用」假象）', () => {
+    expect(estimateContextTokensForUi([])).toBe(0);
+  });
+
+  it('无摘要的纯 user / assistant 流 → 把整段都算进去', () => {
+    const messages = [user('你好'), assistant('你好！'), user('讲个笑话'), assistant('好呀')];
+    const n = estimateContextTokensForUi(messages);
+    // 4 句话，每句 4 个 char/4 ≈ 1 token（估算器按 char/4 走，断言非零+递增）
+    expect(n).toBeGreaterThan(0);
+  });
+
+  it('尾巴上有 compactionSummary 时，把摘要与「retainedTail + 摘要之后的消息」一起算', () => {
+    // 构造一个摘要，放在两条 user 之间：摘要之前的轮本应被吸入「摘要代表的存量」，
+    // 摘要之后的活跃消息叠加。验证「更长输入 → 更多 token」单调性。
+    const summary = createCompactionSummaryMessage('## Goal\n前面聊了问候', 0, [
+      user('first retained'),
+      assistant('first reply'),
+    ]);
+    const without = [user('first'), assistant('first r'), summary, user('fresh'), assistant('fresh r')];
+    const withExtra = [...without, assistant('再来一轮')];
+    const a = estimateContextTokensForUi(without);
+    const b = estimateContextTokensForUi(withExtra);
+    expect(b).toBeGreaterThan(a);
+  });
+
+  it('损坏的 assistant 块（null text）能被 sanitize 住，不再让 estimateContextTokens 崩', () => {
+    // 直接模拟 issue #43 的输入：assistant.content 里有 text === null 的块。
+    // sanitizeAgentMessages 应把 null/text 替换成 ''，否则按 .length 算会抛。
+    const broken = [
+      user('正常'),
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: null as unknown as string }],
+        timestamp: 0,
+      } as unknown as AgentMessage,
+      assistant('正常回复'),
+    ];
+    expect(() => estimateContextTokensForUi(broken)).not.toThrow();
   });
 });
