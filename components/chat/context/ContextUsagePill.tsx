@@ -49,10 +49,6 @@ export const ContextUsagePill = forwardRef<HTMLButtonElement, ContextUsagePillPr
 ) {
   const { percent, severity, ratio, headroomTokens, unknown, isCompacting, isAgentRunning } = usage;
 
-  // Idle = agent free, not compacting, severity green. Recede the pill so it
-  // doesn't compete with the main input; warn / critical stay fully lit.
-  const idle = !isCompacting && !isAgentRunning && severity === 'ok';
-
   // Headroom chip only when severity is 'ok' and there's actual room left;
   // hide past 70% to keep the percentage the dominant read.
   const showHeadroom = useMemo(() => {
@@ -69,6 +65,13 @@ export const ContextUsagePill = forwardRef<HTMLButtonElement, ContextUsagePillPr
   const colorClass = SEVERITY_CLASS[severity];
   const ringLabel = t('chat.context.percent', [String(percent)]);
 
+  // Click-only toggle — hover does NOT open the popover (would steal focus
+  // from textarea and flicker on every `usage` re-render during streaming).
+  // `onPointerDown preventDefault` keeps keyboard focus on whatever the user
+  // is currently typing into — the pill is a click affordance, not a focus
+  // target.
+  const toggle = () => onPopoverOpenChange(!popoverOpen);
+
   return (
     <button
       ref={ref}
@@ -77,19 +80,18 @@ export const ContextUsagePill = forwardRef<HTMLButtonElement, ContextUsagePillPr
         'group/pill inline-flex items-center gap-1.5 h-7 rounded-full',
         'border border-current/20 bg-current/5 px-2.5',
         'text-[0.7rem] font-medium tabular-nums whitespace-nowrap',
-        'transition-[color,background-color,border-color,opacity,transform] duration-500 ease-out',
+        'transition-[color,background-color,border-color] duration-500 ease-out',
         'motion-reduce:transition-none',
         'hover:scale-[1.02] hover:bg-current/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
-        idle && 'opacity-80 hover:opacity-100',
-        popoverOpen && 'opacity-100 bg-current/10',
+        popoverOpen && 'bg-current/10',
+        (isCompacting || isAgentRunning) && 'opacity-60',
         colorClass,
       ].filter(Boolean).join(' ')}
-      onMouseEnter={() => onPopoverOpenChange(true)}
-      onMouseLeave={() => onPopoverOpenChange(false)}
-      onFocus={() => onPopoverOpenChange(true)}
-      onBlur={() => onPopoverOpenChange(false)}
+      onPointerDown={(e) => e.preventDefault()}
+      onClick={toggle}
       aria-label={t('chat.context.usage')}
       aria-haspopup="dialog"
+      aria-expanded={popoverOpen}
       data-state={popoverOpen ? 'open' : 'closed'}
     >
       {/* mini-donut: 12 px SVG. currentColor inherits pill severity tier; dasharray animates with ratio. */}

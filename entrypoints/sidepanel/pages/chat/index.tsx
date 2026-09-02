@@ -50,6 +50,7 @@ import { isCompactionSummary } from '@/lib/agent/compaction';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
 import { useContextUsage } from '@/components/chat/context/useContextUsage';
+import { ContextUsageBadge } from '@/components/chat/context/ContextUsageBadge';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useStorageItem } from '@/hooks/useStorageItem';
@@ -820,15 +821,29 @@ export function ChatPage({
         </div>
       </ScrollArea>
 
+        {/* Floating context-usage badge — anchored absolute bottom-right of
+            * the chat scroll container. Lifted out of ChatInput so it sits
+            * with the message content (where the eye is already moving)
+            * instead of competing with the composer toolbar for horizontal
+            * room. `usage` is computed once at the page level via
+            * `useContextUsage(agent, turnModel)`; `onCompact` proxies to
+            * `agent.compactNow`. The badge owns its own popover open state
+            * and compact-button ref — no prop drilling. */}
+        <ContextUsageBadge usage={usage} onCompact={() => { compactNow(); }} />
+
         {!isAtBottom && (
           <Tooltip>
             <TooltipTrigger asChild>
+              {/* Anchored to the LEFT edge so it never overlaps the
+                  * context-usage badge (which lives at bottom-right). Both
+                  * surfaces are independently positioned so each stays
+                  * reachable in its own zone. */}
               <Button
                 variant="secondary"
                 size="icon"
                 aria-label={t('chat.session.scrollToBottom')}
                 onClick={() => scrollToBottom({ force: true })}
-                className="absolute bottom-3 right-3 size-8 rounded-full shadow-md border border-border/60 bg-background/90 backdrop-blur hover:bg-background"
+                className="absolute bottom-3 left-3 size-8 rounded-full shadow-md border border-border/60 bg-background/90 backdrop-blur hover:bg-background"
               >
                 <ArrowDown className="size-4" />
               </Button>
@@ -881,8 +896,6 @@ export function ChatPage({
           thinkingLevel={turnThinking}
           onModelChange={handleModelChange}
           onThinkingChange={handleThinkingChange}
-          usage={usage}
-          onCompact={() => { compactNow(); }}
         />
 
       {/* Floating "Quote" button — appears whenever the user selects text

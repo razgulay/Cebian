@@ -41,11 +41,6 @@ import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { debugLog } from '@/lib/debug/log';
 import { useResolvedModel } from '@/components/chat/context/useResolvedModel';
-import { ContextUsagePill } from '@/components/chat/context/ContextUsagePill';
-import { ContextUsagePopover } from '@/components/chat/context/ContextUsagePopover';
-import { CompactNowButton } from '@/components/chat/context/CompactNowButton';
-import type { ContextUsage } from '@/components/chat/context/useContextUsage';
-import { Popover, PopoverTrigger } from '@/components/ui/popover';
 
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
@@ -100,15 +95,6 @@ interface ChatInputProps {
   /** When provided, pressing Escape inside the textarea calls this
    *  callback. Used by the edit flow to cancel without committing. */
   onCancelEdit?: () => void;
-  /** Context-usage snapshot from `useContextUsage(agent, turnModel)` — drives
-   *  the toolbar pill (live percentage + severity color) and the adjacent
-   *  Compact Now button. When omitted, both are hidden (backward compatible
-   *  for ChatInput reused outside the chat page). */
-  usage?: ContextUsage;
-  /** 触发「手动压缩」动作——弹出 popover 内的链接、toolbar 按钮、未来快捷键
-   *  全部汇聚到这一个入口。ChatInput 自己不调 IPC，只把点击事件转发给
-   *  父组件持有的 `agent.compactNow`。 */
-  onCompact?: () => void;
 }
 
 /** 暴露给父组件的 imperative handle：允许欢迎页等外部入口填入文本并聚焦输入框，
@@ -144,8 +130,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onThinkingChange,
     initialValue,
     onCancelEdit,
-    usage,
-    onCompact,
   },
   ref,
 ) {
@@ -186,13 +170,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashMenuRef = useRef<HTMLDivElement>(null);
-  // Context-usage pill's popover state — pill / popover / button share one
-  // source of truth at this level to avoid race conditions between three
-  // components each managing their own hover state.
-  const [usagePopoverOpen, setUsagePopoverOpen] = useState(false);
-  // CompactNowButton ref — popover's "Compact now" link focuses it after
-  // click so keyboard focus stays in the toolbar.
-  const compactButtonRef = useRef<HTMLButtonElement>(null);
   const sessionIdRef = useRef<string | null>(sessionId ?? null);
   sessionIdRef.current = sessionId ?? null;
   // Mirror of `quoteChips` for synchronous reads from handleSend.
@@ -2218,9 +2195,26 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[length:var(--chat-font-size)] font-medium px-1.5 py-0.5 min-h-6 max-h-37.5 leading-tight placeholder:text-muted-foreground/50"
         />
 
-        {/* Bottom row: actions */}
-        <div className="flex items-center justify-between px-1.5 pb-0.5">
-          <div className={`flex items-center gap-0.5 ${isDispatching ? 'pointer-events-none opacity-60' : ''}`}>
+        {/* Toolbar — two fixed rows so every action has a stable slot:
+          *
+          *   Row 1: ContextUsagePill + CompactNowButton, left-aligned. The
+          *   status cluster anchors the top of the composer strip — context
+          *   usage is read-mostly (you glance at it, then keep typing), so
+          *   it sits near the textarea where the eye is already moving.
+          *
+          *   Row 2: model selector + thinking selector on the LEFT, mention
+          *   + mic + send on the RIGHT. The model picker owns the left half
+          *   because its dropdown / breadcrumb body is the heaviest
+          *   context-changing control; the primary action tools (mention /
+          *   mic / send) anchor the right half where the user expects to
+          {/* Toolbar: model selector + thinking selector on the LEFT, mention
+          * context-usage pill + Compact Now button have moved out of the
+          * toolbar entirely — they now live as a floating badge anchored
+          * top-right of the chat scroll container (see ContextUsageBadge
+          * rendered inside chat/index.tsx). Single-row layout keeps the
+          * composer compact and avoids any wrap-induced send clipping. */}
+        <div className="flex items-center justify-between gap-1 px-1.5 pb-0.5">
+          <div className="flex items-center gap-0.5">
             <ModelSelector
               activeModel={currentModel}
               configuredProviders={providers}
@@ -2235,37 +2229,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 onSelect={handleThinkingSelect}
               />
             )}
-            {/* Context-usage pill + Compact Now button: rendered only when the
-              * parent passes `usage`. isDispatching already grey-disables
-              * pointer events on the parent container, so individual buttons
-              * don't need their own disable. popover and button share a
-              * single usagePopoverOpen state — pill hover opens, leaving the
-              * popover keeps it open, popover's own onMouseLeave closes. */}
-            {usage && (
-              <Popover open={usagePopoverOpen} onOpenChange={setUsagePopoverOpen}>
-                <PopoverTrigger asChild>
-                  <ContextUsagePill
-                    usage={usage}
-                    popoverOpen={usagePopoverOpen}
-                    onPopoverOpenChange={setUsagePopoverOpen}
-                  />
-                </PopoverTrigger>
-                <CompactNowButton
-                  ref={compactButtonRef}
-                  usage={usage}
-                  onClick={() => onCompact?.()}
-                />
-                <ContextUsagePopover
-                  open={usagePopoverOpen}
-                  onOpenChange={setUsagePopoverOpen}
-                  usage={usage}
-                  compactButtonRef={compactButtonRef}
-                />
-              </Popover>
-            )}
           </div>
-
-          <div className="flex items-center gap-1">
+          <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
             <MentionPopover
               disabled={isDispatching}
               onSelect={addMention}
