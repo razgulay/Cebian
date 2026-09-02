@@ -303,14 +303,6 @@ settings:
     enable: "启用记忆"
     hint: "跨对话记忆，默认关闭。开启后助手会跨会话自动保存并调用关于你的长期信息。"
     newBody: "（在此写记忆内容）"
-    emptyList: "暂无记忆文件"
-    deleteConfirmTitle: "删除记忆文件？"
-    deleteConfirmDescription: "将从 VFS 永久删除该文件，此操作不可撤销。"
-    inlineEditor:
-      renameFile: "重命名文件"
-      renameConflict: "已存在同名文件"
-      close: "完成"
-      placeholder: "文件名"
     organize:
       title: "整理记忆"
       hint: "一次性合并重复、清理过时、规整你的记忆文件。"

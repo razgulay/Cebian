@@ -20,7 +20,6 @@ import { debugLog, withSession } from '@/lib/debug/log';
 import { stripSystemTags } from '@/lib/agent/strip-system-tags';
 import { CollectionsSection } from '@/components/sidebar/CollectionsSection';
 import { MCPSection } from '@/components/sidebar/MCPSection';
-import { MemorySection } from '@/components/sidebar/MemorySection';
 
 interface SidebarPanelProps {
   open: boolean;
@@ -128,14 +127,16 @@ function displayTitle(title: string): string {
 }
 
 /**
- * SidebarPanel — 抽屉式侧边栏，包含 4 个区域：
+ * SidebarPanel — 抽屉式侧边栏，包含 3 个区域：
  *   1. History — 会话历史（按时间分组，pin 在顶部）
  *   2. Collections — RAG collections 列表 + 新建/重命名/重新索引/删除
  *   3. MCP — MCP 服务器列表 + 添加
- *   4. Memory — 记忆总开关 + 整理配置 + 搜索跳转
  *
  * 单列垂直滚动布局，不强制任何高度限制——Collections / MCP 增多时整列自然变长，
  * 滚动条由 ScrollArea 提供。每个区域单独 `border-border` 包裹，区域间由 `space-y-3` 隔开。
+ *
+ * 注意：记忆管理（Memory）不在侧边栏抽屉中——抽屉只列历史，记忆相关的总开关、整理配置、
+ * 文件浏览 / 编辑请走 `/settings/memory` 设置页（见 `components/settings/sections/MemorySection`）。
  */
 export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }: SidebarPanelProps) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -359,11 +360,11 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
       </div>
 
       {/* Body — single vertical scroll containing History (top, fixed
-          collapsible groups) + Collections + MCP + Memory shared
-          components. `space-y-3` gives regions a fixed gap;
+          collapsible groups) + Collections + MCP shared components.
+          `space-y-3` gives regions a fixed gap;
           `pl-3 pr-0` preserves the original history's 12px left padding
           and 0 right padding. ScrollArea auto-shows a scrollbar when
-          the 4 regions exceed viewport height — adding MCP / RAG files
+          the 3 regions exceed viewport height — adding MCP / RAG files
           grows the column without any fixed-height truncation. */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="pl-3 pr-0 py-1 space-y-3">
@@ -372,9 +373,6 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
 
           {/* ─── MCP Servers ─── */}
           <MCPSection />
-
-          {/* ─── Memory ─── */}
-          <MemorySection />
 
           {/* ─── History (cuối sidebar) ─── */}
           <section>

@@ -126,6 +126,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Fixed the floating context-usage badge position: it was anchored at `absolute top-3 right-3` of the chat scroll container, sitting in the header zone far from the reading focus. Moved to `absolute bottom-3 right-3` so the badge now anchors to the visual strip just under the latest AI reply / above the composer — matching where Copilot / Claude.ai place their context indicators, which reads closer to the eye. The scroll-to-bottom button was also at `bottom-3 right-3` and would have collided with the badge; it moves to `bottom-3 left-3` so each floating surface owns one edge and they never overlap, with both still within their natural thumb zone
 
+### 移除 / Removed
+
+- 侧边栏抽屉中移除了 Memory 区块：之前 Collections / MCP / Memory / History 四段中的 Memory 段不再渲染；记忆功能的总开关、整理配置、文件浏览 / 编辑仍可通过 `/settings/memory` 设置页完整访问
+
+- Removed the Memory section from the sidebar drawer: the Memory block that previously sat between MCP and History no longer renders. Memory management (master toggle, organize configuration, file browse / edit) remains fully accessible via the `/settings/memory` settings page
+
 ## 1.5.1 - 2026-08-22
 
 ### 新增 / Added

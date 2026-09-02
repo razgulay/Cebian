@@ -310,14 +310,6 @@ settings:
     enable: "Enable memory"
     hint: "Cross-conversation memory. Off by default; when on, the assistant saves and recalls durable facts about you across chats."
     newBody: "(Write the memory here)"
-    emptyList: "No memory files yet"
-    deleteConfirmTitle: "Delete memory file?"
-    deleteConfirmDescription: "This will permanently remove the file from your VFS. This cannot be undone."
-    inlineEditor:
-      renameFile: "Rename file"
-      renameConflict: "A file with that name already exists"
-      close: "Done"
-      placeholder: "File name"
     organize:
       title: "Organize memory"
       hint: "Merge duplicates, drop stale notes, and tidy your memory files in one pass."

@@ -303,14 +303,6 @@ settings:
     enable: "啟用記憶"
     hint: "跨對話記憶，預設關閉。啟用後助手會跨會話自動儲存並調用關於你的長期資訊。"
     newBody: "（在此撰寫記憶內容）"
-    emptyList: "尚無記憶檔案"
-    deleteConfirmTitle: "刪除記憶檔案？"
-    deleteConfirmDescription: "將從 VFS 永久刪除該檔案，此操作無法復原。"
-    inlineEditor:
-      renameFile: "重新命名檔案"
-      renameConflict: "已存在同名檔案"
-      close: "完成"
-      placeholder: "檔案名稱"
     organize:
       title: "整理記憶"
       hint: "一次合併重複、清理過時、整理你的記憶檔案。"
