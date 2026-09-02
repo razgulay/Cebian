@@ -6,7 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import { createPdfPreviewController, resolvePdfRenderScale, type PdfIntrinsicMeasurement } from '@/lib/content/pdf-loader';
 import { t } from '@/lib/i18n';
-import { fileExtension, formatSize, pickFileIcon, resolveMarkdownOpenMode, type VfsOpenPreference } from '../lib/path-utils';
+import { fileExtension, formatSize, pickFileIcon, resolvePreviewOpenMode, type VfsOpenPreference } from '../lib/path-utils';
 import type { FileMedia } from '../types';
 
 export function FileView({ path, media, openPreference }: { path: string; media: FileMedia; openPreference: VfsOpenPreference }) {
@@ -56,6 +56,8 @@ export function FileView({ path, media, openPreference }: { path: string; media:
     }
     case 'markdown':
       return <MarkdownFileView key={`${path}:${openPreference}`} path={path} media={media} openPreference={openPreference} renderHeader={renderHeader} />;
+    case 'html':
+      return <HtmlFileView key={`${path}:${openPreference}`} name={name} media={media} openPreference={openPreference} renderHeader={renderHeader} />;
     case 'pdf':
       return <PdfFileView media={media} renderHeader={renderHeader} />;
     case 'image':
@@ -130,38 +132,40 @@ export function FileView({ path, media, openPreference }: { path: string; media:
   }
 }
 
-/** Markdown variant lives in its own component so it can own the
- *  preview/source toggle state without polluting `FileView`'s switch.
+/** Shell for any "preview / view source" file viewer. Owns the toggle
+ *  state (so it persists across navigations to the same file class), the
+ *  shared header chrome (toggle + copy + lines/size), and the source `<pre>`
+ *  fallback. Callers supply only the preview body — Markdown pipes through
+ *  `<MarkdownRenderer>` (with frontmatter), HTML pipes through a sandboxed
+ *  `<iframe>` pointed at `entrypoints/html-preview.sandbox/`.
  *
- *  The toggle state persists across markdown-to-markdown navigation by
- *  design: React keeps `MarkdownFileView` mounted at the same JSX slot,
- *  so `useState` survives a prop-only change. We rely on this — a user
- *  stepping through several `.md` files with their preferred view (raw
- *  source while reviewing, preview while reading) shouldn't have to
- *  re-toggle each time. State naturally resets only when leaving the
- *  markdown branch entirely (different file class / dir / error). */
-function MarkdownFileView({
-  path,
+ *  Toggle state persistence: like `MarkdownFileView` before it, React keeps
+ *  this component mounted at the same JSX slot for a given file class, so
+ *  `useState` survives a media-only change. State naturally resets only
+ *  when leaving the file class entirely (different file / dir / error).
+ *
+ *  `previewPersistent`: when true, `renderPreview()` is mounted in BOTH
+ *  modes (hidden via `display:none` when not active). Use this when the
+ *  preview is expensive to remount — e.g. an `<iframe>` whose document is
+ *  driven by postMessage, where remounting would lose script state. The
+ *  default (`false`) unmounts `renderPreview()` on source-mode toggle, which
+ *  is fine for cheap previews like Markdown (cheap to re-render). */
+function PreviewSourceFrame({
   media,
   openPreference,
   renderHeader,
+  renderPreview,
+  previewPersistent = false,
 }: {
-  path: string;
-  media: Extract<FileMedia, { type: 'markdown' }>;
+  media: { content: string; size: number };
   openPreference: VfsOpenPreference;
   renderHeader: (right: React.ReactNode) => React.ReactNode;
+  renderPreview: () => React.ReactNode;
+  previewPersistent?: boolean;
 }) {
-  const [mode, setMode] = useState<'preview' | 'source'>(() => resolveMarkdownOpenMode(openPreference));
+  const [mode, setMode] = useState<'preview' | 'source'>(() => resolvePreviewOpenMode(openPreference));
   const lineCount = media.content.length === 0 ? 0 : media.content.split('\n').length;
   const showingPreview = mode === 'preview';
-
-  // Split frontmatter out so we can render it as a GitHub-style table in
-  // preview mode. Memoize because parsing scans the whole document.
-  const { frontmatterData, body } = useMemo(() => {
-    const { data, body: rest } = parseFrontmatter(media.content);
-    return { frontmatterData: data, body: rest };
-  }, [media.content]);
-  const hasFrontmatter = Object.keys(frontmatterData).length > 0;
 
   const toggle = (
     <div className="flex items-center rounded-md border border-border p-0.5">
@@ -189,24 +193,16 @@ function MarkdownFileView({
         </>,
       )}
       <div className="relative overflow-auto max-h-[calc(100vh-12rem)]">
+        {previewPersistent && (
+          // Persistent preview — always mounted, hidden via display when in
+          // source mode. Rendered FIRST so the <pre> stacks on top via DOM
+          // order (later sibling paints on top with same z-index). Keeps the
+          // preview's internal state (e.g. iframe scripts) intact across
+          // toggle clicks.
+          <div className={showingPreview ? 'block' : 'hidden'}>{renderPreview()}</div>
+        )}
         {showingPreview ? (
-          // Prose neutralizers (prose-code: + prose-pre:) cancel out
-          // typography defaults that conflict with MarkdownRenderer's own
-          // styling: prose injects literal backticks around inline <code>
-          // and gives <pre> a dark slate background that overrides our
-          // CodeBlock's container. We keep typography for headings / lists
-          // / blockquotes / tables, but hand code rendering back to
-          // MarkdownRenderer.
-          <div
-            className={
-              'prose prose-sm dark:prose-invert max-w-none p-4 ' +
-              'prose-code:before:content-none prose-code:after:content-none prose-code:font-normal ' +
-              'prose-pre:bg-transparent prose-pre:text-inherit prose-pre:p-0 prose-pre:m-0 prose-pre:rounded-none prose-pre:font-normal'
-            }
-          >
-            {hasFrontmatter && <FrontmatterTable data={frontmatterData} />}
-            <MarkdownRenderer content={body} currentVfsPath={path} />
-          </div>
+          !previewPersistent && renderPreview()
         ) : (
           <pre className="p-4 text-[13px] leading-relaxed font-mono text-foreground/90 whitespace-pre-wrap wrap-break-word selection:bg-primary/20">
             {media.content}
@@ -214,6 +210,55 @@ function MarkdownFileView({
         )}
       </div>
     </div>
+  );
+}
+
+/** Markdown variant — pipes the preview body through `<MarkdownRenderer>`
+ *  with a GitHub-style frontmatter table prepended when present. */
+function MarkdownFileView({
+  path,
+  media,
+  openPreference,
+  renderHeader,
+}: {
+  path: string;
+  media: Extract<FileMedia, { type: 'markdown' }>;
+  openPreference: VfsOpenPreference;
+  renderHeader: (right: React.ReactNode) => React.ReactNode;
+}) {
+  // Split frontmatter out so we can render it as a GitHub-style table in
+  // preview mode. Memoize because parsing scans the whole document.
+  const { frontmatterData, body } = useMemo(() => {
+    const { data, body: rest } = parseFrontmatter(media.content);
+    return { frontmatterData: data, body: rest };
+  }, [media.content]);
+  const hasFrontmatter = Object.keys(frontmatterData).length > 0;
+
+  return (
+    <PreviewSourceFrame
+      media={media}
+      openPreference={openPreference}
+      renderHeader={renderHeader}
+      renderPreview={() => (
+        // Prose neutralizers (prose-code: + prose-pre:) cancel out
+        // typography defaults that conflict with MarkdownRenderer's own
+        // styling: prose injects literal backticks around inline <code>
+        // and gives <pre> a dark slate background that overrides our
+        // CodeBlock's container. We keep typography for headings / lists
+        // / blockquotes / tables, but hand code rendering back to
+        // MarkdownRenderer.
+        <div
+          className={
+            'prose prose-sm dark:prose-invert max-w-none p-4 ' +
+            'prose-code:before:content-none prose-code:after:content-none prose-code:font-normal ' +
+            'prose-pre:bg-transparent prose-pre:text-inherit prose-pre:p-0 prose-pre:m-0 prose-pre:rounded-none prose-pre:font-normal'
+          }
+        >
+          {hasFrontmatter && <FrontmatterTable data={frontmatterData} />}
+          <MarkdownRenderer content={body} currentVfsPath={path} />
+        </div>
+      )}
+    />
   );
 }
 
@@ -227,6 +272,186 @@ function ModeButton({ active, label, onClick, children }: { active: boolean; lab
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** HTML preview variant — pipes the preview body through a sandboxed
+ *  `<iframe>` pointed at the dedicated `entrypoints/html-preview.sandbox/`
+ *  entrypoint. The host (this page) ships the document via postMessage;
+ *  the sandbox page renders it inside an inner iframe with its own
+ *  `sandbox="allow-scripts allow-same-origin allow-forms"` so the rendered
+ *  HTML actually runs.
+ *
+ *  Why a dedicated sandbox entrypoint instead of `<iframe srcDoc>` here:
+ *  srcdoc iframes inherit the parent's CSP. Extension pages run under
+ *  Chrome's strict `script-src 'self'` (MV3 forbids `'unsafe-inline'` for
+ *  `extension_pages`), so inline `<script>`, `onclick=`, and DOMContentLoaded
+ *  handlers in the previewed HTML all get blocked. Sandbox pages are
+ *  served from a separate origin under the manifest `sandbox` CSP, which
+ *  allows `'unsafe-inline'`. The trade-off is one extra hop — but the
+ *  opaque origin of the sandbox page means the previewed script's "same
+ *  origin" is a unique opaque one, so the Chrome warning about
+ *  `allow-scripts + allow-same-origin` escaping the sandbox does not apply:
+ *  there's nothing to escape into.
+ *
+ *  Outer iframe `sandbox` tokens: same as the inner iframe's (so modals
+ *  triggered inside the previewed document work end-to-end — without
+ *  `allow-modals` Chrome drops `alert()`/`confirm()`/`prompt()` calls
+ *  with "document is sandboxed, and the 'allow-modals' keyword is not
+ *  set"). `allow-popups` and `allow-top-navigation` are deliberately
+ *  excluded so a hostile previewed document can't navigate the parent
+ *  tab or spawn windows via `window.open`.
+ *
+ *  Trust model: the rendered file is the user's own VFS content (hand-
+ *  written or generated by an agent they control), same as the existing
+ *  download-then-open-in-Chrome workflow. The opaque sandbox origin
+ *  contains the blast radius — a misbehaving script can't reach the
+ *  extension's storage, IPC, or DOM.
+ *
+ *  Source mode: `PreviewSourceFrame` keeps the outer iframe mounted but
+ *  hides it (`previewPersistent: true`); switching back to preview mode is
+ *  instant and preserves the preview's internal state. Without this, each
+ *  toggle would re-mount the iframe and re-srcdoc the document, which
+ *  resets script state — frustrating for interactive previews like
+ *  dashboards where the user expects their clicks to persist across
+ *  a quick source peek.
+ *
+ *  Handshake: the host mounts the outer iframe and can compute the
+ *  `postMessage` call before the sandbox's top-level script has had a
+ *  chance to register its `message` listener. Chromium does NOT
+ *  reliably buffer cross-document messages sent before listeners attach —
+ *  under load the first `set` is silently dropped, leaving the inner
+ *  iframe blank. The sandbox announces itself with a `{ type:
+ *  'sandbox:ready' }` event once its DOMContentLoaded has fired (i.e.
+ *  its listener is live), and we cache the latest payload in refs and
+ *  flush it on that signal. `onLoad` on the outer iframe is also a
+ *  safe fallback (load fires after the inner page's deferred scripts
+ *  have executed), used if the `ready` event is somehow lost.
+ */
+const HTML_PREVIEW_FRAME_URL = browser.runtime.getURL('/html-preview.html');
+
+interface HtmlPreviewSetMessage {
+  type: 'html-preview:set';
+  html: string;
+  name: string;
+}
+interface HtmlPreviewClearMessage {
+  type: 'html-preview:clear';
+}
+interface SandboxReadyMessage {
+  type: 'sandbox:ready';
+}
+
+function HtmlFileView({
+  name,
+  media,
+  openPreference,
+  renderHeader,
+}: {
+  name: string;
+  media: Extract<FileMedia, { type: 'html' }>;
+  openPreference: VfsOpenPreference;
+  renderHeader: (right: React.ReactNode) => React.ReactNode;
+}) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  // Latest payload cached in refs (not state) so a media change during
+  // the handshake window doesn't trigger a React re-render — we only
+  // need the most recent values when the sandbox is finally ready to
+  // receive. Using state here would force a re-render + remount of the
+  // outer iframe, which would re-trigger the race we're trying to avoid.
+  const pendingHtmlRef = useRef<string>('');
+  const pendingNameRef = useRef<string>('');
+  // Track whether we have unflushed payload — saves us posting a stale
+  // message if the sandbox reloads (e.g. via devtools "reload frame").
+  const hasPendingRef = useRef(false);
+
+  // Keep the refs synced with the latest media. The actual `postMessage`
+  // is gated on `sandbox:ready` (or the iframe's onLoad fallback), so
+  // updating these refs does NOT cause a re-render.
+  pendingHtmlRef.current = media.content;
+  pendingNameRef.current = name;
+  hasPendingRef.current = true;
+
+  // Flush the cached payload to the sandbox. Safe to call multiple times
+  // — the sandbox hot-replaces its inner iframe on each `set`.
+  const flushPending = (reason: string) => {
+    const iframe = iframeRef.current;
+    if (!iframe?.contentWindow) return;
+    // eslint-disable-next-line no-console
+    console.log('[html-preview host] flushing payload', {
+      reason,
+      name: pendingNameRef.current,
+      bytes: pendingHtmlRef.current.length,
+    });
+    const message: HtmlPreviewSetMessage = {
+      type: 'html-preview:set',
+      html: pendingHtmlRef.current,
+      name: pendingNameRef.current,
+    };
+    iframe.contentWindow.postMessage(message, '*');
+    hasPendingRef.current = false;
+  };
+
+  // Subscribe to the sandbox's ready announcement. The listener lives on
+  // `window` (host side), not on the iframe directly — there's no
+  // `onmessage` on an HTMLIFrameElement. We authenticate by comparing
+  // `event.source` to the iframe's `contentWindow` so a foreign window
+  // posting the same `{ type: 'sandbox:ready' }` payload can't trick us.
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      const data = event.data as SandboxReadyMessage | null | undefined;
+      if (!data || typeof data !== 'object' || data.type !== 'sandbox:ready') return;
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      // eslint-disable-next-line no-console
+      console.log('[html-preview host] received sandbox:ready');
+      flushPending('sandbox:ready');
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cleanup on unmount: tell the sandbox to drop its inner iframe so it
+  // doesn't keep running the script in the background after the user
+  // navigates away from the HTML branch.
+  useEffect(() => {
+    return () => {
+      const iframe = iframeRef.current;
+      if (!iframe?.contentWindow) return;
+      const clear: HtmlPreviewClearMessage = { type: 'html-preview:clear' };
+      iframe.contentWindow.postMessage(clear, '*');
+    };
+  }, []);
+
+  // Fallback flush: if the outer iframe fires `onLoad` before the
+  // `sandbox:ready` event arrives (e.g. we missed it because of a
+  // navigation away and back, or the sandbox's listener somehow lost
+  // the first event), re-send the payload. Idempotent on the sandbox
+  // side — `set` just hot-replaces the inner iframe.
+  const handleIframeLoad = () => {
+    if (!hasPendingRef.current) return;
+    // eslint-disable-next-line no-console
+    console.log('[html-preview host] iframe onLoad, flushing as fallback');
+    flushPending('iframe.onLoad');
+  };
+
+  return (
+    <PreviewSourceFrame
+      media={media}
+      openPreference={openPreference}
+      renderHeader={renderHeader}
+      previewPersistent
+      renderPreview={() => (
+        <iframe
+          ref={iframeRef}
+          src={HTML_PREVIEW_FRAME_URL}
+          sandbox="allow-scripts allow-same-origin allow-forms allow-modals"
+          title={name}
+          onLoad={handleIframeLoad}
+          className="w-full h-[calc(100vh-12rem)] bg-white block border-0"
+        />
+      )}
+    />
   );
 }
 

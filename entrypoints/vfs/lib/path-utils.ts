@@ -14,7 +14,7 @@ export const BINARY_EXTS = new Set([
   'mp3', 'mp4', 'wav', 'ogg',
 ]);
 
-const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'css', 'html']);
+const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'css', 'html', 'htm']);
 
 /** UTF-8 decoding is opt-in. Unknown extensions must stay opaque because a
  * binary payload decoded with replacement characters is both misleading and
@@ -22,7 +22,7 @@ const CODE_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'css', 'html']);
 export const TEXT_EXTS = new Set([
   'txt', 'text', 'log', 'csv', 'tsv',
   'json', 'jsonl', 'ndjson', 'yaml', 'yml', 'toml', 'xml',
-  'html', 'htm', 'css', 'scss', 'sass', 'less',
+  'css', 'scss', 'sass', 'less',
   'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'vue', 'svelte', 'astro', 'mdx',
   'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs',
   'swift', 'php', 'lua', 'r', 'dart', 'ex', 'exs', 'erl', 'hrl', 'clj', 'cljs',
@@ -32,6 +32,13 @@ export const TEXT_EXTS = new Set([
   'gitignore', 'gitattributes', 'dockerignore', 'npmrc', 'nvmrc', 'editorconfig',
   'prettierrc', 'eslintrc', 'stylelintrc', 'babelrc', 'browserslistrc',
 ]);
+
+/** `.html` / `.htm` route to the dedicated HTML preview bucket (sandboxed
+ *  iframe in `/vfs`), not the generic TEXT bucket — a generic `<pre>` of an
+ *  HTML document is rarely what the user wants to read. Listed separately
+ *  from `TEXT_EXTS` so `classifyFile` can route HTML to its own branch before
+ *  the catch-all fallback. */
+export const HTML_EXTS = new Set(['html', 'htm']);
 
 export const TEXT_FILENAMES = new Set([
   'readme', 'license', 'copying', 'changelog', 'dockerfile', 'makefile',
@@ -54,11 +61,12 @@ export const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
  *  specific media buckets (markdown / image / video / audio) win before
  *  the generic binary fallback, since BINARY_EXTS still overlaps with
  *  some media extensions for safety. */
-export type FileClass = 'text' | 'markdown' | 'pdf' | 'image' | 'video' | 'audio' | 'binary' | 'unknown';
+export type FileClass = 'text' | 'markdown' | 'html' | 'pdf' | 'image' | 'video' | 'audio' | 'binary' | 'unknown';
 
 export function classifyFile(name: string): FileClass {
   const ext = fileExtension(name);
   if (MARKDOWN_EXTS.has(ext)) return 'markdown';
+  if (HTML_EXTS.has(ext)) return 'html';
   if (ext === 'pdf') return 'pdf';
   if (IMAGE_EXTS.has(ext)) return 'image';
   if (VIDEO_EXTS.has(ext)) return 'video';
@@ -78,9 +86,14 @@ export function decodePreviewText(bytes: Uint8Array): string | null {
 }
 
 export type VfsOpenPreference = 'smart' | 'preview' | 'source';
-export type MarkdownOpenMode = 'preview' | 'source';
+export type PreviewOpenMode = 'preview' | 'source';
 
-export function resolveMarkdownOpenMode(preference: VfsOpenPreference | string): MarkdownOpenMode {
+/** Maps a `VfsOpenPreference` to the actual preview/source mode used by
+ *  file viewers that toggle between rendered output and raw markup
+ *  (currently Markdown and HTML in `/vfs`). `smart` / `preview` → preview,
+ *  `source` → source. Named for the *action* (opening in preview vs source)
+ *  rather than the file class it happens to drive. */
+export function resolvePreviewOpenMode(preference: VfsOpenPreference | string): PreviewOpenMode {
   return preference === 'source' ? 'source' : 'preview';
 }
 

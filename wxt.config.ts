@@ -121,6 +121,14 @@ export default defineConfig({
           // so custom OpenAI-compatible providers pointing at local proxies
           // (9router, LM Studio, Ollama, etc.) can be reached. Loopback only —
           // doesn't extend to arbitrary `http://*`.
+          //
+          // No `frame-src` widening here: extension pages stay under Chrome's
+          // default `default-src 'self'`, so nested iframes (srcdoc / blob: /
+          // cross-origin) are blocked. The HTML preview in `/vfs` tab ships
+          // the document to a dedicated MV3 sandbox entrypoint
+          // (`entrypoints/html-preview.sandbox/`) which inherits the manifest
+          // `sandbox` CSP (permissive, with `'unsafe-inline'`); see
+          // `HtmlFileView` for the host-side wiring.
           extension_pages:
             "script-src 'self'; " +
             "style-src 'self' 'unsafe-inline' https:; " +

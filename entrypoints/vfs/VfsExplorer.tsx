@@ -128,7 +128,7 @@ export function VfsExplorer() {
         const klass = classifyFile(name);
         let media: FileMedia;
 
-        if (klass === 'text' || klass === 'markdown') {
+        if (klass === 'text' || klass === 'markdown' || klass === 'html') {
           const raw = (await vfs.readFile(p)) as unknown as Uint8Array;
           if (myId !== loadIdRef.current) return;
           const content = decodePreviewText(raw);

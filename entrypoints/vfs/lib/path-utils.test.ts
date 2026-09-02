@@ -35,6 +35,16 @@ describe('classifyFile', () => {
     expect(pathUtils.classifyFile('program.exe')).toBe('unknown');
     expect(pathUtils.classifyFile('mystery')).toBe('unknown');
   });
+
+  it('routes .html / .htm to the dedicated html bucket, not the generic text bucket', () => {
+    expect(pathUtils.classifyFile('page.html')).toBe('html');
+    expect(pathUtils.classifyFile('page.htm')).toBe('html');
+    expect(pathUtils.classifyFile('PAGE.HTML')).toBe('html');
+    // Regression guard: html/htm were previously in TEXT_EXTS, which routed
+    // them to the raw-<pre> branch. If anyone re-adds them to TEXT_EXTS
+    // without removing HTML_EXTS, the text branch wins by ordering and this
+    // test catches it.
+  });
 });
 
 describe('decodePreviewText', () => {
@@ -53,18 +63,18 @@ describe('decodePreviewText', () => {
   });
 });
 
-describe('resolveMarkdownOpenMode', () => {
-  const resolveMarkdownOpenMode = (
+describe('resolvePreviewOpenMode', () => {
+  const resolvePreviewOpenMode = (
     pathUtils as unknown as {
-      resolveMarkdownOpenMode?: (preference: string) => string;
+      resolvePreviewOpenMode?: (preference: string) => string;
     }
-  ).resolveMarkdownOpenMode;
+  ).resolvePreviewOpenMode;
 
-  it('maps versioned preferences to a markdown opening mode', () => {
-    expect(resolveMarkdownOpenMode).toBeTypeOf('function');
-    expect(resolveMarkdownOpenMode?.('smart')).toBe('preview');
-    expect(resolveMarkdownOpenMode?.('preview')).toBe('preview');
-    expect(resolveMarkdownOpenMode?.('source')).toBe('source');
+  it('maps versioned preferences to a preview/source opening mode', () => {
+    expect(resolvePreviewOpenMode).toBeTypeOf('function');
+    expect(resolvePreviewOpenMode?.('smart')).toBe('preview');
+    expect(resolvePreviewOpenMode?.('preview')).toBe('preview');
+    expect(resolvePreviewOpenMode?.('source')).toBe('source');
   });
 });
 
