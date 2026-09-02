@@ -125,7 +125,7 @@ export function runScriptHookInFreshSandbox(
             code: wrapHookCall(script, hook),
             args,
             permissions: [],
-            vfsRoot: null,
+            vfsScope: null,
           },
           '*',
         );

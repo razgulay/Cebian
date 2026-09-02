@@ -8,7 +8,7 @@ import { ensureOffscreen } from './offscreen';
 import { executeViaDebugger } from '@/lib/browser/tab-actions';
 import { isChromeCallAllowed } from './chrome-api-whitelist';
 import { vfs } from '@/lib/persistence/vfs';
-import { isVfsCallAllowed, resolveScopedPath, sessionSkillRoot } from './vfs-whitelist';
+import { isVfsCallAllowed, resolveScopedPath, dispatchReadWithFallback, sessionSkillRoot, sessionWorkspaceRoot, VFS_WRITE_METHODS, type VfsScope } from './vfs-whitelist';
 import { decodeBinaryArgs, decodeBinary, encodeBinary } from '@/lib/ipc/sandbox-binary';
 import type { MatchPattern } from './url-pattern';
 import { parseBgFetchPatterns } from './url-pattern';
@@ -18,7 +18,7 @@ import { debugLog } from '@/lib/debug/log';
 
 // ─── Pending run requests ───
 
-/** Per-run state. `vfsRoot` / `permissions` / `bgFetchPatterns` are kept on
+/** Per-run state. `vfsScope` / `permissions` / `bgFetchPatterns` are kept on
  *  the trusted side so handlers look them up by `id` instead of trusting
  *  the sandbox-supplied envelope — a malicious skill cannot forge its scope
  *  or claim a permission / pattern it wasn't granted. */
@@ -26,7 +26,7 @@ interface PendingRun {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
-  vfsRoot: string | null;
+  vfsScope: VfsScope | null;
   permissions: string[];
   bgFetchPatterns: MatchPattern[] | null;
   /** AbortController for in-flight bgFetch calls; aborted when the run
@@ -167,10 +167,20 @@ async function handlePageExec(msg: {
 }
 
 // ─── VFS proxy handler ───
-// 把 skill 脚本里 `vfs.<method>(rel, ...)` 路由到真正的 lib/vfs。所有路径
-// 过 resolveScopedPath 限定在该 run 的 vfsRoot 内（由 run-skill 启动时计算好
-// 并保存在 pendingRuns 里），sandbox 自己无法影响作用域。
+// 把 skill 脚本里 `vfs.<method>(rel, ...)` 路由到真正的 lib/vfs。
+//   - 写方法走 `vfsScope.writeRoot`（skill 自己的子目录，与既有行为一致）
+//   - 读方法走 writeRoot-first / readRoot-fallback 的两段式 —— 见
+//     `dispatchReadWithFallback` 注释
+// 两个根都由 run-skill 启动时一次性算好并存进 pendingRuns，sandbox 自己
+// 无法影响作用域。
+//
 // `stat` 的返回值带方法，结构化克隆会丢，需要 flatten 成纯对象。
+//
+// 读方法的 writeRoot-first / readRoot-fallback 双根解析与 invoke 逻辑都在
+// `vfs-whitelist.ts` 里（`dispatchReadWithFallback` + `invokeReadMethod`），
+// 本文件只负责在 background 端调用权威 helper 并把 result / error 通过
+// chrome.runtime.sendMessage 回给 sandbox。
+
 async function handleVfsCall(msg: {
   id: string;
   callId: string;
@@ -190,7 +200,7 @@ async function handleVfsCall(msg: {
     if (!pending) {
       throw new Error('vfs call has no matching pending run (timed out or replayed)');
     }
-    if (!pending.vfsRoot) {
+    if (!pending.vfsScope) {
       // 不可达分支：sandbox 例以未声明 vfs.* 权限时根本不会构造 vfs proxy，走
       // 到这里说明中间某一不可信环节被篡改。报出 internal 标记以免 agent 把这
       // 当成可操作的提示传回用户。
@@ -208,69 +218,61 @@ async function handleVfsCall(msg: {
     // 这里逐项还原成原生 Uint8Array 再传给 vfs。
     const callArgs = decodeBinaryArgs(msg.args);
     const rel = callArgs[0];
-    const absPath = resolveScopedPath(rel, pending.vfsRoot);
+    const isWrite = VFS_WRITE_METHODS.has(msg.method);
 
-    switch (msg.method) {
-      case 'readFile': {
-        // encoding 参数原样透传给 vfs.readFile —— 支持 `'utf8'` / undefined /
-        // `{ encoding: 'utf8' }` 三种形式（跟 Node `fs.promises` 一致）。不法的
-        // encoding 由 lightning-fs / vfs 底层报 EINVAL，不在这一层扫语义。
-        result = await vfs.readFile(absPath, callArgs[1] as 'utf8' | { encoding?: 'utf8' } | undefined);
-        break;
-      }
-      case 'writeFile': {
-        // skill 常见数据来源：`new TextEncoder().encode(...)` → Uint8Array，
-        // `await response.arrayBuffer()` → ArrayBuffer。两种都接，前者已是
-        // Uint8Array 直接走；后者包一层视图。string 直接透传。任何另外的
-        // `opts` （第三个参）也透传给 vfs.writeFile，不在这里收藏。
-        const data = callArgs[1];
-        let normalized: string | Uint8Array;
-        if (typeof data === 'string' || data instanceof Uint8Array) {
-          normalized = data;
-        } else if (data instanceof ArrayBuffer) {
-          normalized = new Uint8Array(data);
-        } else {
-          throw new Error('vfs.writeFile data must be a string, Uint8Array, or ArrayBuffer');
+    // 读方法（readFile / readdir / stat / exists）走 writeRoot-first /
+    // readRoot-fallback 的两段式解析 —— helper 直接返回该方法的执行结果。
+    // 理由见 helper 注释。
+    //
+    // 写方法（writeFile / mkdir / unlink）只走 writeRoot（skill 自己的子目录），
+    // 单根解析，不允许任何跨子目录或越界路径 —— 与既有行为一致。
+    if (!isWrite) {
+      result = await dispatchReadWithFallback(
+        msg.method,
+        rel,
+        pending.vfsScope.writeRoot,
+        pending.vfsScope.readRoot,
+        callArgs,
+        vfs,
+      );
+    } else {
+      const absPath = resolveScopedPath(rel, pending.vfsScope.writeRoot);
+      switch (msg.method) {
+        case 'writeFile': {
+          // skill 常见数据来源：`new TextEncoder().encode(...)` → Uint8Array，
+          // `await response.arrayBuffer()` → ArrayBuffer。两种都接，前者已是
+          // Uint8Array 直接走；后者包一层视图。string 直接透传。任何另外的
+          // `opts` （第三个参）也透传给 vfs.writeFile，不在这里收藏。
+          const data = callArgs[1];
+          let normalized: string | Uint8Array;
+          if (typeof data === 'string' || data instanceof Uint8Array) {
+            normalized = data;
+          } else if (data instanceof ArrayBuffer) {
+            normalized = new Uint8Array(data);
+          } else {
+            throw new Error('vfs.writeFile data must be a string, Uint8Array, or ArrayBuffer');
+          }
+          await vfs.writeFile(absPath, normalized, callArgs[2] as 'utf8' | { encoding?: 'utf8'; mode?: number } | undefined);
+          result = undefined;
+          break;
         }
-        await vfs.writeFile(absPath, normalized, callArgs[2] as 'utf8' | { encoding?: 'utf8'; mode?: number } | undefined);
-        result = undefined;
-        break;
+        case 'mkdir': {
+          // Caller 传入的 opts 透传给 vfs.mkdir；未传时默认 `{ recursive: true }`
+          // 跟项目其他 fs 工具（fs_mkdir / writeFile 自动建父目录）体验一致；
+          // 显式传 `{ recursive: false }` 能被用来探测目录存在。
+          const mkdirOpts = (callArgs[1] as { recursive?: boolean; mode?: number } | undefined) ?? { recursive: true };
+          await vfs.mkdir(absPath, mkdirOpts);
+          result = undefined;
+          break;
+        }
+        case 'unlink': {
+          await vfs.unlink(absPath);
+          result = undefined;
+          break;
+        }
+        default:
+          throw new Error(`Unknown vfs method: ${msg.method}`);
       }
-      case 'mkdir': {
-        // Caller 传入的 opts 透传给 vfs.mkdir；未传时默认 `{ recursive: true }`
-        // 跟项目其他 fs 工具（fs_mkdir / writeFile 自动建父目录）体验一致；
-        // 显式传 `{ recursive: false }` 能被用来探测目录存在。
-        const mkdirOpts = (callArgs[1] as { recursive?: boolean; mode?: number } | undefined) ?? { recursive: true };
-        await vfs.mkdir(absPath, mkdirOpts);
-        result = undefined;
-        break;
-      }
-      case 'readdir': {
-        result = await vfs.readdir(absPath);
-        break;
-      }
-      case 'stat': {
-        const st = await vfs.stat(absPath);
-        // Flatten —— 方法属性结构化克隆会丢。
-        result = {
-          size: st.size,
-          mtimeMs: st.mtimeMs,
-          isFile: st.isFile(),
-          isDirectory: st.isDirectory(),
-        };
-        break;
-      }
-      case 'exists': {
-        result = await vfs.exists(absPath);
-        break;
-      }
-      case 'unlink': {
-        await vfs.unlink(absPath);
-        result = undefined;
-        break;
-      }
-      default:
-        throw new Error(`Unknown vfs method: ${msg.method}`);
     }
   } catch (err) {
     error = (err as Error).message;
@@ -376,8 +378,12 @@ const SANDBOX_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
  * Manages the full lifecycle: ensure offscreen → send to sandbox → await result.
  *
  * `skill` + `sessionId` 由 run-skill.ts 注入。如果 permissions 含 vfs.* 任一档，
- * 这里一次性算出该 run 的 `vfsRoot`；含 bgFetch 任一档则解析 patterns。
- * 二者都存进 pendingRuns 给对应 handler 反查 —— sandbox 自己不持有/不能伪造作用域。
+ * 这里一次性算出该 run 的 `vfsScope`：
+ *   - `writeRoot = sessionSkillRoot(sessionId, skill)`  —— skill 自己的子目录
+ *   - `readRoot  = sessionWorkspaceRoot(sessionId)`    —— 父 session workspace
+ * 读 / 写在 background 各自走对应根；含 bgFetch 任一档则解析 patterns。
+ * scope / patterns 都存进 pendingRuns 给对应 handler 反查 —— sandbox 自己不
+ * 持有/不能伪造作用域。
  *
  * Pattern 解析失败时**立即抛错**（不等 skill 第一次调用 bgFetch），让权限声明
  * 的 typo 在 run_skill 启动时就暴露。
@@ -394,14 +400,19 @@ export async function runInSandbox(
 
   const id = crypto.randomUUID();
 
-  // 计算 vfsRoot —— 只有在显式声明了 vfs.* 时才有意义。
-  // 校验失败（无效 sessionId / 无效 skill）直接抛，否则错误会延迟到 skill 调用
+  // 计算 vfsScope —— 只有在显式声明了 vfs.* 时才有意义。read 与 write 用
+  // 不同根：写根是 skill 自己的子目录（沿用既有行为），读根放宽到父 session
+  // workspace（允许读取 agent 在同 session 内早些时候产生的同级文件）。校验
+  // 失败（无效 sessionId / 无效 skill）直接抛，否则错误会延迟到 skill 调用
   // vfs.* 时才暴露，调试更难。
   const wantsVfs = permissions.some((p) => {
     const kind = parsePermission(p)?.kind;
     return kind === 'vfsRead' || kind === 'vfsWrite';
   });
-  const vfsRoot = wantsVfs ? sessionSkillRoot(sessionId, skill) : null;
+  const vfsScope: VfsScope | null = wantsVfs ? {
+    writeRoot: sessionSkillRoot(sessionId, skill),
+    readRoot: sessionWorkspaceRoot(sessionId),
+  } : null;
 
   // 同理：解析 bgFetch patterns；malformed pattern 立即抛。
   const bgFetchPatterns = parseBgFetchPatterns(permissions);
@@ -418,7 +429,7 @@ export async function runInSandbox(
 
     pendingRuns.set(id, {
       resolve, reject, timeoutId,
-      vfsRoot, permissions, bgFetchPatterns, abortCtrl,
+      vfsScope, permissions, bgFetchPatterns, abortCtrl,
       tabId,
     });
   });
@@ -431,8 +442,10 @@ export async function runInSandbox(
       code,
       args,
       permissions,
-      // sandbox 只用 vfsRoot 来暴露 `vfs.cwd`；真正的作用域校验在 background。
-      vfsRoot,
+      // sandbox 用 vfsScope 仅为了暴露 `vfs.cwd`（返回 writeRoot，沿用既有
+      // 行为，让 markdown 链接模板保持工作）；真正的读 / 写路径校验仍在
+      // background 这一侧根据 method 选对应根。
+      vfsScope,
       tabId,
     });
   } catch (err) {
