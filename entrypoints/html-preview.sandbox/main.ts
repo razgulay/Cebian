@@ -2,9 +2,9 @@
  * HTML preview sandbox proxy.
  *
  * The `/vfs` tab embeds us inside an outer `<iframe sandbox="allow-scripts
- * allow-same-origin allow-forms">` pointed at this page, then ships us the
- * user's HTML via postMessage. We host that document inside an inner iframe
- * with the same sandbox tokens, so:
+ * allow-same-origin allow-forms allow-popups">` pointed at this page, then
+ * ships us the user's HTML via postMessage. We host that document inside
+ * an inner iframe with the same sandbox tokens, so:
  *
  *   - Inline `<script>`, DOMContentLoaded handlers, `onclick=` all RUN. We
  *     inherit the manifest `sandbox` CSP (`script-src 'self' 'unsafe-inline'
@@ -17,9 +17,21 @@
  *     Chrome warning about `allow-scripts + allow-same-origin` escaping the
  *     sandbox only matters when "same origin" means "the parent page's
  *     privileged origin", which it doesn't here.
- *   - `allow-forms` is granted so `<form>` submissions work; the outer
- *     iframe's own sandbox excludes `allow-top-navigation` and `allow-popups`,
- *     so `target=_top` or `window.open()` is a no-op.
+ *   - `allow-forms` is granted so `<form>` submissions work; `allow-popups`
+ *     is granted so `<a target="_blank">` (and any link rewritten via
+ *     `<base target="_blank">`) opens in a new tab. `allow-top-navigation`
+ *     is deliberately NOT granted — a link must never replace the parent
+ *     sidepanel tab, which would lose the VFS preview.
+ *   - The user's HTML is also prepended with `<base target="_blank">`
+ *     plus a tiny override `<script>` in `renderHtml` so every `<a>` —
+ *     including those that set `target=_self` or `target=_top` — opens
+ *     in a new tab. Without the `<base>`/script combo, links without a
+ *     target would navigate the inner iframe in place (replacing the
+ *     user's preview with the linked site — many of which refuse to be
+ *     framed and surface Chrome's "This content is blocked" page), and
+ *     links with `target=_top` would silently fail because
+ *     `allow-top-navigation` is missing. See `withNewTabLinks` for the
+ *     full rationale.
  *
  * Wire protocol (handshake-based — see below):
  *
@@ -58,15 +70,29 @@ interface ReadyMessage {
 }
 
 // Sandbox tokens for the inner iframe — fixed per the spec; we never
-// accept an override from the host. `allow-popups` and
-// `allow-top-navigation` are deliberately excluded so a hostile previewed
-// document can't navigate or spawn windows via `target=_top` / `window.open`.
-// `allow-modals` is granted so `alert()` / `confirm()` / `prompt()` (and
-// `window.print()`) work — without it Chrome drops the calls silently with
-// "document is sandboxed, and the 'allow-modals' keyword is not set".
-// Modals are scoped to the inner iframe and can't escape to the parent, so
-// granting this is safe.
-const INNER_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals';
+// accept an override from the host.
+//
+//   - `allow-scripts` + `allow-same-origin` are required for inline scripts
+//     and DOMContentLoaded handlers to run inside the previewed document.
+//   - `allow-forms` enables `<form>` submissions inside the preview.
+//   - `allow-modals` enables `alert()` / `confirm()` / `prompt()` (and
+//     `window.print()`) — without it Chrome drops the calls silently with
+//     "document is sandboxed, and the 'allow-modals' keyword is not set".
+//     Modals are scoped to the inner iframe and can't escape to the parent.
+//   - `allow-popups` is granted so `<a target="_blank">` (and any link
+//     rewritten via the `<base target="_blank">` we prepend in
+//     `renderHtml`) can open a new tab. Without it, Chrome silently blocks
+//     every link click — a hostile UX for the most common interaction.
+//   - `allow-popups-to-escape-sandbox` is NOT set, so the newly opened
+//     window does NOT inherit our sandbox; the linked site runs in a normal
+//     top-level tab with full privileges (it can run its own scripts, set
+//     cookies, etc.) — exactly the behavior a click-to-new-tab implies.
+//   - `allow-top-navigation` is deliberately excluded so a hostile previewed
+//     document can't navigate the parent sidepanel tab — that would lose
+//     the VFS preview the user is looking at. Combined with the
+//     `<base target="_blank">` injection, all link clicks go to a new tab
+//     and the parent tab is never touched.
+const INNER_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals allow-popups';
 
 // ─── State ───────────────────────────────────────────────────────────
 
@@ -143,11 +169,94 @@ function renderHtml(html: string, name: string): void {
 
   // srcdoc is the cheap way to ship the document — no fetch roundtrip,
   // no extra origin. The inner iframe inherits our manifest `sandbox`
-  // CSP (permissive), so inline scripts in the document run.
-  iframe.srcdoc = html;
+  // CSP (permissive), so inline scripts in the document run. The
+  // `<base target="_blank">` + override script injected by
+  // `withNewTabLinks` forces every `<a>` (regardless of its own
+  // `target=` attribute) to open in a new tab, matching user expectation
+  // when clicking a link in a preview.
+  iframe.srcdoc = withNewTabLinks(html);
 
   document.body.appendChild(iframe);
   innerIframe = iframe;
+}
+
+/**
+ * Force every `<a>` in the previewed document to open in a new tab.
+ *
+ * Without this, links in the previewed HTML behave inconsistently under
+ * the iframe sandbox:
+ *
+ *   - `<a target="_blank">`  — silently blocked without `allow-popups`.
+ *   - `<a target="_top">`    — silently blocked without `allow-top-navigation`.
+ *   - `<a target="_self">`   — navigates the inner iframe itself, replacing
+ *                               the user's preview with the linked site.
+ *                               If the linked site sets `X-Frame-Options`
+ *                               or `frame-ancestors`, Chrome surfaces
+ *                               "This content is blocked. Contact the site
+ *                               owner to fix the issue."
+ *   - `<a>` (no target)      — same as `_self`.
+ *
+ * We use TWO complementary mechanisms because the HTML spec gives a link's
+ * own `target=` attribute priority over `<base target=>`:
+ *
+ *   1. `<base target="_blank">` sets the default target for any link that
+ *      has no `target=` attribute of its own (the most common case — bare
+ *      `<a href="...">`). This kicks in at parse time, so even links in
+ *      the initial paint open in a new tab without waiting for JS.
+ *   2. An inline `<script>` runs at `DOMContentLoaded`, iterates every
+ *      `<a href>`, and overwrites any `target=` to `_blank` plus adds
+ *      `rel="noopener noreferrer"` (the recommended hardening for
+ *      `target="_blank"`). This catches `<a target="_self">` and
+ *      `<a target="_top">` that would otherwise win over the `<base>` per
+ *      spec, and also makes the override observable to any author JS that
+ *      reads `link.target` after the override runs.
+ *
+ * The whole input HTML is wrapped in a fresh `<!doctype html><html><head>…
+ * </head><body>…</body></html>` document rather than injected via regex
+ * into the user's existing `<head>`. This deliberately replaces the older
+ * inject-via-regex approach: an HTML comment like `<!-- <head> template
+ * -->...<head>real</head>...` would make the regex match the `<head>` in
+ * the comment, dropping the override inside the comment where the
+ * browser ignores it. Wrapping is comment-decoy-proof because the HTML
+ * parser collapses any duplicate `<html>` / `<head>` / `<body>` tags the
+ * user may include — our injected elements always land first in `<head>`
+ * and the first `<base>` element wins per spec. Same pattern as
+ * `wrapWithCspDocument` in `entrypoints/mcp-app.sandbox/main.ts`.
+ *
+ * Both layers are inside the iframe's srcdoc only — the VFS source file
+ * itself is never modified, and "View source" mode still shows the
+ * unmodified text. The injected `<base>` / `<script>` are part of the
+ * previewed document, not the persisted VFS content.
+ */
+function withNewTabLinks(html: string): string {
+  const baseTag = '<base target="_blank">';
+  // The override script is intentionally tiny + dependency-free so it
+  // doesn't add a parse-time cost worth caring about. `querySelectorAll`
+  // over a live `HTMLCollection` could miss links added later, but those
+  // would be created by author scripts running inside the preview, which
+  // are out of scope for this "preview should not navigate itself" fix.
+  const overrideScript =
+    "<script>" +
+    "(function(){" +
+    "var f=function(){" +
+    "var a=document.querySelectorAll('a[href]');" +
+    "for(var i=0;i<a.length;i++){" +
+    "a[i].setAttribute('target','_blank');" +
+    "a[i].setAttribute('rel','noopener noreferrer');" +
+    "}" +
+    "};" +
+    "if(document.readyState!=='loading'){f();}" +
+    "else{document.addEventListener('DOMContentLoaded',f);}" +
+    "})();" +
+    "</script>";
+
+  // Wrap the user's HTML in a fresh outer document. Our `<base>` +
+  // `<script>` go first in `<head>`, then the user's HTML is parked
+  // inside `<body>` — any `<html>` / `<head>` / `<body>` tags the user
+  // included are collapsed by the HTML parser, so our injected elements
+  // are always the operative ones. See the JSDoc above for the full
+  // rationale (comment-decoy defense).
+  return `<!doctype html><html><head>${baseTag}${overrideScript}</head><body>${html}</body></html>`;
 }
 
 function clearInner(): void {
