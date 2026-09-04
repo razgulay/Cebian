@@ -196,6 +196,22 @@ settings:
       label: "DOM 子代理模型"
       hint: "處理主對話模型委派的重頁面閱讀任務的便宜模型。關 = 關閉此功能。"
       off: "關閉"
+    workers:
+      title: "Worker 模型"
+      hint: "為 4 個 worker role 各配一個專用模型，主代理可透過 `delegate_task` 工具委派子任務。預設「與對話模型相同」即繼承主模型選擇。"
+      followMain: "與對話模型相同"
+      content_writer:
+        label: "內容寫手"
+        hint: "閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。"
+      frontend_coder:
+        label: "前端編碼"
+        hint: "編寫 HTML / CSS / JS 到 VFS 檔案。不呼叫瀏覽器工具。"
+      reviewer:
+        label: "審查"
+        hint: "讀取 worker 產出檔案並透過 inspect / execute_js 測試。不修改檔案。"
+      researcher:
+        label: "研究"
+        hint: "檢索檔案與 RAG 集合，輸出結構化摘要。"
   pageInteraction:
     title: "頁面互動"
     pageScope:
@@ -887,6 +903,45 @@ chat:
     exampleTabsTitle: "整理我的分頁"
     exampleTabsPrompt: "請看看我目前開了哪些分頁，依主題幫我歸類，並指出可以關掉的重複頁面。"
     scrollToBottom: "跳至最新訊息"
+  workerTeamRoster:
+    title: "Worker 團隊"
+    # $1 = 已配置數, $2 = 總角色數
+    configuredCount: "$1 / $2 已配置"
+    off: "關閉"
+    unconfigured: "尚未配置 worker 模型。請打開 設定 → 進階設定 → Worker 模型 進行配置。"
+    expand: "展開 worker 團隊"
+    collapse: "收合 worker 團隊"
+    role:
+      content_writer: "內容"
+      frontend_coder: "編碼"
+      reviewer: "審查"
+      researcher: "研究"
+  delegation:
+    # 主代理呼叫 delegate_task 時，聊天流裡渲染的 worker sub-agent 卡片。
+    # 狀態徽章顏色與 Sidebar Team Roster 共用 Badge 變體——僅本地化文案。
+    retryBadge: "重試"
+    openFile: "開啟檔案"
+    section:
+      task: "任務"
+      model: "模型"
+      summary: "總結"
+      notes: "備註"
+    status:
+      running: "執行中…"
+      success: "已完成"
+      partial: "部分完成"
+      failed: "失敗"
+      cancelled: "已取消"
+      timedOut: "逾時"
+    # Fail-Fast 路徑（worker-runner.ts 在 120s 後自動 abort）。提示使用者
+    # "去 Sidebar → Team Roster 換 model 再試"，而不是讓使用者對著停滯的
+    # 卡片乾等。兩種變體：withModel 帶 modelKey，generic 在 modelKey 缺失時用。
+    timeoutHint:
+      withModel: "Worker $1 逾時 / API 出錯。打開 Sidebar Team Roster 換一個 model 再試。"
+      generic: "這個 worker 逾時 / API 出錯了。打開 Sidebar Team Roster 換一個 model 再試。"
+    # 失敗 / 逾時卡片的頁腳：讓使用者能判斷「是真慢還是 API 卡死」。$1 = 秒（≥1）。
+    duration: "$1 秒後失敗"
+
 
 # ─── 供應商子元件（OAuth / API Key / 自訂）───
 provider:
@@ -953,7 +1008,6 @@ provider:
     authOverrideHint: "同時填了 API Key 與 Authorization 標頭，會優先使用 API Key。若要用該標頭驗證，請清空上面的 API Key。"
     addCustom: "新增自訂供應商"
     fetchFailed: "無法擷取模型清單，請手動新增"
-
 # ─── 工具執行時標籤（在 ToolCard 中顯示）───
 tools:
   # $1 = mode（及選填 selector 後綴）

@@ -20,6 +20,7 @@ import { debugLog, withSession } from '@/lib/debug/log';
 import { stripSystemTags } from '@/lib/agent/strip-system-tags';
 import { CollectionsSection } from '@/components/sidebar/CollectionsSection';
 import { MCPSection } from '@/components/sidebar/MCPSection';
+import { WorkerTeamRoster } from '@/components/sidebar/WorkerTeamRoster';
 
 interface SidebarPanelProps {
   open: boolean;
@@ -127,12 +128,13 @@ function displayTitle(title: string): string {
 }
 
 /**
- * SidebarPanel — 抽屉式侧边栏，包含 3 个区域：
- *   1. History — 会话历史（按时间分组，pin 在顶部）
- *   2. Collections — RAG collections 列表 + 新建/重命名/重新索引/删除
- *   3. MCP — MCP 服务器列表 + 添加
+ * SidebarPanel — 抽屉式侧边栏，包含 4 个区域：
+ *   1. Worker Team Roster — 4 个 worker role 的紧凑模型切换（顶部，跨 session 全局配置）
+ *   2. History — 会话历史（按时间分组，pin 在顶部）
+ *   3. Collections — RAG collections 列表 + 新建/重命名/重新索引/删除
+ *   4. MCP — MCP 服务器列表 + 添加
  *
- * 单列垂直滚动布局，不强制任何高度限制——Collections / MCP 增多时整列自然变长，
+ * 单列垂直滚动布局，不强制任何高度限制——各区域增多时整列自然变长，
  * 滚动条由 ScrollArea 提供。每个区域单独 `border-border` 包裹，区域间由 `space-y-3` 隔开。
  *
  * 注意：记忆管理（Memory）不在侧边栏抽屉中——抽屉只列历史，记忆相关的总开关、整理配置、
@@ -359,15 +361,20 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
         </span>
       </div>
 
-      {/* Body — single vertical scroll containing History (top, fixed
-          collapsible groups) + Collections + MCP shared components.
-          `space-y-3` gives regions a fixed gap;
-          `pl-3 pr-0` preserves the original history's 12px left padding
-          and 0 right padding. ScrollArea auto-shows a scrollbar when
-          the 3 regions exceed viewport height — adding MCP / RAG files
-          grows the column without any fixed-height truncation. */}
+      {/* Body — single vertical scroll containing 4 regions (top → bottom):
+          Worker Team Roster → History → Collections → MCP. `space-y-3` gives
+          regions a fixed gap; `pl-3 pr-0` preserves the original history's
+          12px left padding and 0 right padding. ScrollArea auto-shows a
+          scrollbar when the regions exceed viewport height — adding MCP /
+          RAG files grows the column without any fixed-height truncation. */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="pl-3 pr-0 py-1 space-y-3">
+          {/* ─── Worker Team Roster (multi-agent model picker) ─── */}
+          {/* Position: top of body, before Collections — worker team is a
+              session-global config that should stay visible while users
+              scroll through History. */}
+          <WorkerTeamRoster />
+
           {/* ─── Collections (RAG) ─── */}
           <CollectionsSection />
 

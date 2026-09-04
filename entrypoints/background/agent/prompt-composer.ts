@@ -12,6 +12,7 @@ import { DEFAULT_SYSTEM_PROMPT } from './system-prompt';
 import { gatherPageContext } from './page-context';
 import { buildTextPrefix, type Attachment } from '@/lib/agent/attachments';
 import { scanSkillIndex, buildSkillsBlock } from '@/lib/ai-config/scanner';
+import { buildAvailableWorkersBlock } from '@/lib/agent/worker-roles';
 import { MEMORY_INSTRUCTIONS, memoryLimitationLine } from '@/lib/memory/prompt';
 import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/lib/memory/index-scan';
 
@@ -19,18 +20,25 @@ import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/li
 
 /**
  * 构造 agent 的 systemPrompt：基础提示词（按 `variables` 替换其中的 `{{KEY}}`
- * 占位符）+ 可选的 `<skills>`（skills 索引）段 + 可选的 `<user-instructions>` 段。
+ * 占位符）+ 可选的 `<skills>`（skills 索引）段 + `<available-workers>`
+ * （worker L1 索引）段 + 可选的 `<user-instructions>` 段。
  * 作为 systemPrompt 拼接的单一真理来源，由同文件的 `composeSystemPrompt` 在会话
  * 创建 / 切模型 / retry / 每轮派发前刷新时调用。
  *
- * 保持纯/同步：变量值（如会话工作目录）、skills、instructions 的获取都留在
+ * 保持纯/同步：变量值（如会话工作目录）、skills、instructions、workers 的获取都留在
  * `composeSystemPrompt`；本函数只负责拼接 + 文本替换，不认识具体变量名、不依赖
  * VFS / scanner / session 等概念。
  *
- * skills 块置于 system 顶部（贴近 base prompt），随整个 system 落入缓存前缀——
- * skills 不变则逐字节一致、每轮命中缓存；skills 变则击穿一次（装/卸 skill 的
- * 实时性代价，低频可接受）。system 末尾只有一个缓存断点，skills 与 instructions
- * 谁先谁后不影响命中率，顺序仅取语义可读性。
+ * 各 L1 块顺序：
+ *   1. base  —— 占据缓存前缀，statics 永远在前。
+ *   2. <skills> —— domain-specific instruction packs；与 base 同寿命（命中缓存）。
+ *   3. <available-workers> —— 4 种 worker role 菜单 + 最小示例；registry 不变
+ *      即字节不变（命中缓存）。置于 skills 之后让"先 domain 再 capability"的
+ *      阅读顺序自然：skills 是「具体场景下的规则」，workers 是「通用工具集」。
+ *   4. <user-instructions> —— 用户最后写的偏好，每次编辑会击穿一次缓存。
+ *
+ * skills / workers 块都放在 system 顶部贴近 base prompt，整段一同进入缓存
+ * 前缀——任一块变才击穿一次。末尾只有 user-instructions 一个断点。
  */
 function buildSystemPrompt(
   userInstructions: string,
@@ -47,6 +55,12 @@ function buildSystemPrompt(
   if (trimmedSkills) {
     parts.push(trimmedSkills);
   }
+
+  // Worker L1 索引：registry 是 4 个固定 role，buildAvailableWorkersBlock 永远
+  // 返回非空字符串（不会因 storage 缺配置而消失——runner 自行处理 "model not
+  // configured"），所以这里**无条件** append。如果哪天 worker 数变 0 才需要
+  // 加空守卫；现在的固定 4 role 数量下空守卫反而引入「有时不出现」的歧义。
+  parts.push(buildAvailableWorkersBlock());
 
   const trimmedInstructions = userInstructions.trim();
   if (trimmedInstructions) {

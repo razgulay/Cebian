@@ -91,6 +91,14 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * could just turn it on in Settings → Advanced. This also avoids the trap
  * where the user changes the setting AFTER creating a session: the tool is
  * already in the list, so changes take effect immediately.
+ *
+ * `delegate_task` follows the same always-include policy: even when no
+ * per-role model is configured (Settings → Advanced → Worker Models), the
+ * tool stays visible and the runner returns a friendly error at execute
+ * time. It is built via a per-session factory (`createDelegateTaskTool({ sessionId })`)
+ * because the tool layer needs `sessionId` to gate `output_path` /
+ * `input_files` / `skills` paths against the session workspace — unlike
+ * `delegate_dom` which is a top-level singleton with no per-session state.
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
@@ -118,6 +126,16 @@ export async function buildSessionToolArray(
       durationMs: Date.now() - delegateStart,
     }, ctx.sessionId));
   base.push(delegateDomTool);
+  // Always include delegate_task — per-session factory closes sessionId in
+  // for path validation; runner checks per-role models at runtime.
+  const delegateTaskStart = Date.now();
+  const { createDelegateTaskTool } = await import('./delegate-task');
+  const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId });
+  debugLog.info('tool', 'tool:init:delegate-task',
+    withSession({
+      durationMs: Date.now() - delegateTaskStart,
+    }, ctx.sessionId));
+  base.push(delegateTaskTool);
   return base;
 }
 

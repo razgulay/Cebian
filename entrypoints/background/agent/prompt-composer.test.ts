@@ -69,6 +69,46 @@ describe('composeSystemPrompt', () => {
     expect(prompt.indexOf('<skills>')).toBeLessThan(prompt.indexOf('<user-instructions>'));
   });
 
+  it('<available-workers> L1 块始终存在（4 个固定 role，registry 不变则永驻）', async () => {
+    // 与 <skills> 不同：workers registry 永远是 4 个固定 role，runner 在
+    // model 未配置时会自己报错，**不需要**靠 system prompt 缺省来表达
+    // 「当前没 worker 可用」。无 L1 块反而让主代理更难自察觉察能力边界。
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).toContain('<available-workers>');
+    // Prescriptive polarity 标记——见 worker-roles.test.ts 同名注释了解为何
+    // "DEFAULT to delegate_task" 比 "delegate when ..." 更可靠。
+    expect(prompt).toContain('DEFAULT to `delegate_task`');
+    for (const role of ['content_writer', 'frontend_coder', 'reviewer', 'researcher']) {
+      expect(prompt).toContain(`<role>${role}</role>`);
+    }
+  });
+
+  it('<available-workers> 位于 <skills> 之后、<user-instructions> 之前', async () => {
+    // 顺序约定：base → skills（domain packs）→ workers（通用能力菜单）→
+    // user-instructions（用户偏好）。任何一项错位都会让 model 的注意力
+    // 顺序漂移，钉死。
+    //
+    // 关键：必须用**注入后的 wrapper 形态**（`\n` 后缀）来定位，而不是裸
+    // `<skills>` / `<user-instructions>`——这两个标签在 DEFAULT_SYSTEM_PROMPT
+    // 的 "Runtime Extensions" 段里就被描述过一次（base prompt 自己讲它们
+    // 是什么），裸 tag 的 `indexOf()` 会返回那个描述位置而不是注入位置，
+    // 测试就会给出"位置错"的假阳性。
+    vi.mocked(buildSkillsBlock).mockReturnValue('<skills>\nfoo\n</skills>');
+    await userInstructions.setValue('bar');
+    const prompt = await composeSystemPrompt('s', false);
+    const idxSkills = prompt.indexOf('<skills>\nfoo\n</skills>');
+    const idxWorkers = prompt.indexOf('<available-workers>');
+    // <available-workers> 标签**不在** base prompt 文本里（只有描述里提了
+    // `<skills>` / `<user-instructions>`，没提 `<available-workers>`），所以
+    // 裸 tag 定位安全。
+    const idxUserInstr = prompt.indexOf('<user-instructions>\n');
+    expect(idxSkills, 'injected <skills> wrapper missing').toBeGreaterThan(0);
+    expect(idxWorkers, '<available-workers> block missing').toBeGreaterThan(0);
+    expect(idxUserInstr, 'injected <user-instructions> wrapper missing').toBeGreaterThan(0);
+    expect(idxWorkers).toBeGreaterThan(idxSkills);
+    expect(idxUserInstr).toBeGreaterThan(idxWorkers);
+  });
+
   it('skills 与用户指令都为空 → 段间不出现三连以上换行', async () => {
     const prompt = await composeSystemPrompt('s', false);
     expect(prompt).not.toMatch(/\n{3,}/);

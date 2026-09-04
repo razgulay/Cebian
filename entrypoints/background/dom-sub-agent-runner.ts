@@ -26,6 +26,7 @@ import { resolveModel } from '@/lib/providers/resolve-model';
 import { acquireKeepAlive, releaseKeepAlive } from './lifecycle/keepalive';
 import { createDomSubAgent } from './dom-sub-agent';
 import { getAssistantText } from '@/lib/agent/message-helpers';
+import { extractJsonOrRaw } from '@/lib/agent/json-extract';
 import { debugLog } from '@/lib/debug/log';
 
 /** 子代理返回给主代理的文本上限（~10 KB）。超出则截断并标注。 */
@@ -81,24 +82,6 @@ export async function resolveDomSubAgentModel(): Promise<Model<Api> | null> {
   const resolved = resolveModel(modelCfg, creds, customProvs ?? []) ?? null;
   debugLog.info('sub_agent', 'sub_agent:dom:model:resolved', { modelId: resolved?.id ?? null });
   return resolved;
-}
-
-/**
- * 从子代理的输出文本中尽量提取 JSON：
- * 1. 优先匹配 ```json``` 代码块。
- * 2. 其次匹配裸的 { ... } 对象。
- * 3. 都失败就返回原文（让主代理的 LLM 自己处理）。
- */
-function extractJsonOrRaw(rawText: string): { json: string | null; raw: string } {
-  const codeBlock = rawText.match(/```json\s*([\s\S]+?)\s*```/i);
-  if (codeBlock && codeBlock[1]) {
-    return { json: codeBlock[1].trim(), raw: rawText };
-  }
-  const bare = rawText.match(/(\{[\s\S]*\})/);
-  if (bare && bare[1]) {
-    return { json: bare[1].trim(), raw: rawText };
-  }
-  return { json: null, raw: rawText };
 }
 
 /**
@@ -248,6 +231,7 @@ export async function runDomSubAgent(
 
     // 尝试从 rawText 提取 JSON（```json``` 块或裸 {...} ），保证主代理拿到的是
     // 可 parse 的 JSON。失败则原样返回（主代理的 LLM 自己处理）。
+    // 抽 JSON 逻辑提在 `lib/agent/json-extract.ts` 共享给 worker-runner。
     const { json } = extractJsonOrRaw(text);
     if (json) {
       text = json;

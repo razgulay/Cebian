@@ -203,6 +203,23 @@ settings:
       label: "DOM sub-agent model"
       hint: "Cheap model that handles heavy page-reading tasks delegated by the main chat model. Off = feature disabled."
       off: "Off (disabled)"
+    workers:
+      title: "Worker models"
+      hint: "Dedicated model for each worker role that the main agent can delegate tasks to via the `delegate_task` tool. Leave on \"Same as conversation model\" to inherit the main model's choice."
+      followMain: "Same as conversation model"
+      content_writer:
+        label: "Content writer"
+        hint: "Reads sources (files / RAG collections) and writes long-form content into a VFS file. Doesn't touch code."
+      frontend_coder:
+        label: "Frontend coder"
+        hint: "Writes HTML / CSS / JS into a VFS file. Doesn't call browser tools."
+      reviewer:
+        label: "Reviewer"
+        hint: "Reads the worker's output file and tests it via inspect / execute_js. Doesn't write files."
+      researcher:
+        label: "Researcher"
+        hint: "Searches files and RAG collections to produce a structured summary."
+      # Future: add custom roles here when the feature lands.
   pageInteraction:
     title: "Page interaction"
     pageScope:
@@ -911,6 +928,48 @@ chat:
     exampleTabsTitle: "Organize my tabs"
     exampleTabsPrompt: "Take a look at the tabs I currently have open, group them by topic, and point out any duplicate pages I can close."
     scrollToBottom: "Jump to latest"
+  workerTeamRoster:
+    title: "Worker team"
+    # $1 = configured count, $2 = total roles
+    configuredCount: "$1 / $2 configured"
+    off: "Off"
+    unconfigured: "No worker models configured. Open Settings → Advanced → Worker models to set up."
+    expand: "Expand worker team"
+    collapse: "Collapse worker team"
+    role:
+      content_writer: "Content"
+      frontend_coder: "Coder"
+      reviewer: "Reviewer"
+      researcher: "Researcher"
+  delegation:
+    # Worker sub-agent card rendered in chat stream when main agent calls
+    # `delegate_task`. Status badge colors come from the same Badge variants
+    # used by the Sidebar Team Roster widget — only the copy is localized.
+    retryBadge: "Retry"
+    openFile: "Open file"
+    section:
+      task: "Task"
+      model: "Model"
+      summary: "Summary"
+      notes: "Notes"
+    status:
+      running: "Running…"
+      success: "Completed"
+      partial: "Partial"
+      failed: "Failed"
+      cancelled: "Cancelled"
+      timedOut: "Timed out"
+    # Fail-Fast path (worker-runner.ts auto-aborts after 120s). Hint tells the
+    # user "switch the model on Sidebar → Team Roster and retry" instead of
+    # leaving them staring at a stalled card. Two variants: one mentions the
+    # offending model ($1), the other is generic when modelKey is missing.
+    timeoutHint:
+      withModel: "Worker $1 timed out / API error. Switch to a different model on the Sidebar Team Roster and retry."
+      generic: "This worker timed out / hit an API error. Switch to a different model on the Sidebar Team Roster and retry."
+    # Footer on failed / timedOut cards so the user can judge "is the API
+    # actually slow, or did it really hang?". $1 = whole seconds (≥1).
+    duration: "Failed after $1 s"
+
 
 # ─── Provider sub-components (OAuth / API Key / custom) ───
 provider:
@@ -977,7 +1036,6 @@ provider:
     authOverrideHint: "You set both an API Key and an Authorization header; the API Key wins. To authenticate via the header, clear the API Key above."
     addCustom: "Add custom provider"
     fetchFailed: "Failed to fetch models, please add manually"
-
 # ─── Tool runtime labels (shown in ToolCard) ───
 tools:
   # $1 = mode (and optional selector suffix)

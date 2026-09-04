@@ -27,6 +27,7 @@ import {
   TOOL_RUN_SKILL,
   TOOL_CHROME_API,
   TOOL_DELEGATE_DOM,
+  TOOL_DELEGATE_TASK,
   TOOL_RAG_INSPECT,
 } from '@/lib/tools/names';
 
@@ -101,6 +102,14 @@ export function getToolLabel(name: string, args: Record<string, any> = {}): stri
       // `tools.runtime.delegate_dom` namespace. We just surface the raw
       // `task` argument so the user can see what the main agent asked.
       return `delegate_dom: ${truncLabel(typeof args.task === 'string' ? args.task : '')}`;
+    case TOOL_DELEGATE_TASK:
+      // Same posture as `delegate_dom` — surface `role: task preview` so the
+      // collapsed ToolCard row stays informative; full detail lives in the
+      // dedicated `DelegationCard` rendered by `chat/index.tsx` for this tool.
+      // We don't import role i18n here (would couple labels.ts to the registry);
+      // the raw `role` literal is acceptable — the user has seen it in the
+      // Sidebar Team Roster widget and will recognize the four values.
+      return `delegate_task · ${typeof args.role === 'string' ? args.role : 'unknown'}: ${truncLabel(typeof args.task === 'string' ? args.task : '')}`;
     case TOOL_RAG_INSPECT:
       return t('tools.ragInspect', [args.collection ?? '']);
     default:

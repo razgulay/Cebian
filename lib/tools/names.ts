@@ -48,6 +48,11 @@ export const TOOL_CHROME_API = 'chrome_api' as const;
  *  When unset (the sub-agent model is null in settings), the tool is hidden from the
  *  main agent's tool list entirely. */
 export const TOOL_DELEGATE_DOM = 'delegate_dom' as const;
+/** Tool that delegates a sub-task to a fixed worker role (content_writer /
+ *  frontend_coder / reviewer / researcher) running as an isolated sub-agent
+ *  that handoffs via VFS files. Worker roles never receive this tool —
+ *  recursion guard is enforced by `lib/agent/worker-roles.ts` whitelists. */
+export const TOOL_DELEGATE_TASK = 'delegate_task' as const;
 /** Read-only scrolling tool assigned exclusively to the DOM sub-agent. */
 export const TOOL_SUBAGENT_SCROLL = 'subagent_scroll' as const;
 /** Click-to-expand tool assigned exclusively to the DOM sub-agent.

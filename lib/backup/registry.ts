@@ -36,6 +36,7 @@ import {
   chatFontFamily,
   lastOpenSessionId,
   composerPinnedContexts,
+  workerModels,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -332,6 +333,9 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastSelectedModel, storageClass: 'settings' }),
   entry({ item: compactionModel, storageClass: 'settings' }),
   entry({ item: domSubAgentModel, storageClass: 'settings' }),
+  // Worker team per-role 模型映射（4 个 worker role 各自的专用模型；同主模型走
+  // followMain 时为 null。无密钥）。
+  entry({ item: workerModels, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',

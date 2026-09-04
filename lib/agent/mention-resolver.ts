@@ -77,8 +77,11 @@ async function readUtf8(path: string): Promise<string> {
 /** Strip YAML frontmatter (`---\n...\n---\n`) from a markdown body. If no
  *  frontmatter is present, return the body unchanged. Errors during parsing
  *  fall back to the raw body so a malformed frontmatter never drops the file
- *  silently. */
-function stripFrontmatter(content: string): string {
+ *  silently.
+ *
+ *  Exported so worker skill hydration (in `entrypoints/background/agent/worker-runner.ts`)
+ *  reuses the same parser instead of maintaining a parallel implementation. */
+export function stripFrontmatter(content: string): string {
   try {
     const { body } = parseFrontmatter(content);
     return body.trim();
@@ -90,9 +93,12 @@ function stripFrontmatter(content: string): string {
 /** Cap inline body length to keep prompt budget reasonable. A 100 KB cap
  *  matches MAX_TEXT_FILE_SIZE — large files should be selected as a regular
  *  attachment instead. The cap is applied AFTER frontmatter stripping so the
- *  budget reflects content the LLM will actually see. */
-const MAX_INLINE_BODY = 100 * 1024;
-function truncateBody(body: string, cap = MAX_INLINE_BODY): string {
+ *  budget reflects content the LLM will actually see.
+ *
+ *  Exported so worker skill hydration (in `entrypoints/background/agent/worker-runner.ts`)
+ *  shares the same cap constant rather than maintaining a parallel `MAX_SKILL_BODY_CHARS`. */
+export const MAX_INLINE_BODY = 100 * 1024;
+export function truncateBody(body: string, cap = MAX_INLINE_BODY): string {
   if (body.length <= cap) return body;
   return body.slice(0, cap) + '\n…[truncated]';
 }

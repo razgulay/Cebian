@@ -207,6 +207,28 @@ export const domSubAgentModel = defineLoggedItem<ModelIdentity | null>(
   { fallback: null },
 );
 
+// ─── Worker team (multi-agent delegation) ───
+
+/** 固定 4 种 worker role，主代理可通过 `delegate_task` 工具委派子任务。`custom` 暂不开放
+ *  （v1 只支持这 4 种；后续若有需求可加 Settings → Custom Roles 入口）。名字用 snake_case
+ *  以便直接落到 JSON / storage key。 */
+export type WorkerRole =
+  | 'content_writer'
+  | 'frontend_coder'
+  | 'reviewer'
+  | 'researcher';
+
+/** 按角色配置专用模型。`undefined` / `null` = 该角色未配置（main agent 调用时回退到主会话
+ *  模型；UI 中显示 "Off" 或 "Follow main model"）。用 `Partial<Record>` 而不是 4 个独立字段，
+ *  是为了让"按角色"这个维度在 schema / UI / storage 里都只出现一次——加新 role 只需要
+ *  扩 `WorkerRole` 联合类型，不用改 storage / Advanced section / Sidebar widget 三处。 */
+export type WorkerModelMap = Partial<Record<WorkerRole, ModelIdentity>>;
+
+export const workerModels = defineLoggedItem<WorkerModelMap>(
+  'local:workerModels',
+  { fallback: {} },
+);
+
 export const customProviders = defineLoggedItem<CustomProviderConfig[]>(
   'local:customProviders',
   { fallback: [] },

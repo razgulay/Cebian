@@ -33,7 +33,11 @@ import {
 } from '@/components/chat/Message';
 import { ToolCard } from '@/components/chat/ToolCard';
 import { ToolCardWithUI } from '@/components/chat/ToolCardWithUI';
+import { DelegationCard, type DelegationStatus } from '@/components/chat/DelegationCard';
 import { isMcpAppResult } from '@/lib/tools/mcp-tool';
+import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
+import { WORKER_ROLE_KEYS } from '@/lib/agent/worker-roles';
+import type { WorkerRole } from '@/lib/persistence/storage';
 import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -720,6 +724,95 @@ export function ChatPage({
                       );
                     }
 
+                    // `delegate_task` 委派走专用 `DelegationCard` 渲染 —— 它
+                    // 携带 worker 角色图标、状态 badge、output file VFS 预览等
+                    // 通用 ToolCard 表达不了的信息（plan Subtask 6）。
+                    //
+                    // handoff JSON 来自 runner 的 tool result —— runner 把
+                    // 缩过的 JSON 拼到 `content[0].text` 里（见
+                    // `lib/tools/delegate-task.ts` 的 `summarizeHandoffJson`）。
+                    // 我们 parse 出结构化字段，UI 只显示「summary / handoff_notes /
+                    // output_file / modelKey」，不再 raw-dump 整套 JSON。
+                    //
+                    // 跑中（无 toolResult）：status='running'，从 tc.arguments 取 task。
+                    // 跑完：parse toolResult 第一段 text content。
+                    if (tc.name === TOOL_DELEGATE_TASK) {
+                      const taskArg = typeof tc.arguments?.task === 'string' ? tc.arguments.task : '';
+                      const roleArg = typeof tc.arguments?.role === 'string'
+                        ? (tc.arguments.role as WorkerRole)
+                        : null;
+
+                      const resultText = toolResult
+                        ? toolResult.content
+                            .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                            .map(b => b.text)
+                            .join('\n') || undefined
+                        : undefined;
+
+                      // runner-level failure（model 解析失败 / abort）——
+                      // toolResult.isError=true 且 resultText 是人类可读错误，
+                      // handoff 字段都没有。映射成 'failed' 状态 + 把错误
+                      // 作为「notes」展示，用户至少看到「为什么没跑成」。
+                      let delegationStatus: DelegationStatus;
+                      let summaryText: string | undefined;
+                      let handoffNotesText: string | undefined;
+                      let outputFilePath: string | undefined;
+                      let modelKeyText: string | undefined;
+                      let attemptsNum: number | undefined;
+                      let attemptDurationMsNum: number | undefined;
+
+                      if (!toolResult) {
+                        delegationStatus = isAborted ? 'cancelled' : 'running';
+                      } else {
+                        // runner-level 失败（model 解析失败 / abort）→ 'failed'；
+                        // 正常 handoff → 'success'。'partial' 来自 handoff JSON 自身
+                        // 状态（runner 在 `assembleHandoff` 里会给部分产出打 partial）。
+                        delegationStatus = toolResult.isError ? 'failed' : 'success';
+
+                        // 尝试解析 runner 的 handoff JSON。runner 在 success /
+                        // partial 路径下会塞 JSON；纯 runner 失败（ok=false）
+                        // 路径下是纯文本错误。
+                        if (resultText) {
+                          const parsed = parseHandoffText(resultText);
+                          if (parsed) {
+                            // 'timedOut' 优先：即使 status=failed，也用 'timedOut'
+                            // 让 UI 渲染 amber 配色 + 「换 model」提示
+                            // （mapHandoffStatus 内部判断）。
+                            delegationStatus = mapHandoffStatus(parsed.status, parsed.timedOut);
+                            summaryText = parsed.summary;
+                            handoffNotesText = parsed.handoff_notes;
+                            outputFilePath = parsed.output_file;
+                            modelKeyText = parsed.modelKey;
+                            attemptsNum = parsed.attempts;
+                            attemptDurationMsNum = parsed.attemptDurationMs;
+                          } else {
+                            // 解析失败 —— 原始文本当作 notes 展示，至少不丢信息。
+                            handoffNotesText = resultText;
+                          }
+                        }
+                      }
+
+                      // role 非法（LLM 乱传、runner 出 bug 兜底）→ 退到
+                      // `content_writer` 图标 + 显示原始字符串，UI 不崩。
+                      const safeRole: WorkerRole = roleArg && isWorkerRole(roleArg) ? roleArg : 'content_writer';
+
+                      return (
+                        <DelegationCard
+                          key={`tool-${tc.id}`}
+                          role={safeRole}
+                          status={delegationStatus}
+                          task={taskArg}
+                          {...(outputFilePath ? { outputFile: outputFilePath } : {})}
+                          {...(routeSessionId ? { sessionId: routeSessionId } : {})}
+                          {...(summaryText ? { summary: summaryText } : {})}
+                          {...(handoffNotesText ? { handoffNotes: handoffNotesText } : {})}
+                          {...(modelKeyText ? { modelKey: modelKeyText } : {})}
+                          {...(attemptsNum ? { attempts: attemptsNum } : {})}
+                          {...(attemptDurationMsNum !== undefined ? { attemptDurationMs: attemptDurationMsNum } : {})}
+                        />
+                      );
+                    }
+
                     const status = toolResult
                       ? (toolResult.isError ? 'error' : 'done')
                       : (isAborted ? 'cancelled' : 'running');
@@ -907,4 +1000,107 @@ export function ChatPage({
       />
     </>
   );
+}
+
+// ─── delegate_task handoff helpers (module-scope) ───
+
+/**
+ * 从 runner 的 tool result text 里挑出第一个能 parse 的 JSON object。
+ * Runner 在 success / partial / failed 三种 handoff 路径下都会塞 JSON；
+ * 纯 runner 失败（ok=false）路径下是纯文本错误（"Worker sub-agent
+ * failed: ..."），这种就直接返回 null 让 caller 降级为 raw text notes。
+ *
+ * 走宽松策略：只关心 status / output_file / summary / handoff_notes /
+ * modelKey / attempts 6 个字段，多余字段忽略；顶层不是 object 也算失败
+ * —— runner handoff contract 永远给 object。
+ *
+ * runner output 实际形状是 `{...json...}\n\n— via worker (...)`：
+ * 我们从头扫，命中第一个 `{...}` 完整块（括号配对）就尝试 parse，
+ * 不靠正则去切，免得 `summary: 'has {curly} in it'` 误截。
+ */
+function parseHandoffText(text: string): {
+  status?: string;
+  output_file?: string;
+  summary?: string;
+  handoff_notes?: string;
+  modelKey?: string;
+  attempts?: number;
+  timedOut?: boolean;
+  attemptDurationMs?: number;
+} | null {
+  // 顺序找第一个 '{'，向右扫到配对 '}' —— 手写小型 stack 比正则更稳。
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === '\\') {
+          escape = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          const candidate = text.slice(i, j + 1);
+          try {
+            const obj = JSON.parse(candidate) as Record<string, unknown>;
+            if (typeof obj !== 'object' || obj === null) return null;
+            return {
+              status: typeof obj.status === 'string' ? obj.status : undefined,
+              output_file: typeof obj.output_file === 'string' ? obj.output_file : undefined,
+              summary: typeof obj.summary === 'string' ? obj.summary : undefined,
+              handoff_notes: typeof obj.handoff_notes === 'string' ? obj.handoff_notes : undefined,
+              modelKey: typeof obj.modelKey === 'string' ? obj.modelKey : undefined,
+              attempts: typeof obj.attempts === 'number' ? obj.attempts : undefined,
+              timedOut: obj.timedOut === true,
+              attemptDurationMs: typeof obj.attemptDurationMs === 'number' ? obj.attemptDurationMs : undefined,
+            };
+          } catch {
+            // 第一个匹配到 '{' 解析失败 —— 可能是大 JSON 中间一段。继续往后找。
+            break;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** runner handoff 里的 status 字符串 → DelegationCard 期望的字面量。
+ *  未知 status 退到 'failed'（sane default —— UI 会显示红色 X badge，
+ *  至少不会被静默归为 success 误导用户）。
+ *
+ *  `timedOut` 是独立 flag —— runner 在 Fail-Fast 路径下即便主 status 标
+ *  failed 也会附 timedOut=true。UI 需要一个独立的 'timedOut' 状态来渲染
+ *  amber 配色 + 「换 model」提示，避免和普通 failed（红色 X + 看 notes）
+ *  混淆。这是把"超时"和"其它失败"在视觉上区分开的契约：看到 amber 就
+ *  知道是 model 慢/卡，看到红色就去看 handoff_notes。 */
+function mapHandoffStatus(s: string | undefined, timedOut?: boolean): DelegationStatus {
+  if (timedOut) return 'timedOut';
+  switch (s) {
+    case 'success': return 'success';
+    case 'partial': return 'partial';
+    case 'failed': return 'failed';
+    case 'cancelled': return 'cancelled';
+    default: return 'failed';
+  }
+}
+
+/** LLM 误传 / 旧 data 残留等情况下，校验 4 个 literal 之一。
+ *  用 `WORKER_ROLE_KEYS` 做运行时 gate —— 一旦 registry 加新 role，
+ *  这里自动跟着放行（无需在 UI 端维护第二份白名单）。 */
+function isWorkerRole(s: string): s is WorkerRole {
+  return (WORKER_ROLE_KEYS as readonly string[]).includes(s);
 }
