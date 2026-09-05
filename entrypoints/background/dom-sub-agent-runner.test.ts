@@ -54,6 +54,30 @@ const testState = vi.hoisted(() => ({
   // `fastPathThrowOnInjection` makes `executeInTabWithArgs` throw — exercises
   // the "fast-path injection failed" branch.
   fastPathThrowOnInjection: false as boolean,
+  // Stage 3 / JSON-LD harvest mock state. Test sets `fastPathJsonLd` to
+  // whatever `harvestJsonLd` would return — either a real mainEntity (bypass
+  // fires) or `{ mainEntity: null, nodes: [], rawCount: 0 }` (LLM path runs).
+  // `fastPathJsonLdThrow` 模拟 harvest injection 失败 → 默默 fall through。
+  fastPathJsonLd: {
+    nodes: [] as Array<Record<string, unknown>>,
+    mainEntity: null as unknown | null,
+    rawCount: 0 as number,
+  },
+  fastPathJsonLdThrow: false as boolean,
+  // Stage 3 / Vision fallback mock state. `fastPathVisionBase64` controls
+  // what `chrome.tabs.captureVisibleTab` returns (default = synthetic
+  // JPEG-ish string). `fastPathActiveTabId` is what `getActiveTabId()`
+  // resolves to — set equal to tabId to skip tab swap; unequal to trigger
+  // it. `fastPathVisionTabUpdateCalled` tracks `chrome.tabs.update` calls
+  // so tests assert swap-restore behavior.
+  fastPathVisionBase64: 'SYNTHETIC_JPEG_BYTES_BASE64_AAAA' as string,
+  fastPathActiveTabId: 73278874 as number | null, // same as default tabId → no swap
+  fastPathVisionCaptureFail: false as boolean,
+  // `fastPathModelInput` controls what the mocked `resolveModel` claims
+  // about the model's modality set. Default = vision-capable. Tests flip
+  // to `['text']` to verify the vision-fallback gate correctly skips
+  // capture when the model can't accept images.
+  fastPathModelInput: ['text', 'image'] as ('text' | 'image')[],
 }));
 
 // Mock createDomSubAgent so each attempt creates a fresh agent whose state
@@ -186,6 +210,10 @@ vi.mock('@/lib/tools/read-page', async () => {
 // whose identity is stable across the test file. The raw-text fallback
 // uses an inline closure that is NOT `===` to `getDocumentHtml`, so the
 // `else` branch always handles it.
+//
+// Stage 3 adds `harvestJsonLd` as a third injected function — dispatched
+// here via its own captured reference. Three-way function identity
+// dispatch — getDocumentHtml / harvestJsonLd / other (raw-text fallback).
 vi.mock('@/lib/browser/tab-actions', () => ({
   executeInTabWithArgs: vi.fn(async <TArgs extends any[], T>(
     _tabId: number,
@@ -195,16 +223,27 @@ vi.mock('@/lib/browser/tab-actions', () => ({
     if (testState.fastPathThrowOnInjection) {
       throw new Error('mocked injection failure');
     }
+    if (testState.fastPathJsonLdThrow) {
+      throw new Error('mocked JSON-LD harvest failure');
+    }
     // Branch on function identity. `getDocumentHtml` is the mocked
     // vi.fn imported into the test file at the top; the inline
     // `extractText` closure inside `runFastDomSubAgent` is a different
-    // function reference so the `else` branch handles it.
-    const isGetDocumentHtml = func === (getDocumentHtmlRef as unknown as typeof func);
-    const result = isGetDocumentHtml
-      ? { html: testState.fastPathHtml, url: 'https://example.com/' }
-      : testState.fastPathFallbackText;
-    return result as T;
+    // function reference so the `else` branch handles it. Stage 3 adds
+    // `harvestJsonLd` as a sibling captured reference.
+    if (func === (getDocumentHtmlRef as unknown as typeof func)) {
+      return {
+        html: testState.fastPathHtml,
+        url: 'https://example.com/',
+      } as T;
+    }
+    if (func === (harvestJsonLdRef as unknown as typeof func)) {
+      return testState.fastPathJsonLd as unknown as T;
+    }
+    // else: raw-text fallback path
+    return testState.fastPathFallbackText as unknown as T;
   }),
+  getActiveTabId: vi.fn(async () => testState.fastPathActiveTabId),
 }));
 
 // Mock `resolveProviderApiKey`. Returns a fixed key — fast path doesn't
@@ -214,10 +253,46 @@ vi.mock('./providers/credentials', () => ({
   resolveProviderApiKey: vi.fn(async () => 'mock-api-key'),
 }));
 
+// Mock `resolveModel` so vision-capability tests don't depend on the live
+// registry (gpt-4o-mini is vision-capable but we override here for the
+// negative-path tests to assert the `model.input.includes('image')`
+// guard). Each test sets `testState.fastPathModelInput` to control which
+// modalities the mocked model claims.
+vi.mock('@/lib/providers/resolve-model', () => ({
+  resolveModel: vi.fn(() => ({
+    id: 'gpt-4o-mini',
+    name: 'GPT-4o mini (mock)',
+    provider: 'openai',
+    api: 'openai-completions',
+    input: testState.fastPathModelInput,
+  })),
+}));
+
 import { runDomSubAgent } from './dom-sub-agent-runner';
 import { convertArticleToMarkdown, getDocumentHtml } from '@/lib/tools/read-page';
 import { complete } from '@earendil-works/pi-ai/compat';
 import { executeInTabWithArgs } from '@/lib/browser/tab-actions';
+
+// `chrome.tabs.update` / `chrome.tabs.captureVisibleTab` are global injected
+// from MV3 at runtime; in vitest we stub them so the vision fallback path can
+// be exercised without a real browser. `chromeTabsUpdateCalls` records every
+// call so tests assert tab-swap / restore ordering.
+const chromeTabsUpdateCalls: number[] = [];
+(globalThis as any).chrome = {
+  ...(globalThis as any).chrome,
+  tabs: {
+    update: vi.fn(async (tabId: number) => {
+      chromeTabsUpdateCalls.push(tabId);
+      return {};
+    }),
+    captureVisibleTab: vi.fn(async () => {
+      if (testState.fastPathVisionCaptureFail) {
+        throw new Error('mocked captureVisibleTab failure');
+      }
+      return `data:image/jpeg;base64,${testState.fastPathVisionBase64}`;
+    }),
+  },
+};
 
 // Capture the mocked `getDocumentHtml` reference once so the
 // `executeInTabWithArgs` mock can branch on function identity. The
@@ -226,6 +301,12 @@ import { executeInTabWithArgs } from '@/lib/browser/tab-actions';
 // inside the mock factory reliably distinguishes `getDocumentHtml`
 // calls from the inline raw-text fallback closure.
 const getDocumentHtmlRef = getDocumentHtml;
+
+// Stage 3 / Subtask 1 — same pattern for JSON-LD: capture the harvest
+// function reference at top so the dispatch mock can identify it.
+// `harvestJsonLd` is exported from the runner specifically for this
+// test-mock identity check (no other caller in production code).
+const harvestJsonLdRef = (await import('./dom-sub-agent-runner')).harvestJsonLdForTest;
 
 describe('runDomSubAgent — auto-escalation simple → complex', () => {
   // Reset shared state between tests. The mock factory's `vi.fn` counter is
@@ -465,6 +546,14 @@ describe('runDomSubAgent — fast path (single-shot)', () => {
     testState.fastPathMarkdown = 'mock article body in markdown';
     testState.fastPathFallbackText = 'mock raw text fallback body';
     testState.fastPathThrowOnInjection = false;
+    // Stage 3 reset
+    testState.fastPathJsonLd = { nodes: [], mainEntity: null, rawCount: 0 };
+    testState.fastPathJsonLdThrow = false;
+    testState.fastPathVisionBase64 = 'SYNTHETIC_JPEG_BYTES_BASE64_AAAA';
+    testState.fastPathActiveTabId = 73278874; // same as default tabId
+    testState.fastPathVisionCaptureFail = false;
+    testState.fastPathModelInput = ['text', 'image'];
+    chromeTabsUpdateCalls.length = 0;
   });
 
   it('complexity: "fast" → createDomSubAgent NEVER called; complete() called once', async () => {
@@ -558,5 +647,145 @@ describe('runDomSubAgent — fast path (single-shot)', () => {
     // No retry — single LLM call only.
     expect(testState.fastPathCalls.length).toBe(1);
     expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── Stage 3 / Subtask 1 — JSON-LD bypass ───
+  it('JSON-LD mainEntity schema-compatible → ok=true; complete() NEVER called', async () => {
+    // caller 给了一个匹配 schema 的 expected_schema，runner 注入
+    // `harvestJsonLd` 看到 mainEntity = `{ status: 'success', data: '...', reason: '' }`，
+    // schema 校验通过 → 直接 return，**完全不调用** LLM。runner 会把
+    // mainEntity 嵌进外层 `{ status, data: <mainEntity>, reason }` 包装
+    // 传给主代理，让 mainEntity 原样进 `data` 槽——主代理 parse 出来就是
+    // caller 期望的对象（在这里是一个 string）。
+    testState.fastPathJsonLd = {
+      nodes: [
+        {
+          '@type': 'WebPage',
+          mainEntity: { status: 'success', data: 'jsonld-bypass-hits', reason: '' },
+        } as unknown as Record<string, unknown>,
+      ],
+      // mainEntity 直接就是 schema 形状本身（caller 期望的 `data` 字段是 string）。
+      mainEntity: { status: 'success', data: 'jsonld-bypass-hits', reason: '' },
+      rawCount: 1,
+    };
+
+    const result = await runDomSubAgent({
+      task: 'extract the status/data',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'fast',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    // runner 把 mainEntity 嵌进 `{status, data: <mainEntity>, reason}`：
+    expect(result.text).toBe(
+      '{"status":"success","data":{"status":"success","data":"jsonld-bypass-hits","reason":""},"reason":""}',
+    );
+    expect(result.fastShortcut).toBe('json-ld');
+    // 没 LLM 调用、没 ReAct 循环
+    expect(complete).not.toHaveBeenCalled();
+    expect(testState.fastPathCalls.length).toBe(0);
+    expect(testState.createdAgents.length).toBe(0);
+    // JSON-LD harvest injection 跑一次（独立于 article 提取）。
+    expect(executeInTabWithArgs).toHaveBeenCalledTimes(2); // harvestJsonLd + getDocumentHtml
+  });
+
+  it('JSON-LD mainEntity schema mismatch → falls through to LLM path', async () => {
+    // mainEntity 故意缺 `data` 字段（schema 要求），JSON-LD 路径
+    // schema 校验失败 → 不 return，悄悄 fall through 走 article-body +
+    // LLM 那条路。`fastPathMarkdown` 设长文本避免触发 vision fallback
+    // （< 500 char 不该在此测试中分心）。
+    testState.fastPathJsonLd = {
+      nodes: [],
+      mainEntity: { status: 'success' } as unknown, // 缺 `data`
+      rawCount: 1,
+    };
+    testState.fastPathMarkdown = 'a'.repeat(800); // > 500 → 不触发 vision
+    // 默认 LLM mock 返回合法 JSON → 跑完 schema 校验后 ok=true。
+
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'fast',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    // LLM 跑了
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(testState.fastPathCalls.length).toBe(1);
+    // 不是走 JSON-LD 旁路
+    expect(result.fastShortcut).toBeUndefined();
+  });
+
+  // ─── Stage 3 / Subtask 2 — Vision fallback ───
+  it('Readability fallback path + vision-capable model → captureVisibleTab called; user content is [text, image]', async () => {
+    // canvas-only 页面：Readability 拿不到 article，raw-text fallback 也
+    // 给空字符串。`articleBody` 终态为空触发 vision fallback；captureVisibleTab
+    // 跑一次。
+    testState.fastPathMarkdown = null; // 触发 Readability fallback
+    testState.fastPathFallbackText = ''; // canvas-only 完全没文字
+
+    const result = await runDomSubAgent({
+      task: 'describe the chart on this page',
+      complexity: 'fast',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    // vision 走了：complete 收到 [text, image] 双 block
+    expect(complete).toHaveBeenCalledTimes(1);
+    const callArgs = (complete as any).mock.calls[0];
+    const userMsg = callArgs[1].messages[0];
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    expect(userMsg.content.length).toBe(2);
+    expect(userMsg.content[0].type).toBe('text');
+    expect(userMsg.content[1].type).toBe('image');
+    expect(userMsg.content[1].mimeType).toBe('image/jpeg');
+    expect(userMsg.content[1].data).toBe('SYNTHETIC_JPEG_BYTES_BASE64_AAAA');
+    // fastShortcut 标记
+    expect(result.fastShortcut).toBe('vision');
+    // 没 tab 切换（activeTabId === tabId）
+    expect(chromeTabsUpdateCalls.length).toBe(0);
+  });
+
+  it('articleBody > 500 chars + vision-capable model → NO screenshot, text path only', async () => {
+    // 对照组：article body 充实（> 500 chars）→ 不触发 vision 旁路，
+    // 走纯文本 path 给 complete() 喂纯 string（不是 array of blocks）。
+    testState.fastPathMarkdown = 'x'.repeat(800);
+
+    const result = await runDomSubAgent({
+      task: 'summarize the article',
+      complexity: 'fast',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    // 没 vision：complete 还是单 text block
+    expect(complete).toHaveBeenCalledTimes(1);
+    const userMsg = (complete as any).mock.calls[0][1].messages[0];
+    expect(typeof userMsg.content).toBe('string'); // 仍是纯 string
+    expect(result.fastShortcut).toBeUndefined();
+  });
+
+  it('text-empty body + non-vision model → ok=false with empty-body error (no screenshot, no LLM)', async () => {
+    // canvas-only 退化路径：articleBody 全空 + 模型 text-only → 不该触发
+    // vision capture，**也不该**调 LLM，直接 fall back 到原来的空 body
+    // 错误文案，向后兼容。`fastPathMarkdown` 非 null 跳过 fallback path
+    // 直接走到 empty-body 判定。
+    testState.fastPathMarkdown = ''; // 直接为空字符串（Readability 也有可能返空字符串或空白）
+    testState.fastPathModelInput = ['text']; // not vision-capable
+
+    const result = await runDomSubAgent({
+      task: 'describe the chart',
+      complexity: 'fast',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('Fast-path extracted article body is empty');
+    // 都不该 fire
+    expect(complete).not.toHaveBeenCalled();
+    expect((globalThis as any).chrome.tabs.captureVisibleTab).not.toHaveBeenCalled();
   });
 });

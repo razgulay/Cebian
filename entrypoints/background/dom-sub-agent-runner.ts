@@ -37,6 +37,93 @@ import { debugLog } from '@/lib/debug/log';
 /** 子代理返回给主代理的文本上限（~10 KB）。超出则截断并标注。 */
 const MAX_RESULT_CHARS = 10_000;
 
+/** 注入到目标 tab 的 JSON-LD harvest 函数。无外部闭包依赖，能被
+ *  `chrome.scripting.executeScript({ func })` 按引用序列化（mirror
+ *  `getDocumentHtml` / `extractText` 的 self-contained 契约）。
+ *
+ *  返回：
+ *  - `nodes`：DOM 出现顺序的所有顶层节点，bad block 由 spec 静默 skip
+ *    （W3C JSON-LD 1.1 user-agent 处理）；
+ *  - `mainEntity`：优先匹配 `WebPage.mainEntity`（embedded 或 `@id` 引用
+ *    在同 block 内反查），fallback 到第一个非 `WebPage` / `WebSite` /
+ *    `BreadcrumbList` 类型；
+ *  - `rawCount`：原 `<script>` 元素数（含被 skip 的坏 block），用于 debug log。
+ */
+function harvestJsonLd(): {
+  nodes: Array<Record<string, unknown>>;
+  mainEntity: unknown | null;
+  rawCount: number;
+} {
+  const scripts = Array.from(
+    document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]'),
+  );
+  const nodes: Array<Record<string, unknown>> = [];
+  let rawCount = 0;
+  for (const s of scripts) {
+    rawCount++;
+    if (!s.textContent) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(s.textContent);
+    } catch {
+      // W3C JSON-LD 1.1: 坏 block 静默 skip
+      continue;
+    }
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item && typeof item === 'object') nodes.push(item as Record<string, unknown>);
+      }
+    } else if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      // 解开 `{ '@graph': [...] }` 包裹
+      if (Array.isArray(obj['@graph'])) {
+        for (const item of obj['@graph']) {
+          if (item && typeof item === 'object') nodes.push(item as Record<string, unknown>);
+        }
+      } else {
+        nodes.push(obj);
+      }
+    }
+  }
+
+  let mainEntity: unknown | null = null;
+  const webPage = nodes.find(
+    (n) => (n as any)['@type'] === 'WebPage',
+  );
+  if (webPage && (webPage as any).mainEntity) {
+    const me = (webPage as any).mainEntity;
+    if (typeof me === 'object' && me !== null) {
+      if (typeof (me as any)['@id'] === 'string') {
+        // `@id` 引用：本 block 内反查；跨 block 不追（research verdict：
+        // naive parser 不解析 IRI，交给 LLM 处理更稳）。
+        const ref = nodes.find((n) => (n as any)['@id'] === (me as any)['@id']);
+        mainEntity = ref ?? null;
+      } else {
+        mainEntity = me;
+      }
+    }
+  }
+
+  if (!mainEntity) {
+    const fallback = nodes.find((n) => {
+      const t = (n as any)['@type'];
+      return (
+        typeof t === 'string' && t !== 'WebPage' && t !== 'WebSite' && t !== 'BreadcrumbList'
+      );
+    });
+    mainEntity = fallback ?? null;
+  }
+
+  return { nodes, mainEntity, rawCount };
+}
+
+// Stage 3 / 顶部不再 import 时被外部代码引用，这里 export 一份给测试用——
+// 测试用 `harvestJsonLd` 的稳定 function identity 在
+// `executeInTabWithArgs` mock 里 dispatch（同 `getDocumentHtml` 模式）。
+// `ForTest` 后缀显式标记「这仅是测试切面」，production caller 没有。
+export const harvestJsonLdForTest = harvestJsonLd;
+
+
 /** 第一次空响应后追加到 prompt 尾部的"返 JSON"催促，避免沉默失败。 */
 const RETRY_REMINDER =
   '\n\nReturn a JSON object wrapped in exactly one ```json``` block. Be concise — the main agent pays for every token.';
@@ -86,6 +173,17 @@ export interface RunDomSubAgentResult {
   error?: string;
   /** 注入到子代理工具里的 tabId。 */
   tabId?: number | null;
+  /**
+   * Stage 3 / fast-path 旁路信号：标记 fast path 走了哪条捷径。
+   *  - `'json-ld'` → schema 直接拿 harvested mainEntity，0 tokens
+   *  - `'vision'`  → screenshot 已 attach 到 user message
+   *  - `undefined` → 走完整 LLM 流（无旁路）
+   * callers（`delegate_dom` 工具）目前只读 `text / modelKey / ok / error /
+   * tabId`，本字段**只**给 baseline 日志（`sub_agent:dom:done` log 的
+   * `jsonLdBypassed` / `visionCaptured` 标记）使用，未来若主代理要看见
+   * 再升级到 tool 返回字段。
+   */
+  fastShortcut?: 'json-ld' | 'vision';
 }
 
 /**
@@ -141,6 +239,11 @@ export async function runDomSubAgent(
   // }`」**不 throw**。没有这个 local，那些失败会被记成 `ok: true`。
   // fast 分支在返回前根据返回结果设 `completedOk`，外层 finally 读它。
   let completedOk: boolean | undefined = undefined;
+  // Stage 3 / fast-path 旁路信号：JSON-LD harvest 直接命中 schema 走 return，
+  // vision 截图被 attach 到 user message 也值得标记——这俩都不走 LLM（或
+  // vision 的 LLM 输入不一样），baseline 日志需要分开。
+  let jsonLdBypassed = false;
+  let visionCaptured = false;
   // Caller-supplied `expected_schema` parsed once up front (outside the retry
   // loop) so we can validate every attempt's JSON without re-parsing. Stays
   // `undefined` when the caller didn't pass a schema — that branch is the
@@ -206,6 +309,12 @@ export async function runDomSubAgent(
       effectiveComplexity = 'fast';
       attemptCount = 1;
       completedOk = fastResult.ok;
+      // Stage 3 / fast-path 旁路标记：从 `fastResult.fastShortcut` 把信
+      // 号搬出来，外层 finally :done 日志读 `jsonLdBypassed` / `visionCaptured`
+      // 写到 IDB，便于 baseline 把「JSON-LD 命中 / vision 截图」和「正常
+      // LLM 答」分开记账。
+      if (fastResult.fastShortcut === 'json-ld') jsonLdBypassed = true;
+      else if (fastResult.fastShortcut === 'vision') visionCaptured = true;
       if (!fastResult.ok && fastResult.error) {
         // 把失败原因写到 :done 日志，让 baseline 能区分「fast path
         // schema-failed」、「fast path aborted」、「fast path LLM 抛了」。
@@ -509,6 +618,11 @@ export async function runDomSubAgent(
       attemptCount,
       jsonParsed,
       outputLen,
+      // Stage 3 / fast-path 旁路标记：让 baseline 日志能区分「JSON-LD 直接
+      // 命中」「vision 截图答」「正常 LLM 答」三种 fast-path 收尾方式。三者
+      // 用户感知都叫 ok，但 token 成本天差地别——基线分析需要这个信号。
+      ...(jsonLdBypassed ? { jsonLdBypassed: true } : {}),
+      ...(visionCaptured ? { visionCaptured: true } : {}),
       // `thrownError` carries raw `Error.message` text from pi-agent-core or
       // upstream provider SDKs. In normal operation this is just stack /
       // status text, but a crafted LLM response could surface SDK-rendered
@@ -670,7 +784,164 @@ async function runFastDomSubAgent(
     }
   }
 
-  if (!articleBody || !articleBody.trim()) {
+  // 原来这里有一个 early return：「articleBody 空就 fail」。Stage 3 推迟它
+  // 之后——空 body 不一定是终态，canvas-only 页面（WebGL / 图表 / 图
+  // 像密集）text extraction 返回空，但 Step 4.5 vision fallback 还能救起。
+  // 这里**不**return，让代码继续流到 JSON-LD 旁路 → vision 尝试 → 再决定。
+
+  // ─── Stage 3 / Step 4: structured-data bypass（JSON-LD）───
+  // 当 caller 给了 `expected_schema` 时，先尝试 harvest `<script type=
+  // "application/ld+json">` 块，定位 `mainEntity`，过 schema 校验——
+  // 一致就**直接 return**，跳过 LLM。比 LLM call 便宜（0 tokens），对
+  // ~85% 新闻 / ~80% 电商页面零开销命中。
+  //
+  // 失败模式：harvest 抛异常 / 无 JSON-LD / mainEntity 不存在 / schema 不匹配
+  // 都安静地 fall through 到下方 LLM 流。
+  let jsonLdText: string | undefined;
+  if (expected_schema) {
+    try {
+      const harvested = await executeInTabWithArgs(resolvedTabId, harvestJsonLd, []);
+      debugLog.info('sub_agent', 'sub_agent:dom:fast:jsonld_harvested', {
+        tabId: resolvedTabId,
+        rawCount: harvested.rawCount,
+        nodeCount: harvested.nodes.length,
+        hasMainEntity: harvested.mainEntity != null,
+      });
+      if (harvested.mainEntity) {
+        const parsedSchema = parseExpectedSchema(expected_schema);
+        if (parsedSchema !== null) {
+          // `checkSchema` 要 TypeBox `TSchema`，但 `parseExpectedSchema`
+          // 返回 `unknown`（避免 lib 层依赖 TypeBox 类型）。cast 同主循环
+          // 那两条 call site（`:458` / `:1069`）一样用 `Parameters<typeof
+          // checkSchema>[0]`。返回值 `string | null`：`null` = 匹配，
+          // `string` = 人类可读错误（与 lib/agent/schema-validate.ts
+          // :71-72 约定一致）。
+          const schemaError = checkSchema(
+            parsedSchema as Parameters<typeof checkSchema>[0],
+            harvested.mainEntity,
+          );
+          if (schemaError === null) {
+            jsonLdText = JSON.stringify({
+              status: 'success',
+              data: harvested.mainEntity,
+              reason: '',
+            });
+            debugLog.info('sub_agent', 'sub_agent:dom:fast:jsonld_bypass', {
+              tabId: resolvedTabId,
+              type:
+                typeof (harvested.mainEntity as any)['@type'] === 'string'
+                  ? (harvested.mainEntity as any)['@type']
+                  : 'Unknown',
+              resultBytes: jsonLdText.length,
+            });
+          } else {
+            debugLog.info('sub_agent', 'sub_agent:dom:fast:jsonld_schema_mismatch', {
+              tabId: resolvedTabId,
+              schemaError,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      // Harvest 失败不能 block fast path——悄悄 fall through 到 LLM。
+      debugLog.info('sub_agent', 'sub_agent:dom:fast:jsonld_harvest_failed', {
+        tabId: resolvedTabId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (jsonLdText !== undefined) {
+    // 与 LLM 那条路同一条 trunk：truncate → extractJsonOrRaw → return。
+    let text = jsonLdText;
+    if (text.length > MAX_RESULT_CHARS) {
+      text =
+        text.slice(0, MAX_RESULT_CHARS) +
+        `\n\n...(truncated at ${MAX_RESULT_CHARS} chars; JSON-LD was ${jsonLdText.length} chars)`;
+    }
+    const { json } = extractJsonOrRaw(text);
+    if (json) text = json;
+    return {
+      text,
+      modelKey,
+      ok: true,
+      tabId: resolvedTabId,
+      fastShortcut: 'json-ld',
+    };
+  }
+
+  // ─── Stage 3 / Step 4.5: vision fallback ───
+  // 触发条件（任一）：
+  //  - canvas-only 空 body（Readability + raw-text fallback 都拿不到东西）；
+  //  - Readability 已 fallback 到 raw text（usedReadabilityFallback=true）；
+  //  - articleBody 太短（< 500 字），多半是图像密集或 SPA shell。
+  // AND 模型的 pi-ai capability flag `model.input.includes('image')` 真。
+  //
+  // 捕获走 `chrome.tabs.captureVisibleTab`（viewport JPEG）。不切
+  // chrome.debugger / CDP，避免 debugger bar flash。不 downscale——vision
+  // 模型自己会下采样（Anthropic 1568 patch edge / OpenAI high detail）。
+  let visionBase64: string | undefined;
+  let visionTabSwitchedFromTabId: number | undefined;
+  // 触发条件只看 `articleBody` 终态，不用 `usedReadabilityFallback` 自动
+  // 触发：Readability 给不出 article 不一定意味着文本「不可用」——纯文本
+  // 文章经 raw-text fallback 仍可能有 1-2 KB 的可读内容（spec 故意把这
+  // 当作「能用」，不强推 vision 因为 vision 贵）。真正的判空信号是
+  // articleBody 终态短小或全空：
+  //  - 空 body（canvas / WebGL / SPA shell）
+  //  - `< 500` 字符（多半是图像密集 / SPA 部分内容）
+  const bodyEmpty = !articleBody || !articleBody.trim();
+  const needsVision = bodyEmpty || (articleBody ? articleBody.trim().length < 500 : false);
+  const modelSupportsVision =
+    Array.isArray((model as any).input) && (model as any).input.includes('image');
+
+  if (needsVision && modelSupportsVision && resolvedTabId != null) {
+    try {
+      const activeTabId = await getActiveTabId();
+      if (activeTabId != null && activeTabId !== resolvedTabId) {
+        // 目标 tab 不是当前 active——`captureVisibleTab` 只能抓当前可见
+        // tab，需要临时切过去再切回。同款模式见 `lib/tools/screenshot.ts
+        // :103-111`。`screenshot.ts` 用 300ms，我们用 250ms（fast path
+        // // 对延迟更敏感，单 LLM 调用本身耗时长）。
+        visionTabSwitchedFromTabId = activeTabId;
+        await chrome.tabs.update(resolvedTabId, { active: true });
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab({
+          format: 'jpeg',
+          quality: 75,
+        });
+        visionBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
+        debugLog.info('sub_agent', 'sub_agent:dom:fast:vision_captured', {
+          tabId: resolvedTabId,
+          bytes: visionBase64.length,
+          bodyEmpty,
+        });
+      } finally {
+        // 恢复之前 active tab。`screenshot.ts:188-192` 同款 finally，
+        // 关闭的 tab catch 吞掉。
+        if (visionTabSwitchedFromTabId != null) {
+          try {
+            await chrome.tabs.update(visionTabSwitchedFromTabId, { active: true });
+          } catch {
+            /* tab may have been closed */
+          }
+        }
+      }
+    } catch (err) {
+      // captureVisibleTab 失败（chrome://、权限、tab 不存在等）不动原流：
+      // fall through 到纯文本 LLM call。模型若无 vision 能力，sub-agent
+      // model 配置时早就在注册表拦掉了，不会走到这里。
+      debugLog.info('sub_agent', 'sub_agent:dom:fast:vision_capture_failed', {
+        tabId: resolvedTabId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ─── Step 4.7: 推迟到这里的 empty-body guard ───
+  // Vision 已尽力，救不起才 reject。canvas-only + non-vision model 这条
+  // 退化路径仍走老错误文案，向后兼容。
+  if (!visionBase64 && (!articleBody || !articleBody.trim())) {
     return {
       text: '',
       modelKey,
@@ -699,11 +970,27 @@ async function runFastDomSubAgent(
   }
   let assistantMessage: AssistantMessage;
   try {
+    // Stage 3 / image content block：vision 捕获成功时把 JPEG 当
+    // `ImageContent` 块挂在 user 消息 content 数组里，跟 `text` 块并排。
+    // pi-ai 接受的 shape：`{ type: 'image', data: <base64>, mimeType }`
+    // （参见 `node_modules/@earendil-works/pi-ai/dist/types.d.ts:241-245`
+    // 与 `lib/agent/attachments.ts:417-418`——同样的 content block 形
+    // 状已经在用户贴图 / region-picker / MCP image result 三条路里用）。
+    const userContent: string | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image'; data: string; mimeType: string }
+    > = visionBase64
+      ? [
+          { type: 'text', text: promptBody },
+          { type: 'image', data: visionBase64, mimeType: 'image/jpeg' },
+        ]
+      : promptBody;
+
     assistantMessage = await complete(
       model,
       {
         systemPrompt: FAST_DOM_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: promptBody, timestamp: Date.now() }],
+        messages: [{ role: 'user', content: userContent, timestamp: Date.now() }],
         // 不传 `tools`——fast path 明确不提供工具。
       },
       // apiKey: undefined 也行——pi-ai 自己从 env / provider registry 解析
@@ -825,5 +1112,14 @@ async function runFastDomSubAgent(
     });
   }
 
-  return { text, modelKey, ok: true, tabId: resolvedTabId };
+  // Stage 3 / 标记 vision 旁路：success path 里如果 visionBase64 存在则
+  // 说明这次 user message 带上了 image block，记到 fastShortcut；纯文本
+  // 答则不设（外层 dispatch 把它当作「正常 LLM 答」）。
+  return {
+    text,
+    modelKey,
+    ok: true,
+    tabId: resolvedTabId,
+    ...(visionBase64 ? { fastShortcut: 'vision' as const } : {}),
+  };
 }

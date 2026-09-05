@@ -66,7 +66,12 @@ const DelegateDomParameters = Type.Object({
           'Set to "fast" for a single-shot schema-validated call with NO tools and NO retry — use when ' +
           'the active tab has wordCount > 2000 in <context> (long article pages), and you only need a ' +
           'one-shot structured extraction. "fast" skips the ReAct loop entirely, so do NOT pick it ' +
-          'when the task needs click / scroll / multi-step DOM navigation.',
+          'when the task needs click / scroll / multi-step DOM navigation. ' +
+          'Two automatic short-circuits within "fast": (a) if the page exposes JSON-LD and the harvested ' +
+          'mainEntity matches expected_schema, returns parsed JSON without any LLM call; ' +
+          '(b) if Readability + raw-text extraction both produce empty body AND the sub-agent model ' +
+          'is vision-capable, captures the viewport as a JPEG image content block and answers from the ' +
+          'screenshot instead of text (text-only models surface an empty-body error in this case).',
         default: 'simple',
       },
     ),
@@ -85,7 +90,15 @@ const DelegateDomParameters = Type.Object({
     '\n\n' +
     'Three complexity modes: "simple" (default — ReAct loop with thinking disabled), "complex" (ReAct loop + thinking budget for hard cases), ' +
     '"fast" (single-shot schema-validated call with NO tools and NO retry — use when the active tab\'s <context> shows `wordCount > 2000` ' +
-    'and you only need a one-shot structured extraction).',
+    'and you only need a one-shot structured extraction). ' +
+    '\n\n' +
+    '`complexity: "fast"` also has two short-circuit strategies: ' +
+    '(1) if the page exposes `<script type="application/ld+json">` and the harvested `mainEntity` matches `expected_schema`, ' +
+    '`fast` returns the parsed JSON directly with zero LLM tokens (saves money and latency on news / e-commerce / article pages that ship schema.org metadata); ' +
+    '(2) if Readability + raw-text extraction both come up empty (canvas-only / WebGL / image-heavy pages) AND the configured sub-agent model is vision-capable ' +
+    '(`model.input` includes "image"), `fast` captures the visible viewport via `chrome.tabs.captureVisibleTab` and attaches the JPEG as an image content block alongside the task ' +
+    '— the model then answers from the screenshot rather than text. If the model is text-only, the empty-body path surfaces an error so you can call `read_page` or `screenshot` instead. ' +
+    'Both short-circuits still respect `expected_schema` — the final return shape is the same `{ status, data, reason }` contract.',
 });
 
 /**
