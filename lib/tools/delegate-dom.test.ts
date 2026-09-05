@@ -84,4 +84,31 @@ describe('createDelegateDomTool — delegate_dom 工具', () => {
     const text = (res.content[0] as { type: 'text'; text: string }).text;
     expect(text).toContain('DOM sub-agent failed (openai/gpt-4o-mini): Network error');
   });
+
+  // Stage 2 / Subtask 3 — verify `complexity: 'fast'` propagates through
+  // the tool's execute() to the runner unchanged. Stage 2 widens the
+  // schema from `'simple' | 'complex'` to `'simple' | 'complex' | 'fast'`;
+  // this test guards the wire contract end-to-end (TypeBox schema widens,
+  // execute() cast widens, runner accepts the literal).
+  it('complexity: "fast" 被原样转发给 runner', async () => {
+    await tool.execute(
+      'call-1',
+      {
+        task: 'summarize long article',
+        expected_schema: '{"type":"object","required":["title"]}',
+        complexity: 'fast',
+        tabId: 73278874,
+      },
+      new AbortController().signal,
+    );
+    const { runDomSubAgent } = await import('@/entrypoints/background/dom-sub-agent-runner');
+    expect(runDomSubAgent).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        task: 'summarize long article',
+        expected_schema: '{"type":"object","required":["title"]}',
+        complexity: 'fast',
+        tabId: 73278874,
+      }),
+    );
+  });
 });

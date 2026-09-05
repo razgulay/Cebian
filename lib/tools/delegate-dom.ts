@@ -50,14 +50,27 @@ const DelegateDomParameters = Type.Object({
       'If provided, the sub-agent will strictly return JSON matching this schema. ' +
       'If omitted, the sub-agent returns free-form text or markdown.',
   })),
-  complexity: Type.Optional(Type.Union([Type.Literal('simple'), Type.Literal('complex')], {
-    description:
-      'Optional. Defaults to "simple" (sub-agent runs with thinking disabled, fastest/cheapest). ' +
-      'Set to "complex" if the extraction requires deep reasoning, evaluating trade-offs, ' +
-      'or parsing heavily obfuscated industry terms. When "complex", the sub-agent is allowed ' +
-      'to "think" before extracting.',
-    default: 'simple',
-  })),
+  complexity: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal('simple'),
+        Type.Literal('complex'),
+        Type.Literal('fast'),
+      ],
+      {
+        description:
+          'Optional. Defaults to "simple" (sub-agent runs with thinking disabled, fastest/cheapest). ' +
+          'Set to "complex" if the extraction requires deep reasoning, evaluating trade-offs, ' +
+          'or parsing heavily obfuscated industry terms. When "complex", the sub-agent is allowed ' +
+          'to "think" before extracting. ' +
+          'Set to "fast" for a single-shot schema-validated call with NO tools and NO retry — use when ' +
+          'the active tab has wordCount > 2000 in <context> (long article pages), and you only need a ' +
+          'one-shot structured extraction. "fast" skips the ReAct loop entirely, so do NOT pick it ' +
+          'when the task needs click / scroll / multi-step DOM navigation.',
+        default: 'simple',
+      },
+    ),
+  ),
 }, {
   description:
     'Delegate a heavy page-reading or extraction task to the configured cheap DOM sub-agent model. ' +
@@ -68,7 +81,11 @@ const DelegateDomParameters = Type.Object({
     'provide the user with feedback, or just fall back to using `read_page` yourself. ' +
     'Sub-agent can read, scroll, and click "Show more" / "Load more" expand buttons to reveal hidden data; ' +
     'it cannot type, submit forms, or do destructive actions. Pass `tabId` from the `[Active Tab]` line ' +
-    'in the context block — `chrome.tabs.query` is unreliable from the SW context.',
+    'in the context block — `chrome.tabs.query` is unreliable from the SW context. ' +
+    '\n\n' +
+    'Three complexity modes: "simple" (default — ReAct loop with thinking disabled), "complex" (ReAct loop + thinking budget for hard cases), ' +
+    '"fast" (single-shot schema-validated call with NO tools and NO retry — use when the active tab\'s <context> shows `wordCount > 2000` ' +
+    'and you only need a one-shot structured extraction).',
 });
 
 /**
@@ -91,7 +108,7 @@ export function createDelegateDomTool(): AgentTool<typeof DelegateDomParameters>
       const { task, expected_schema, complexity, tabId } = args as {
         task: string;
         expected_schema?: string;
-        complexity?: 'simple' | 'complex';
+        complexity?: 'simple' | 'complex' | 'fast';
         tabId?: number;
       };
       if (!task || !task.trim()) {
