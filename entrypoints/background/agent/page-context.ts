@@ -55,6 +55,15 @@ interface PageMeta {
   scrollX?: number;
   scrollY?: number;
   activeElement?: string | null;
+  /** `document.body.innerText.length`。给主代理做 `read_page` vs `delegate_dom`
+   *  路由的启发式输入（page > 2000 词 ≈ delegate），在 injected script 里算好，
+   *  只发这个整数跨 IPC，不传完整 body text。 */
+  bodyTextSize?: number;
+  /** `bodyText.split(/\s+/).filter(s => s.length > 0).length`。匹配启发式
+   *  里「2000 词」的单位，避免主代理自己粗估 chars → words。
+   *  注意：仅对 whitespace 分词的语言（英文等）有意义；CJK 文本因没有词间空格
+   *  会算成 1——主代理届时应改用 `bodyTextSize` 做路由。 */
+  wordCount?: number;
 }
 
 async function getActiveTabMeta(tabId: number): Promise<PageMeta> {
@@ -77,6 +86,15 @@ async function getActiveTabMeta(tabId: number): Promise<PageMeta> {
           activeElementDesc = desc;
         }
 
+        // Heuristic input for Main Agent's read_page vs delegate_dom routing
+        // decision. Compute inside the injected function so we only ship two
+        // numbers across the IPC boundary, not the full page text.
+        const bodyText = document.body?.innerText ?? '';
+        const bodyTextSize = bodyText.length;
+        const wordCount = bodyText.length === 0
+          ? 0
+          : bodyText.split(/\s+/).filter((s) => s.length > 0).length;
+
         return {
           description: meta('description'),
           keywords: meta('keywords'),
@@ -91,6 +109,8 @@ async function getActiveTabMeta(tabId: number): Promise<PageMeta> {
           scrollX: Math.round(window.scrollX),
           scrollY: Math.round(window.scrollY),
           activeElement: activeElementDesc,
+          bodyTextSize,
+          wordCount,
         };
       },
     });
@@ -128,6 +148,13 @@ async function gatherPageContext(): Promise<string> {
   }
   if (meta.readyState) lines.push(`  readyState: ${meta.readyState}`);
   if (meta.viewportWidth != null && meta.viewportHeight != null) lines.push(`  viewport: ${meta.viewportWidth}×${meta.viewportHeight}`);
+  // Heuristic input for Main Agent: a long page (wordCount > 2000) means
+  // `delegate_dom` is more cost-efficient than `read_page` (which would push
+  // the full text into Main Agent context). Emit both chars and words so the
+  // agent can pick whichever heuristic line it prefers without having to
+  // approximate chars → words itself.
+  if (meta.bodyTextSize != null) lines.push(`  bodyTextSize: ${meta.bodyTextSize}`);
+  if (meta.wordCount != null) lines.push(`  wordCount: ${meta.wordCount}`);
   if (meta.scrollX != null) lines.push(`  scrollPosition: ${meta.scrollX}, ${meta.scrollY}`);
   if (meta.activeElement) lines.push(`  activeElement: ${sanitizeForContext(meta.activeElement)}`);
   if (meta.description) lines.push(`  description: ${sanitizeForContext(meta.description)}`);
