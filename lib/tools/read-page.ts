@@ -1022,3 +1022,9 @@ export const readPageTool: AgentTool<typeof ReadPageParameters> = {
 
 // 仅为单测暴露的内部 helper
 export { sanitizeSelector };
+
+/** Exported for cross-tool reuse (Stage 2 `delegate_dom` fast-path): injects
+ *  via `executeInTabWithArgs` to grab the page HTML + URL for Readability
+ *  extraction. Must remain self-contained (no closures) — `executeScript`
+ *  serializes the function by reference. */
+export { getDocumentHtml, convertArticleToMarkdown };
