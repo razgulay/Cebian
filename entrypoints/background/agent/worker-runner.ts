@@ -47,8 +47,8 @@
 
 import type { Api, Model, AssistantMessage } from '@earendil-works/pi-ai';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
-import { Value } from 'typebox/value';
 import type { TSchema } from 'typebox';
+import { parseExpectedSchema, checkSchema } from '@/lib/agent/schema-validate';
 import {
   workerModels,
   providerCredentials,
@@ -533,41 +533,6 @@ export function shouldRetry(handoff: WorkerHandoff): boolean {
     handoff.retryable === true &&
     handoff.attempts !== 2
   );
-}
-
-/** 解析 expected_schema JSON。返回 parsed schema 或 null（schema 本身不是
- *  合法 JSON 时）。Caller 据此决定 runner-error vs retryable。
- *  `JSON.parse` 返回 `any`，我们在 parse 边界做 `unknown` 收口（TypeBox
- *  在运行时接受任何对象——typing 只是 compile-time 的形状断言）。 */
-function parseExpectedSchema(expectedSchema: string): unknown | null {
-  try {
-    const parsed: unknown = JSON.parse(expectedSchema);
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-/** 用 typebox/value 校验 parsedJson 是否满足 schema。Pass → null；
- *  fail → `${instancePath}: ${message}`（mirror `lib/mcp/client.ts:113-115`
- *  错误格式，让上游 / 日志 / UI 看 error 时不需要熟悉两套 schema 校验器）。
- *  Schema processing error（TypeBox 不能 evaluate 该 schema，例如第三方
- *  写得很奇怪）→ lenient pass（null）+ warn——与 MCP client 的「
- *  unprocessable schema accept + log」同姿态；这是单次 retry 的边界，
- *  不能让奇葩 schema 把整条 pipeline 卡死。 */
-function checkSchema(schema: TSchema, parsedJson: unknown): string | null {
-  try {
-    if (Value.Check(schema, parsedJson)) return null;
-    const firstError = Value.Errors(schema, parsedJson)[0];
-    const path = firstError?.instancePath || '/';
-    const message = firstError?.message ?? 'schema validation failed';
-    return `${path}: ${message}`;
-  } catch (err) {
-    debugLog.warn('sub_agent', 'sub_agent:worker:schema:unprocessable', {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
 }
 
 // ─── IO helpers (internal; tested via mock of `vfs`) ───
