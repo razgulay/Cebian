@@ -13,9 +13,19 @@ vi.mock('@/lib/persistence/storage', () => ({
 // running alone or in a specific order. (`vi.mock` factories are hoisted by
 // vitest, but the closures they create over `createdAgents` / `promptsByAttempt`
 // / `currentAttempt` captured whichever instance existed at module load time.)
+//
+// Subtask 3 added `responsesByAttempt` for the schema-validation block: tests
+// that exercise the schema-fail → retry → escalate path need each attempt
+// to return a distinct assistant text (sometimes a valid schema-compliant
+// JSON, sometimes a non-matching JSON, sometimes plain text).
 const testState = vi.hoisted(() => ({
   createdAgents: [] as Array<{ complexity?: 'simple' | 'complex'; tabId?: number }>,
   promptsByAttempt: [] as Array<{ attempt: number; returnEmpty: boolean }>,
+  // `responsesByAttempt[i]` is the assistant text the i-th attempt returns.
+  // When undefined the mock falls back to the legacy hardcoded JSON so the
+  // auto-escalation describe block (which only cares about empty vs non-empty)
+  // keeps working unchanged.
+  responsesByAttempt: [] as Array<{ assistantText: string }>,
   currentAttempt: 0,
 }));
 
@@ -29,6 +39,11 @@ vi.mock('./dom-sub-agent', async () => {
       testState.createdAgents.push(options);
       const attempt = ++testState.currentAttempt;
       const wantEmpty = testState.promptsByAttempt[attempt - 1]?.returnEmpty ?? false;
+      const override = testState.responsesByAttempt[attempt - 1]?.assistantText;
+      const assistantText =
+        override !== undefined
+          ? override
+          : '{"status":"success","data":"ok","reason":""}';
       return {
         agent: {
           state: {
@@ -37,7 +52,7 @@ vi.mock('./dom-sub-agent', async () => {
               : [
                   {
                     role: 'assistant',
-                    content: [{ type: 'text', text: '{"status":"success","data":"ok","reason":""}' }],
+                    content: [{ type: 'text', text: assistantText }],
                     stopReason: 'stop',
                   },
                 ],
@@ -67,6 +82,7 @@ describe('runDomSubAgent — auto-escalation simple → complex', () => {
     vi.clearAllMocks();
     testState.createdAgents.length = 0;
     testState.promptsByAttempt.length = 0;
+    testState.responsesByAttempt.length = 0;
     testState.currentAttempt = 0;
   });
 
@@ -123,5 +139,148 @@ describe('runDomSubAgent — auto-escalation simple → complex', () => {
     // Only one attempt was made since the first succeeded
     expect(testState.createdAgents.length).toBe(1);
     expect(testState.createdAgents[0].complexity).toBe('simple');
+  });
+});
+
+// ─── Subtask 3: schema validation ───
+// Tests the post-hoc schema check + retry + auto-escalate path wired in
+// `dom-sub-agent-runner.ts`. Same harness as the auto-escalation block —
+// `createDomSubAgent` is mocked, and `responsesByAttempt` lets each attempt
+// return a different assistant text (matching/non-matching JSON).
+//
+// The schema under test requires `{ status: 'success', data: string }`. The
+// fixture JSONs deliberately miss one of those fields per attempt so the
+// validation step fires and the retry/escalate path is exercised.
+const STATUS_SUCCESS_SCHEMA = JSON.stringify({
+  type: 'object',
+  required: ['status', 'data'],
+  properties: { status: { const: 'success' }, data: { type: 'string' } },
+});
+
+describe('runDomSubAgent — schema validation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    testState.createdAgents.length = 0;
+    testState.promptsByAttempt.length = 0;
+    testState.responsesByAttempt.length = 0;
+    testState.currentAttempt = 0;
+  });
+
+  it('schema-compliant JSON on first attempt → ok, no retry, no escalation', async () => {
+    // JSON matches schema on attempt 1 → loop breaks immediately, the
+    // retry/escalate path is never touched.
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success","data":"all good"}',
+    });
+
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'simple',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toBe('{"status":"success","data":"all good"}');
+    expect(testState.createdAgents.length).toBe(1);
+    expect(testState.createdAgents[0].complexity).toBe('simple');
+  });
+
+  it('schema mismatch on attempt 1 → retry with escalate simple → complex; attempt 2 matches → ok', async () => {
+    // Attempt 1 returns JSON that misses the required `data` field → schema
+    // check fails → loop escalates to 'complex' for attempt 2.
+    // Attempt 2 returns schema-compliant JSON → loop breaks at attempt 2.
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success"}',
+    });
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success","data":"fixed"}',
+    });
+
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'simple',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toBe('{"status":"success","data":"fixed"}');
+    expect(testState.createdAgents.length).toBe(2);
+    // First attempt honors caller's 'simple'; retry escalates to 'complex'.
+    expect(testState.createdAgents[0].complexity).toBe('simple');
+    expect(testState.createdAgents[1].complexity).toBe('complex');
+  });
+
+  it('schema mismatch on both attempts → returns Schema validation failed error', async () => {
+    // Both attempts return JSON missing the required `data` field. With
+    // MAX_RETRIES=1, attempt 2 is the last attempt — when its schema check
+    // also fails, the loop breaks with `ok=false` and the post-loop error
+    // surfaces the dedicated `Schema validation failed:` message.
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success"}',
+    });
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success"}',
+    });
+
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'complex',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/^Schema validation failed: /);
+    // format mirror: ${instancePath}: ${message}
+    expect(result.error).toMatch(/: /);
+    expect(testState.createdAgents.length).toBe(2);
+    // Caller asked 'complex' — first attempt uses 'complex', retry stays 'complex'.
+    expect(testState.createdAgents[0].complexity).toBe('complex');
+    expect(testState.createdAgents[1].complexity).toBe('complex');
+  });
+
+  it('malformed expected_schema (not valid JSON) → early-return, no LLM call', async () => {
+    // parseExpectedSchema returns null → runner rejects the call before
+    // touching the agent. createdAgents stays empty.
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: '{ this is not json',
+      complexity: 'simple',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('Invalid expected_schema: not valid JSON');
+    expect(testState.createdAgents.length).toBe(0);
+  });
+
+  it('non-JSON assistant output when schema requested → dedicated non-JSON retry path; retry emits JSON and succeeds', async () => {
+    // When caller passed a schema but the LLM emits non-JSON prose,
+    // `JSON.parse(rawText)` inside the schema-check block throws. The
+    // runner has a dedicated fallback path for this case (separate from
+    // the schema-mismatch path): it builds its own `<retry-feedback>`
+    // block pointing at the parse failure, escalates `simple → complex`,
+    // and retries. On the retry, the LLM emits schema-compliant JSON and
+    // the schema check passes.
+    testState.promptsByAttempt.push({ attempt: 1, returnEmpty: false });
+    testState.responsesByAttempt.push({
+      assistantText: 'some prose without any JSON at all',
+    });
+    testState.responsesByAttempt.push({
+      assistantText: '{"status":"success","data":"json on retry"}',
+    });
+
+    const result = await runDomSubAgent({
+      task: 'extract the table',
+      expected_schema: STATUS_SUCCESS_SCHEMA,
+      complexity: 'simple',
+      tabId: 73278874,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toBe('{"status":"success","data":"json on retry"}');
+    expect(testState.createdAgents.length).toBe(2);
   });
 });
