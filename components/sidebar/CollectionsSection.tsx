@@ -240,7 +240,7 @@ export function CollectionsSection() {
   const pendingReindexRef = useRef<string | null>(null);
 
   return (
-    <section className="space-y-3 rounded-lg border border-border p-4">
+    <section className="space-y-3 rounded-lg border border-border mx-3 mt-3 p-4">
       {/* Title + description — stacked vertically so the long hint reads
           full-width instead of being squeezed next to the title. The
           "+ New collection" button is moved to the bottom of the section

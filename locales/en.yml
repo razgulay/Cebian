@@ -33,6 +33,8 @@ common:
   rename: "Rename"
   edit: "Edit"
   add: "Add"
+  enable: "Enable"
+  disable: "Disable"
   headers:
     keyPlaceholder: "Header name"
     valuePlaceholder: "Header value"
@@ -390,7 +392,12 @@ settings:
       confirmOverwriteDescription: "\"$1\" will be replaced and its saved permissions will be cleared. Continue?"
   mcp:
     title: "MCP Servers"
-    description: "Connect Model Context Protocol servers to expose their tools to the agent."
+    description: "Connect MCP servers to expose their tools to the agent."
+    header:
+      # $1 = configured count, $2 = total servers
+      configuredCount: "$1 / $2 configured"
+      collapse: "Collapse MCP servers"
+      expand: "Expand MCP servers"
     empty:
       title: "No MCP servers configured"
       hint: "Add a server to extend the agent with external tools."
@@ -421,6 +428,16 @@ settings:
       disconnected: "Disconnected"
       probing: "Reconnecting"
       circuitOpen: "Unavailable"
+    row:
+      # $1 = server name
+      aria: "$1 MCP server"
+      transportType:
+        streamableHttp: "Streamable HTTP"
+        sse: "SSE"
+      auth: "Auth"
+      authNone: "None"
+      authBearer: "Bearer (set)"
+      status: "Status"
     form:
       name: "Name"
       namePlaceholder: "e.g. weather, github, my-tools"

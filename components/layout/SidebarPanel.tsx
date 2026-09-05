@@ -130,12 +130,13 @@ function displayTitle(title: string): string {
 /**
  * SidebarPanel — 抽屉式侧边栏，包含 4 个区域：
  *   1. Worker Team Roster — 4 个 worker role 的紧凑模型切换（顶部，跨 session 全局配置）
- *   2. History — 会话历史（按时间分组，pin 在顶部）
+ *   2. MCP Servers — MCP 服务器列表 + 添加
  *   3. Collections — RAG collections 列表 + 新建/重命名/重新索引/删除
- *   4. MCP — MCP 服务器列表 + 添加
+ *   4. History — 会话历史（按时间分组，pin 在顶部）
  *
  * 单列垂直滚动布局，不强制任何高度限制——各区域增多时整列自然变长，
- * 滚动条由 ScrollArea 提供。每个区域单独 `border-border` 包裹，区域间由 `space-y-3` 隔开。
+ * 滚动条由 ScrollArea 提供。每个区域单独 `border-border` 包裹，区域间由 `space-y-3` 隔开；
+ * 四个区域统一带 `mx-3 mt-3`，左右边缘对齐。
  *
  * 注意：记忆管理（Memory）不在侧边栏抽屉中——抽屉只列历史，记忆相关的总开关、整理配置、
  * 文件浏览 / 编辑请走 `/settings/memory` 设置页（见 `components/settings/sections/MemorySection`）。
@@ -362,27 +363,37 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
       </div>
 
       {/* Body — single vertical scroll containing 4 regions (top → bottom):
-          Worker Team Roster → History → Collections → MCP. `space-y-3` gives
-          regions a fixed gap; `pl-3 pr-0` preserves the original history's
-          12px left padding and 0 right padding. ScrollArea auto-shows a
-          scrollbar when the regions exceed viewport height — adding MCP /
-          RAG files grows the column without any fixed-height truncation. */}
+          Worker Team Roster → MCP Servers → Collections → History.
+          `space-y-3` gives regions a fixed gap. Each region adds its own
+          `mx-3 mt-3`; combined with the wrapper's `pl-3` (left only) this
+          places the four sections at 24 px from the left and 12 px from
+          the right (asymmetric by design — preserving the original left
+          inset while letting every region's own mx-3 govern the right
+          edge). ScrollArea auto-shows a scrollbar when the regions exceed
+          viewport height — adding MCP / RAG files grows the column without
+          any fixed-height truncation. */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="pl-3 pr-0 py-1 space-y-3">
           {/* ─── Worker Team Roster (multi-agent model picker) ─── */}
-          {/* Position: top of body, before Collections — worker team is a
-              session-global config that should stay visible while users
-              scroll through History. */}
+          {/* Position: top of body, before MCP / Collections / History —
+              worker team is a session-global config that should stay visible
+              while users scroll through the rest of the sidebar. */}
           <WorkerTeamRoster />
-
-          {/* ─── Collections (RAG) ─── */}
-          <CollectionsSection />
 
           {/* ─── MCP Servers ─── */}
           <MCPSection />
 
+          {/* ─── Collections (RAG) ─── */}
+          {/* Position: after MCP Servers, before History. */}
+          <CollectionsSection />
+
           {/* ─── History (cuối sidebar) ─── */}
-          <section>
+          {/* Match Worker / MCP / Collections horizontal margins (mx-3 mt-3)
+              so all four sections share the same left and right edges.
+              History keeps no outer border (preserves the flat list look);
+              the wrapper's pl-3 plus the section's own mx-3 double-stack
+              gives the content its horizontal position. */}
+          <section className="mx-3 mt-3">
             {loading && (
               <div className="text-center text-sm text-muted-foreground py-12">
                 {t('common.loading')}

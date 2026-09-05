@@ -14,34 +14,24 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
+import { Accordion } from '@/components/ui/accordion';
 import type { MCPServerConfig } from '@/lib/persistence/storage';
 import { reorderMCPServers } from '@/lib/mcp/store';
-import { MCPServerCard } from './MCPServerCard';
+import { useMCPStatus } from '@/hooks/useMCPStatus';
+import { MCPServerRow } from './MCPServerRow';
 
 /**
- * MCPServerSortableList — wraps `MCPServerCard` in a DndContext +
- * SortableContext so the card grip-handles can drive reorder. Lives in
- * its own component because both Settings (`/settings/mcp`) and the
- * Sidebar drawer render the same MCP server list and need the same drag
- * wiring; duplicating the DndContext plumbing in two files would drift.
+ * MCPServerSortableList — Settings (`/settings/mcp`) 与 Sidebar 抽屉共用的 MCP 服务器列表。
  *
- * Drag flow:
- * - PointerSensor uses a small distance threshold so a stray click on
- *   the grip never starts a drag, but a real press-and-move does. Both
- *   touch and mouse go through this sensor.
- * - KeyboardSensor + `sortableKeyboardCoordinates` enables keyboard
- *   reorder: Tab to the grip → Space to "pick up" → Arrow keys to move
- *   → Space again to drop, Escape to cancel. `attributes` / `listeners`
- *   on the card's grip button are what make this work.
+ * 把 DndContext + SortableContext + Accordion 三层嵌套集中在一处，避免在两个调用点复制拖拽与展开状态管理。
+ * useMCPStatus 在此提升调用一次，statusMap 通过 prop 下发到每行；每行 5s 轮询会浪费 N 倍的消息往返。
  *
- * Reorder persistence: `onDragEnd` reads the current order from the array
- * we already rendered (no extra fetch), passes the old/new indices to
- * `reorderMCPServers`, and the helper writes back atomically. We don't
- * keep a local React copy of the order — the storage item's `watch`
- * callback in `useStorageItem` will push the new order into the parent
- * list and the cards re-render in their new position. This matches how
- * the rest of the MCP section reads/writes: single source of truth is
- * the storage item, not React state.
+ * 拖拽流程：
+ * - PointerSensor 距离阈值 5px → 普通点击不触发拖拽，按住并位移才进入拖动。
+ * - KeyboardSensor + sortableKeyboardCoordinates → Tab 到行后 Space 拾起，方向键移动，Space 落下 / Esc 取消。
+ * - onDragEnd 直接调用 reorderMCPServers 由 storage 写回，useStorageItem 的 watch 回调会触发父列表重渲染。
+ *
+ * 展开：Accordion type="multiple"，每行独立 open 状态，可同时展开多行。
  */
 export function MCPServerSortableList({ servers }: { servers: MCPServerConfig[] }) {
   const sensors = useSensors(
@@ -49,8 +39,9 @@ export function MCPServerSortableList({ servers }: { servers: MCPServerConfig[] 
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // Pre-compute the ids array — passing a stable reference to
-  // SortableContext.items avoids an unnecessary effect run inside dnd-kit.
+  // 一次轮询，多行共享；useMCPStatus 自身 5s 间隔。
+  const statusMap = useMCPStatus();
+
   const itemIds = useMemo(() => servers.map((s) => s.id), [servers]);
 
   const handleDragEnd = useCallback(
@@ -61,9 +52,8 @@ export function MCPServerSortableList({ servers }: { servers: MCPServerConfig[] 
       const toIndex = itemIds.indexOf(String(over.id));
       if (fromIndex === -1 || toIndex === -1) return;
       reorderMCPServers(fromIndex, toIndex).catch((err) => {
-        // Mirror the error-handling pattern used by setMCPServerEnabled /
-        // removeMCPServer on MCPServerCard — storage IO failures shouldn't
-        // leave the user with a card that silently snapped back.
+        // 与 setMCPServerEnabled / removeMCPServer 错误处理保持一致：storage IO 失败时显式 toast，
+        // 不让行"看似拖回去了"。
         console.error('[mcp] failed to reorder servers:', err);
         toast.error(err instanceof Error ? err.message : String(err));
       });
@@ -74,11 +64,11 @@ export function MCPServerSortableList({ servers }: { servers: MCPServerConfig[] 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
-        <div className="space-y-2">
+        <Accordion type="multiple" className="divide-y divide-border/50">
           {servers.map((s) => (
-            <MCPServerCard key={s.id} server={s} />
+            <MCPServerRow key={s.id} server={s} statusMap={statusMap} />
           ))}
-        </div>
+        </Accordion>
       </SortableContext>
     </DndContext>
   );

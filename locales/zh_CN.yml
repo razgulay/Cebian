@@ -32,6 +32,8 @@ common:
   rename: "重命名"
   edit: "编辑"
   add: "添加"
+  enable: "启用"
+  disable: "禁用"
   headers:
     keyPlaceholder: "Header 名"
     valuePlaceholder: "Header 值"
@@ -382,7 +384,12 @@ settings:
       confirmOverwriteDescription: "“$1” 将被替换，且已授予的权限将被清除。是否继续？"
   mcp:
     title: "MCP 服务器"
-    description: "接入 Model Context Protocol 服务器，把它们的工具暴露给 agent 使用。"
+    description: "连接 MCP 服务器，将其工具暴露给 agent。"
+    header:
+      # $1 = 已配置数, $2 = 总服务器数
+      configuredCount: "$1 / $2 已配置"
+      collapse: "折叠 MCP 服务器"
+      expand: "展开 MCP 服务器"
     empty:
       title: "尚未配置 MCP 服务器"
       hint: "添加一个服务器，用外部工具扩展 agent 的能力。"
@@ -413,6 +420,16 @@ settings:
       disconnected: "未连接"
       probing: "重连中"
       circuitOpen: "暂时不可用"
+    row:
+      # $1 = 服务器名称
+      aria: "$1 MCP 服务器"
+      transportType:
+        streamableHttp: "Streamable HTTP"
+        sse: "SSE"
+      auth: "认证"
+      authNone: "无"
+      authBearer: "Bearer（已设置）"
+      status: "状态"
     form:
       name: "名称"
       namePlaceholder: "例如：weather、github、my-tools"
