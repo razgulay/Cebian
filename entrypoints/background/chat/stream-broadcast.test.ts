@@ -199,4 +199,53 @@ describe('stream-broadcast 生产端 → stream-replica 应用端（端到端契
     vi.advanceTimersByTime(1000);
     expect(frames).toHaveLength(before);
   });
+
+  /**
+   * 复现 v1.7.0 引入的「subscribe 后 trailing 帧与 session_state 重复应用」
+   * 竞态：agent 在 emit 之前已同步把 partial.content 改了，导致
+   * getSessionState 的快照已包含最新文本，但 emit 的 microtask 在 subscribe
+   * 返回后才把同一段 delta 推入缓冲，trailing 帧又把它再发一遍。
+   *
+   * 时序：
+   *   1. leading + 缓冲里已有 "AB"
+   *   2. agent 把 partial.content[0].text 同步改成 "ABC"（emit 之前的
+   *      sync mutation，见 pi-agent-core 的 message_update 处理）
+   *   3. subscribe 的 flushStreamOps 把缓冲里 "AB" 发出去
+   *   4. subscribe 的 getSessionState 读到 "ABC"（partial 已被 sync 改）
+   *   5. subscribe 的 post session_state 把 "ABC" 发给新 viewer
+   *   6. subscribe 返回 → microtask 队列轮到 agent 的 emit 回调
+   *   7. pushOp "C" 进入缓冲，80ms 后 trailing 帧把 "C" 单独再发一遍
+   *   8. UI 端：stream_ops AB → session_state ABC → stream_ops C → "ABCC"
+   */
+  it('mid-stream subscribe + microtask 错位：trailing 帧与 session_state 重复', () => {
+    const partial = makePartial();
+    partial.content.push({ type: 'text', text: '' });
+    queueStreamEvent(S, { type: 'text_start', contentIndex: 0, partial } as never);
+    queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'AB', partial } as never);
+
+    // 模拟 pi-agent-core 在 await emit 之前已经同步修改了 partial.content
+    partial.content[0].text = 'AB'; // 已知；下一步会再同步加 "C"
+
+    // 订阅路径：先 flush 缓冲（仅含 "AB"），再取样（partial 已 sync 加了 "C"）
+    flushStreamOps(S);
+    const framesBeforeSnapshot = frames.length;
+    const snapshotTail = snapshotStreamingTail(S, structuredClone({
+      ...partial,
+      content: [{ ...partial.content[0], text: 'ABC' }], // 模拟 agent 在 emit 前已 sync 改完
+    }) as never);
+
+    // 新 viewer 收到 stream_ops [AB] + session_state(ABC)
+    let replica: BroadcastMessage[] = [snapshotTail as unknown as BroadcastMessage];
+    replica = replay(replica, framesBeforeSnapshot);
+    expect(tail(replica).content[0].text).toBe('ABC');
+
+    // 关键：subscribe 返回之后 microtask 队列才轮到 agent 的 emit 回调，
+    // 把 "C" 推入缓冲。80ms 后 trailing 帧把 "C" 单独再发一次。
+    queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'C', partial } as never);
+    vi.advanceTimersByTime(80);
+
+    // 客户端按序应用：trailing 帧 C 落在快照 ABC 之上，把 C 又加了一遍
+    replica = replay(replica, framesBeforeSnapshot);
+    expect(tail(replica).content[0].text).toBe('ABCC'); // ← 重复
+  });
 });

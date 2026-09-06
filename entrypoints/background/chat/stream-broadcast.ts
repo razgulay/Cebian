@@ -189,4 +189,4 @@ function dropStreamBroadcast(sessionId: string): void {
   streams.delete(sessionId);
 }
 
-export { queueStreamEvent, flushStreamOps, snapshotStreamingTail, dropStreamBroadcast };
+export { queueStreamEvent, flushStreamOps, snapshotStreamingTail, dropStreamBroadcast, FLUSH_INTERVAL_MS };

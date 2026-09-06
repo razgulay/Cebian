@@ -19,6 +19,20 @@ import { post } from '../ipc/port-registry';
 const viewers = new Map<chrome.runtime.Port, string>();
 
 /**
+ * 订阅豁免窗：刚订阅的 port 在 `until` 之前**不收 `stream_ops`**，但其它帧照发。
+ *
+ * 为什么需要：subscribe 之后约 80ms（见 `stream-broadcast.ts` 的 FLUSH_INTERVAL_MS）
+ * 内，agent 可能仍在 emit；agent 先同步把 partial 写进 messages（snapshot 由此读
+ * 出），再 await emit 把 BG handler 排成 microtask。若该 microtask 在 subscribe 返
+ * 回之后才被调度，对应事件就会进缓冲、随后 trailing 帧再发一遍——和 snapshot 撞上。
+ * 抑制窗与 flush 窗等长，就能盖住这个窗口。
+ *
+ * 用 port 自身作 key，port GC 时 WeakMap 表项自动回收，无需手动清理 viewer 表断开
+ * 留下的 entry。
+ */
+const suppressedUntil = new WeakMap<chrome.runtime.Port, number>();
+
+/**
  * 记下某窗口正在看的会话。`subscribe` / `prompt` / `retry` 都会调 —— 后两者是因为
  * 「发起一轮对话」本身就意味着这个窗口正在看它
  */
@@ -47,13 +61,31 @@ function hasViewer(sessionId: string): boolean {
   return false;
 }
 
-/** 投给所有正在看这个会话的窗口（对比传输层的 `broadcastAll` = 所有连接） */
+/**
+ * 在 `durationMs` 内屏蔽该 port 的 `stream_ops` 帧。其它消息（`session_state` /
+ * `session_loaded` / 控制帧）不受影响——它们必须照发，否则 UI 拿不到订阅回执本身。
+ * 计时由下一次 `broadcastToViewers` 命中时按 `Date.now()` 懒判定，不需要后台定时器；
+ * 表项随 WeakMap 在 port GC 时回收。
+ */
+function suppressStreamOpsFor(port: chrome.runtime.Port, durationMs: number): void {
+  suppressedUntil.set(port, Date.now() + durationMs);
+}
+
+/** 投给所有正在看这个会话的窗口（对比传输层的 `broadcastAll` = 所有连接）。
+ *  被 `suppressedUntil` 屏蔽的 port 只跳过 `stream_ops`，其它帧照发。 */
 function broadcastToViewers(sessionId: string, msg: ServerMessage): void {
+  const isStreamOps = msg.type === 'stream_ops';
+  const now = Date.now();
   for (const [port, id] of viewers) {
-    if (id === sessionId) post(port, msg);
+    if (id !== sessionId) continue;
+    if (isStreamOps) {
+      const until = suppressedUntil.get(port);
+      if (until !== undefined && now < until) continue;
+    }
+    post(port, msg);
   }
 }
 
 // ─── 公开 API ───
 
-export { setViewing, stopViewing, hasViewer, broadcastToViewers };
+export { setViewing, stopViewing, hasViewer, broadcastToViewers, suppressStreamOpsFor };
