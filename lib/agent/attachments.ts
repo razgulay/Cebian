@@ -125,9 +125,12 @@ export interface DirectoryMentionAttachment {
 /** Mention of a single VFS file. Resolved at send-time by reading the file
  *  via `vfs.readFile`. The LLM receives the file's text content inside
  *  `<attached-file>` (the same envelope used by regular file attachments),
- *  so the agent can `fs_read_file` it again later if needed. Sized the
- *  same as a regular text-file attachment — large files (over
- *  `MAX_TEXT_FILE_SIZE`) get truncated to keep prompt budget in check.
+ *  so the agent can `fs_read_file` it again later if needed.
+ *
+ *  Body 截断按 `MAX_INLINE_BODY`（100 KB）走，比 composer attachment 的
+ *  `MAX_TEXT_FILE_SIZE`（1 MB）紧——mention chip 在 pin 时每条 send 都跟着走，
+ *  预算敏感；超大文件应作为普通 attachment 拖入（上限 1 MB），而不是用 mention chip
+ *  引用。`truncated="true"` 会在 envelope 上挂出来，LLM 看到就知道内容被截了。
  *
  *  `pinned` mirrors the same flag on DirectoryMentionAttachment — pin
  *  chips skip the bubble badge but still ship their data to the LLM. */
@@ -196,7 +199,11 @@ export const RECORDING_MIME = 'application/x-cebian-recording+json';
 // ─── Size / type limits ───
 
 export const MAX_IMAGE_SIZE = 5 * 1024 * 1024;      // 5 MB
-export const MAX_TEXT_FILE_SIZE = 100 * 1024;         // 100 KB
+// Composer text-file attachment 上限：提到 1 MB 后，绝大多数代码文件、长 log、
+// 中等 markdown 文档都能整篇附上。注意这个值只给「拖入 composer 的一次性 attachment」用；
+// mention chip（mention-file / mention-prompt / mention-skill）走 `MAX_INLINE_BODY`
+// (100 KB)，worker skill body 同上，pin 时每次 send 都跟着走，预算比一次性 attachment 紧。
+export const MAX_TEXT_FILE_SIZE = 1024 * 1024;        // 1 MB
 /** Cap recording JSON to keep prompt budget reasonable (~80k tokens worst case). */
 export const MAX_RECORDING_SIZE = 256 * 1024;         // 256 KB
 /** Hard cap on PDF attachment file size — the offscreen PDF.js pipeline

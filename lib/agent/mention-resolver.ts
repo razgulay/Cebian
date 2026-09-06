@@ -90,10 +90,10 @@ export function stripFrontmatter(content: string): string {
   }
 }
 
-/** Cap inline body length to keep prompt budget reasonable. A 100 KB cap
- *  matches MAX_TEXT_FILE_SIZE — large files should be selected as a regular
- *  attachment instead. The cap is applied AFTER frontmatter stripping so the
- *  budget reflects content the LLM will actually see.
+/** Mention chip body 的硬上限——pin 时每条 send 都跟着走，预算比普通 composer attachment 紧，
+ *  所以故意比 `MAX_TEXT_FILE_SIZE`（1 MB）小，固定在 100 KB。超过 100 KB 的文件应该作为普通
+ *  attachment 拖入 composer（上限 1 MB），而不是用 mention chip 引用。Cap 在 frontmatter
+ *  剥完之后再算，预算对应的是 LLM 真正会看到的内容。
  *
  *  Exported so worker skill hydration (in `entrypoints/background/agent/worker-runner.ts`)
  *  shares the same cap constant rather than maintaining a parallel `MAX_SKILL_BODY_CHARS`. */
