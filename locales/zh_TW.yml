@@ -192,15 +192,15 @@ settings:
     title: "進階"
     compaction:
       label: "上下文壓縮模型"
-      hint: "對話過長時用來自動壓縮歷史的模型，預設與對話模型相同。"
+      hint: "用於自動壓縮長對話的模型，預設與對話模型一致。"
       followMain: "與對話模型相同"
     domSubAgent:
       label: "DOM 子代理模型"
-      hint: "處理主對話模型委派的重頁面閱讀任務的便宜模型。關 = 關閉此功能。"
+      hint: "主對話模型委派重頁面閱讀任務時用的便宜模型。關=功能停用。"
       off: "關閉"
     workers:
       title: "Worker 模型"
-      hint: "為 4 個 worker role 各配一個專用模型，主代理可透過 `delegate_task` 工具委派子任務。預設「與對話模型相同」即繼承主模型選擇。"
+      hint: "為每個 worker role 各配一個模型，主代理透過 `delegate_task` 委派子任務。「與對話模型相同」=繼承。"
       followMain: "與對話模型相同"
       content_writer:
         label: "內容寫手"
@@ -216,6 +216,16 @@ settings:
         hint: "檢索檔案與 RAG 集合，輸出結構化摘要。"
   pageInteraction:
     title: "頁面互動"
+    ball:
+      label: "懸浮球"
+      hint: "網頁上顯示一個貼邊小圓球，點擊可開關側邊欄。"
+    toolbar:
+      label: "劃詞工具列"
+      hint: "選取文字時彈出快速工具列。"
+    model:
+      label: "工具列模型"
+      hint: "工具列所有動作使用的模型。選個快又便宜的即可。"
+      followMain: "與對話模型相同"
     pageScope:
       include: "僅在這些頁面生效"
       includeHint: "留空則在所有頁面生效。"
@@ -263,16 +273,6 @@ settings:
       transform: "輸出後處理指令稿（選填）"
       transformHint: "用 JavaScript 加工產生完畢的輸出。定義名為 transform(text, vars) 的函式，回傳要顯示的字串。vars 提供與提示詞範本相同的環境變數：selected_text、context、page_url、page_title、date、ui_language。指令稿出錯時，原始輸出會原樣顯示。"
       transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
-    ball:
-      label: "懸浮球"
-      hint: "在網頁上顯示一個貼邊的懸浮球，單擊可開啟或關閉側邊欄。"
-    toolbar:
-      label: "劃詞工具列"
-      hint: "選取文字時顯示快速工具列。"
-    model:
-      label: "工具列模型"
-      hint: "劃詞工具列使用的模型。通常選擇速度快、成本低的模型即可，預設與對話模型相同。"
-      followMain: "與對話模型相同"
     translate:
       label: "翻譯目標語言"
       hint: "工具列翻譯成的目標語言。"
@@ -444,16 +444,21 @@ settings:
       headers: "自訂 Headers"
   rag:
     title: "知識庫 (RAG)"
+    infrastructureTitle: "基礎設施"
+    retrievalRankingTitle: "檢索與排序"
     connectionTitle: "連線"
     connectionLabel: "Neon 連線字串"
-    connectionHint: "從 Neon 專案控制台取得。格式：postgresql://user:pass@host/db?sslmode=require"
+    connectionHint: "Neon 連線字串——從專案控制台取得。"
     testConnection: "測試連線"
     connectionOk: "已連線 — pgvector 就緒"
     connectionFailed: "連線失敗"
+    connectionStatusReady: "就緒"
+    connectionStatusWarn: "缺少 pgvector"
+    connectionStatusError: "連線失敗"
     pgvectorMissing: "已連線，但缺少 pgvector 擴充。請至 Neon 控制台 → Extensions 啟用。"
     bootstrapFailed: "建表失敗"
     embedderTitle: "Embedding 模型"
-    embedderHint: "預設指向本地 CLIProxyAPI（連接埠 8317）。任何 OpenAI 相容的 /embeddings 介面皆可。"
+    embedderHint: "OpenAI 相容的 `/embeddings` 介面，預設 CLIProxyAPI 連接埠 8317。"
     embedderBaseUrl: "Base URL"
     embedderApiKey: "API Key（選填）"
     embedderModel: "模型"
@@ -462,18 +467,35 @@ settings:
     chunkSize: "塊大小（字元）"
     chunkOverlap: "重疊（字元）"
     collections: "知識庫"
-    collectionsHint: "每個知識庫是對所選檔案的向量索引。在聊天輸入框的「知識庫」分組裡挑一個，會把 top-K 區塊附到你的訊息上。"
+    collectionsHint: "在聊天中選擇一個知識庫，把它的 top chunks 附到訊息裡。"
     noCollections: "尚無知識庫——點擊「新增知識庫」索引一批檔案。"
     rerankTitle: "重排序（第二層 — 可選）"
-    rerankHint: "用 cross-encoder 模型對第一層餘弦召回的候選重新打分，回傳 top-N。預設關閉；開啟可獲得更高品質的檢索，代價是每次傳送多一個 API 呼叫。"
+    rerankHint: "用 cross-encoder 對第一層候選重排。每次傳送多 1 次 API 呼叫。"
     rerankBaseUrl: "Rerank Base URL"
     rerankModel: "Rerank 模型"
     rerankApiKey: "Rerank API key（可選）"
     rerankTopN: "Rerank 後的 top-N"
+    ragSearchTitle: "代理 rag_search 工具"
+    ragSearchHint: "關閉——代理只看到傳送時預注入的 chunks。開啟後可在對話中主動查詢。"
+    # Card 2 — Contextual Retrieval（第 0 層）
+    contextualRetrievalTitle: "上下文檢索（第 0 層）"
+    contextualRetrievalHint: "關閉——chunks 按原文索引。開啟後可改善文件中段的召回。"
+    contextualLlmBaseUrl: "上下文 LLM Base URL"
+    contextualLlmModel: "上下文 LLM 模型"
+    contextualLlmApiKey: "上下文 LLM API Key（選填）"
+    # Card 3 — 檢索與排序
+    retrievalMode: "檢索模式"
+    retrievalModeHybrid: "混合（向量 + BM25）"
+    retrievalModeRecommendedBadge: "推薦"
+    retrievalModeHybridSubLabel: "結合向量相似度與關鍵字比對，召回更全面。"
+    retrievalModeVector: "僅向量"
+    hybridScoreWarning: "混合模式的相關性標尺（RRF）與純向量不同；之前設的門檻可能過高，建議先調到 0 試試。"
     pinGateTitle: "Pinned RAG 召回門檻"
-    pinGateHint: "當你 pin 一個知識庫時，這個門檻決定話題不相關時是否仍附帶 envelope。設為 0 關閉（始終附帶）。"
-    pinMinScore: "附帶所需最低餘弦分數 (0–1)"
-    pinMinScoreHint: "Jina 模型的相關命中通常在 0.3–0.9，話題不相關時多在 0.2–0.4。如要開啟門檻，建議從 0.35 起。"
+    pinGateHint: "話題無關時跳過已 pin 的 envelope。0 = 始終附帶。"
+    pinMinScore: "最低相關性分數"
+    pinMinScoreHint: "數值越低召回越多，越高越嚴格。建議從 0 開始嘗試。"
+    # 新增集合彈窗內的內聯提示，僅在上下文檢索開啟時顯示。
+    contextualHint: "chunks 將帶上 LLM 生成的上下文前綴（每塊約 1 次 LLM 呼叫）。"
     newCollection: "新增知識庫"
     newCollectionHint: "先選擇資料夾（已有或新建），再把檔案放進去。索引用本地完成——檔案留在你磁碟上，向量寫入 Neon。"
     newCollectionName: "知識庫名稱"
@@ -1044,6 +1066,8 @@ tools:
   runSkill: "正在執行技能腳本 $1"
   # $1 = RAG 知識庫名稱
   ragInspect: "正在查看 RAG 知識庫 $1"
+  # $1 = RAG 知識庫名稱，$2 = 查詢關鍵詞
+  ragSearch: "正在 RAG 知識庫 $1 中檢索 $2"
   # $1 = MCP 伺服器 slug（展示形式），$2 = 遠端工具名
   mcpCall: "$1 · $2"
   fs:

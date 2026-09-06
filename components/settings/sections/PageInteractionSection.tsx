@@ -29,6 +29,7 @@ import {
 } from '@/lib/page-actions/edit-config';
 import { isBuiltinPageActionId, type PageActionDraft, type PageActionsConfig } from '@/lib/page-actions/types';
 import { t } from '@/lib/i18n';
+import { CircleDot, MousePointer2, Sliders, Zap } from 'lucide-react';
 
 /** 悬浮球 / 工具条的生效范围字段。两块 UI 的干扰场景不同（用户要求分开配置），故各挂
  *  一份；缩进一级表示它从属上面那个开关。 */
@@ -76,15 +77,21 @@ function PageInteractionPanel({ onEditAction }: { onEditAction: (id: string) => 
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
       <h2 className="text-base font-semibold">{t('settings.pageInteraction.title')}</h2>
 
-      <div className="space-y-3">
+      {/* ─── Card: Floating ball ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
         <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0 space-y-1">
-            <Label htmlFor="page-show-ball" className="text-sm">
-              {t('settings.pageInteraction.ball.label')}
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {t('settings.pageInteraction.ball.hint')}
-            </p>
+          <div className="flex items-center gap-3 min-w-0">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400 shrink-0">
+              <CircleDot className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <Label htmlFor="page-show-ball" className="text-sm">
+                {t('settings.pageInteraction.ball.label')}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.pageInteraction.ball.hint')}
+              </p>
+            </div>
           </div>
           <Switch
             id="page-show-ball"
@@ -98,17 +105,23 @@ function PageInteractionPanel({ onEditAction }: { onEditAction: (id: string) => 
           onChange={(next) => patch({ ballPages: next })}
           disabled={!settings.showFloatingBall}
         />
-      </div>
+      </section>
 
-      <div className="space-y-3">
+      {/* ─── Card: Selection toolbar ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
         <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0 space-y-1">
-            <Label htmlFor="page-show-toolbar" className="text-sm">
-              {t('settings.pageInteraction.toolbar.label')}
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {t('settings.pageInteraction.toolbar.hint')}
-            </p>
+          <div className="flex items-center gap-3 min-w-0">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400 shrink-0">
+              <MousePointer2 className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <Label htmlFor="page-show-toolbar" className="text-sm">
+                {t('settings.pageInteraction.toolbar.label')}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.pageInteraction.toolbar.hint')}
+              </p>
+            </div>
           </div>
           <Switch
             id="page-show-toolbar"
@@ -122,35 +135,49 @@ function PageInteractionPanel({ onEditAction }: { onEditAction: (id: string) => 
           onChange={(next) => patch({ toolbarPages: next })}
           disabled={!settings.showSelectionToolbar}
         />
-      </div>
+      </section>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0 space-y-1">
-          <Label className="text-sm">{t('settings.pageInteraction.model.label')}</Label>
-          <p className="text-xs text-muted-foreground">
-            {t('settings.pageInteraction.model.hint')}
-          </p>
+      {/* ─── Card: Toolbar model ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-purple-50 text-purple-600 dark:bg-purple-950/40 dark:text-purple-400 shrink-0">
+              <Sliders className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <Label className="text-sm">{t('settings.pageInteraction.model.label')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.pageInteraction.model.hint')}
+              </p>
+            </div>
+          </div>
+          <div className="shrink-0">
+            <ModelSelector
+              activeModel={settings.toolbarModel ?? null}
+              configuredProviders={providers}
+              customProviders={customProviderList}
+              onSelect={(provider, modelId) => patch({ toolbarModel: { provider, modelId } })}
+              inheritOption={{
+                label: t('settings.pageInteraction.model.followMain'),
+                onSelect: () => patch({ toolbarModel: undefined }),
+              }}
+            />
+          </div>
         </div>
-        <div className="shrink-0">
-          <ModelSelector
-            activeModel={settings.toolbarModel ?? null}
-            configuredProviders={providers}
-            customProviders={customProviderList}
-            onSelect={(provider, modelId) => patch({ toolbarModel: { provider, modelId } })}
-            inheritOption={{
-              label: t('settings.pageInteraction.model.followMain'),
-              onSelect: () => patch({ toolbarModel: undefined }),
-            }}
-          />
-        </div>
-      </div>
+      </section>
 
-      <div className="space-y-2">
-        <div className="space-y-1">
-          <Label className="text-sm">{t('settings.pageInteraction.actions.title')}</Label>
-          <p className="text-xs text-muted-foreground">
-            {t('settings.pageInteraction.actions.hint')}
-          </p>
+      {/* ─── Card: Toolbar actions ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <div className="flex items-center gap-3">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-orange-50 text-orange-600 dark:bg-orange-950/40 dark:text-orange-400 shrink-0">
+            <Zap className="size-4" />
+          </span>
+          <div className="space-y-1">
+            <Label className="text-sm">{t('settings.pageInteraction.actions.title')}</Label>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.pageInteraction.actions.hint')}
+            </p>
+          </div>
         </div>
         <ToolbarActionList
           actions={actions}
@@ -160,7 +187,7 @@ function PageInteractionPanel({ onEditAction }: { onEditAction: (id: string) => 
           onEdit={onEditAction}
           onCreate={() => onEditAction(NEW_ACTION_SEGMENT)}
         />
-      </div>
+      </section>
     </div>
   );
 }

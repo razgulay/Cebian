@@ -199,31 +199,41 @@ settings:
     title: "Advanced"
     compaction:
       label: "Context compaction model"
-      hint: "The model used to automatically compact overly long conversations. Defaults to the conversation model."
+      hint: "Model used to compact long conversations. Defaults to the conversation model."
       followMain: "Same as conversation model"
     domSubAgent:
       label: "DOM sub-agent model"
-      hint: "Cheap model that handles heavy page-reading tasks delegated by the main chat model. Off = feature disabled."
+      hint: "Cheap model for page-reading tasks delegated by the main chat. Off = feature disabled."
       off: "Off (disabled)"
     workers:
       title: "Worker models"
-      hint: "Dedicated model for each worker role that the main agent can delegate tasks to via the `delegate_task` tool. Leave on \"Same as conversation model\" to inherit the main model's choice."
+      hint: "One model per worker role — the main agent delegates via `delegate_task`. Leave on “Same as conversation model” to inherit."
       followMain: "Same as conversation model"
       content_writer:
         label: "Content writer"
-        hint: "Reads sources (files / RAG collections) and writes long-form content into a VFS file. Doesn't touch code."
+        hint: "Reads sources and writes long-form content into a VFS file."
       frontend_coder:
         label: "Frontend coder"
-        hint: "Writes HTML / CSS / JS into a VFS file. Doesn't call browser tools."
+        hint: "Writes HTML / CSS / JS into a VFS file. No browser tools."
       reviewer:
         label: "Reviewer"
-        hint: "Reads the worker's output file and tests it via inspect / execute_js. Doesn't write files."
+        hint: "Reads the worker's output and tests it via inspect / execute_js."
       researcher:
         label: "Researcher"
         hint: "Searches files and RAG collections to produce a structured summary."
       # Future: add custom roles here when the feature lands.
   pageInteraction:
     title: "Page interaction"
+    ball:
+      label: "Floating ball"
+      hint: "Show a pinned ball on web pages; click to open or close the sidebar."
+    toolbar:
+      label: "Selection toolbar"
+      hint: "Show a quick-action toolbar when you select text on a page."
+    model:
+      label: "Toolbar model"
+      hint: "Model for all toolbar actions. A fast, low-cost model is usually enough."
+      followMain: "Same as conversation model"
     pageScope:
       include: "Show only on these pages"
       includeHint: "Leave empty to apply on every page."
@@ -240,7 +250,7 @@ settings:
       remove: "Remove pattern $1"
     actions:
       title: "Toolbar actions"
-      hint: "Buttons appear on the toolbar in this order. Built-in actions can use a custom system prompt, be scoped or turned off; add your own actions with a custom name and prompt."
+      hint: "Toolbar buttons in display order. Toggle, customize built-ins, or add your own."
       builtin: "Built-in"
       custom: "Custom"
       pageScoped: "Scoped"
@@ -271,16 +281,6 @@ settings:
       transform: "Post-process script (optional)"
       transformHint: "JavaScript for post-processing the completed output. Define a function named transform(text, vars) that returns the string to display. vars provides the same environment variables as prompt templates: selected_text, context, page_url, page_title, date, ui_language. If the script fails, the original output is displayed unchanged."
       transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
-    ball:
-      label: "Floating ball"
-      hint: "Show a pinned ball on web pages; click it to open or close the sidebar."
-    toolbar:
-      label: "Selection toolbar"
-      hint: "Show a quick-action toolbar when you select text on a page."
-    model:
-      label: "Toolbar model"
-      hint: "The model used by all toolbar actions. A fast, low-cost model is usually enough. Defaults to the conversation model."
-      followMain: "Same as conversation model"
     translate:
       label: "Translation target language"
       hint: "The language the toolbar translates into."
@@ -452,16 +452,21 @@ settings:
       headers: "Custom headers"
   rag:
     title: "Knowledge (RAG)"
+    infrastructureTitle: "Infrastructure"
+    retrievalRankingTitle: "Retrieval & Ranking"
     connectionTitle: "Connection"
     connectionLabel: "Neon connection string"
-    connectionHint: "Get this from your Neon project dashboard. Format: postgresql://user:pass@host/db?sslmode=require"
+    connectionHint: "Neon connection string — get it from your project dashboard."
     testConnection: "Test connection"
     connectionOk: "Connected — pgvector ready"
     connectionFailed: "Connection failed"
+    connectionStatusReady: "Ready"
+    connectionStatusWarn: "pgvector missing"
+    connectionStatusError: "Connection failed"
     pgvectorMissing: "Connected, but pgvector extension is missing. Enable it in your Neon console → Extensions."
     bootstrapFailed: "Schema bootstrap failed"
     embedderTitle: "Embedding model"
-    embedderHint: "Defaults to the local CLIProxyAPI on port 8317. Any OpenAI-compatible /embeddings endpoint works."
+    embedderHint: "OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI on port 8317."
     embedderBaseUrl: "Base URL"
     embedderApiKey: "API key (optional)"
     embedderModel: "Model"
@@ -470,18 +475,35 @@ settings:
     chunkSize: "Chunk size (chars)"
     chunkOverlap: "Overlap (chars)"
     collections: "Collections"
-    collectionsHint: "Each collection is a vector search index over the files you picked. Pick one in the chat composer to attach its top-K chunks to your message."
+    collectionsHint: "Pick a collection in chat to attach its top chunks to your message."
     noCollections: "No collections yet — click \"New collection\" to index some files."
     rerankTitle: "Rerank (Lớp 2 — optional)"
-    rerankHint: "Re-orders the Lớp-1 cosine candidates using a cross-encoder model and returns the top-N. Off by default; turn on for higher-quality retrieval at the cost of an extra API call per send."
+    rerankHint: "Cross-encoder rerank over Lớp-1 candidates. +1 API call per send."
     rerankBaseUrl: "Rerank Base URL"
     rerankModel: "Rerank model"
     rerankApiKey: "Rerank API key (optional)"
     rerankTopN: "Top-N after rerank"
+    ragSearchTitle: "Agentic rag_search tool"
+    ragSearchHint: "Off — agent only sees the chunks pre-injected at send time. On lets it query during the conversation."
+    # Card 2 — Contextual Retrieval (Lớp 0)
+    contextualRetrievalTitle: "Contextual Retrieval (Lớp 0)"
+    contextualRetrievalHint: "Off — chunks indexed as-is. On improves recall for mid-document passages."
+    contextualLlmBaseUrl: "Contextual LLM Base URL"
+    contextualLlmModel: "Contextual LLM model"
+    contextualLlmApiKey: "Contextual LLM API key (optional)"
+    # Card 3 — Retrieval & Ranking
+    retrievalMode: "Retrieval mode"
+    retrievalModeHybrid: "Hybrid (Vector + BM25)"
+    retrievalModeRecommendedBadge: "Recommended"
+    retrievalModeHybridSubLabel: "Combines vector similarity with keyword match for best recall."
+    retrievalModeVector: "Vector only"
+    hybridScoreWarning: "Hybrid mode uses a different relevance scale (RRF). Your previous threshold may need lowering — try 0 to start."
     pinGateTitle: "Pinned RAG relevance gate"
-    pinGateHint: "When you pin a Knowledge collection, this gate decides whether to attach its envelope for an off-topic question. Setting 0 disables the gate (always attach)."
-    pinMinScore: "Min cosine score to attach (0–1)"
-    pinMinScoreHint: "Typical Jina similarity sits 0.3–0.9 for relevant hits, 0.2–0.4 for off-topic. Start at 0.35 if you want the gate active."
+    pinGateHint: "Skip pinned envelopes when the question looks off-topic. 0 = always attach."
+    pinMinScore: "Min relevance score"
+    pinMinScoreHint: "Lower = more results, higher = stricter relevance. Try 0 to start."
+    # Inline note inside New collection dialog when Contextual Retrieval is on.
+    contextualHint: "Chunks will be indexed with LLM-generated context prefixes (~1 LLM call per chunk)."
     newCollection: "New collection"
     newCollectionHint: "Pick a folder (existing or new), then drop files into it. Indexing runs locally — files stay on your disk, vectors go to Neon."
     newCollectionName: "Collection name"
@@ -1072,6 +1094,8 @@ tools:
   runSkill: "Running skill script $1"
   # $1 = RAG collection name
   ragInspect: "Inspecting RAG collection $1"
+  # $1 = RAG collection name, $2 = query text
+  ragSearch: "Searching RAG collection $1 for $2"
   # $1 = MCP server slug (display form), $2 = remote tool name
   mcpCall: "$1 · $2"
   fs:

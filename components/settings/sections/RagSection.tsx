@@ -1,19 +1,27 @@
 //
 // RagSection — settings UI for the RAG (knowledge base) system.
 //
-// Layout:
-//   1. Connection block — Neon connection string + Test + bootstrap.
-//   2. Embedder config — base URL / API key / model / dim.
-//   3. Chunking config — size + overlap.
-//   4. Collections list — each collection with sources, chunk count, and
-//      actions (re-index, delete).
+// Layout (5 work-stream cards in dependency order, Subtask U1):
+//   1. Infrastructure        — Neon connection + Embedding model.
+//   2. Ingestion Pipeline    — Chunking + nested Contextual Retrieval (Lớp 0).
+//   3. Retrieval & Ranking   — Retrieval mode radio + relevance gate + Rerank.
+//   4. Agentic Capability    — opt-in `rag_search` tool toggle (Subtask 4).
+//   5. Data Management       — Collections list (create / rename / re-index / delete).
 //
-// New-collection flow opens a modal with: name input, file picker
-// (multi-file + folder), and a live progress bar during indexing.
+// "Progressive disclosure": each opt-in feature (Contextual Retrieval,
+// Rerank, rag_search) sits behind a `<Switch>` so the section collapses
+// to title + 1-line hint when off. Retrieval mode uses a `RadioGroup`
+// because it's a mutually exclusive choice between two valid paths.
+//
+// New-collection flow opens a modal with: folder picker, file picker
+// (multi-file + folder), inline contextual-hint when CR is on, and a
+// live progress bar during indexing.
 //
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Switch } from '@/components/ui/switch';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Badge } from '@/components/ui/badge';
 import {
   Database,
   Plus,
@@ -22,7 +30,6 @@ import {
   Loader2,
   FileText,
   CheckCircle2,
-  AlertCircle,
   Sparkles,
   Folder,
   FolderPlus,
@@ -31,6 +38,9 @@ import {
   FolderOpen,
   Pencil,
   X,
+  Layers,
+  SlidersHorizontal,
+  Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -90,17 +100,44 @@ function isIngestable(file: File): boolean {
   return SUPPORTED_TEXT_EXT.some((ext) => name.endsWith(ext));
 }
 
-/** Small inline status chip used by the connection test. */
-function StatusDot({ kind }: { kind: 'idle' | 'ok' | 'warn' | 'err' }) {
-  if (kind === 'idle') return null;
-  const Icon = kind === 'ok' ? CheckCircle2 : AlertCircle;
-  const cls =
-    kind === 'ok'
-      ? 'text-emerald-500'
-      : kind === 'warn'
-        ? 'text-amber-500'
-        : 'text-destructive';
-  return <Icon className={`size-3.5 ${cls}`} />;
+/** Connection-state chip — colored dot + short label next to Test.
+ *  Mirrors the `size-2 rounded-full` dot pattern from
+ *  `components/settings/mcp/MCPServerRow.tsx` so the connection
+ *  state is read in 200ms instead of 1000ms. Returns null when idle
+ *  (haven't tested yet) so we don't clutter the row before the
+ *  first click. */
+function ConnectionStatusChip({
+  state,
+}: {
+  state:
+    | { kind: 'idle' }
+    | { kind: 'testing' }
+    | { kind: 'ok'; pgvector: boolean; version: string }
+    | { kind: 'err'; message: string };
+}) {
+  if (state.kind === 'idle' || state.kind === 'testing') return null;
+  if (state.kind === 'err') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-destructive">
+        <span aria-hidden className="size-2 rounded-full bg-destructive shrink-0" />
+        {t('settings.rag.connectionStatusError')}
+      </span>
+    );
+  }
+  if (!state.pgvector) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+        <span aria-hidden className="size-2 rounded-full bg-amber-500 shrink-0" />
+        {t('settings.rag.connectionStatusWarn')}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+      <span aria-hidden className="size-2 rounded-full bg-emerald-500 shrink-0" />
+      {t('settings.rag.connectionStatusReady')}
+    </span>
+  );
 }
 
 export function RagSection() {
@@ -112,12 +149,27 @@ export function RagSection() {
     embedderDim: 1536,
     chunkSize: 800,
     chunkOverlap: 100,
+    // Subtask 2 — default Hybrid per UI spec; can flip to 'vector' via Card 3 radio.
+    retrievalMode: 'hybrid',
+    // Subtask 3 — opt-in. Storage layer also seeds these from
+    // `DEFAULT_RAG_SETTINGS` on first read, but listing them explicitly
+    // keeps the `as RagSettings` cast honest and the renderer typesafe.
+    contextualRetrievalEnabled: false,
+    contextualLlmBaseUrl: 'http://localhost:8317/v1',
+    contextualLlmApiKey: '',
+    contextualLlmModel: 'gpt-4o-mini',
     rerankEnabled: false,
     rerankBaseUrl: 'http://localhost:8317/v1',
     rerankApiKey: '',
     rerankModel: 'rerank-english-v3.0',
     rerankTopN: 3,
     pinMinScore: 0,
+    // Subtask 4 — off by default so the tool isn't shipped unless the
+    // user opts in. Storage layer (`ragSettings`) seeds the missing
+    // fields from `DEFAULT_RAG_SETTINGS` on first read, so omitting
+    // this here would still resolve to `false` at runtime, but listing
+    // it explicitly keeps the `as RagSettings` cast honest.
+    ragSearchEnabled: false,
   } as RagSettings);
   const [collections, setCollections] = useStorageItem(ragCollections, [] as RagCollection[]);
 
@@ -295,140 +347,124 @@ export function RagSection() {
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
       <h2 className="text-base font-semibold">{t('settings.rag.title')}</h2>
 
-      {/* ─── Connection ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <div className="flex items-center gap-2">
-          <Database className="size-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium">{t('settings.rag.connectionTitle')}</h3>
-        </div>
-        <p className="text-xs text-muted-foreground">{t('settings.rag.connectionHint')}</p>
+      {/* ─── Card 1: Hạ tầng / Infrastructure — Connection + Embedding model ───
+          Originally these were two separate sections in the pre-U1 file;
+          merged into one outer card per the approved "5 work-stream cards"
+          plan. Two inner sub-blocks each get an h4 to keep the visual
+          rhythm consistent with Cards 2 / 3's nested blocks. */}
+      <section className="space-y-4 rounded-lg border border-border p-4">
+        <h3 className="text-sm font-medium flex items-center gap-2">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400">
+            <Database className="size-4" />
+          </span>
+          {t('settings.rag.infrastructureTitle')}
+        </h3>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="rag-neon" className="text-xs">{t('settings.rag.connectionLabel')}</Label>
-          <Input
-            id="rag-neon"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="postgresql://user:pass@host/db?sslmode=require"
-            value={settings.neonConnectionString}
-            onChange={(e) => setSettings({ ...settings, neonConnectionString: e.target.value })}
-          />
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!settings.neonConnectionString || testState.kind === 'testing'}
-            onClick={() => void handleTest()}
-          >
-            {testState.kind === 'testing' ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <CheckCircle2 className="size-3.5" />
-            )}
-            {t('settings.rag.testConnection')}
-          </Button>
-          <StatusDot
-            kind={
-              testState.kind === 'ok'
-                ? testState.pgvector
-                  ? 'ok'
-                  : 'warn'
-                : testState.kind === 'err'
-                  ? 'err'
-                  : 'idle'
-            }
-          />
-          {testState.kind === 'ok' && (
-            <span className="text-xs text-muted-foreground truncate">
-              {testState.pgvector
-                ? t('settings.rag.connectionOk')
-                : t('settings.rag.pgvectorMissing')}
-            </span>
-          )}
-          {testState.kind === 'err' && (
-            <span className="text-xs text-destructive truncate">
-              {testState.message}
-            </span>
-          )}
-        </div>
-      </section>
-
-      {/* ─── Embedder ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium">{t('settings.rag.embedderTitle')}</h3>
-        <p className="text-xs text-muted-foreground">{t('settings.rag.embedderHint')}</p>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5 col-span-2">
-            <Label className="text-xs">{t('settings.rag.embedderBaseUrl')}</Label>
-            <Input
-              value={settings.embedderBaseUrl}
-              onChange={(e) => setSettings({ ...settings, embedderBaseUrl: e.target.value })}
-              placeholder="http://localhost:8317/v1"
-            />
+        {/* Sub-block: Connection */}
+        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
+          <div className="flex items-center gap-2">
+            <Database className="size-4 text-muted-foreground" />
+            <h4 className="text-sm font-medium">{t('settings.rag.connectionTitle')}</h4>
           </div>
+          <p className="text-xs text-muted-foreground">{t('settings.rag.connectionHint')}</p>
+
           <div className="space-y-1.5">
-            <Label className="text-xs">{t('settings.rag.embedderApiKey')}</Label>
+            <Label htmlFor="rag-neon" className="text-xs">{t('settings.rag.connectionLabel')}</Label>
             <Input
+              id="rag-neon"
               type="password"
               autoComplete="off"
-              value={settings.embedderApiKey}
-              onChange={(e) => setSettings({ ...settings, embedderApiKey: e.target.value })}
+              spellCheck={false}
+              placeholder="postgresql://user:pass@host/db?sslmode=require"
+              value={settings.neonConnectionString}
+              onChange={(e) => setSettings({ ...settings, neonConnectionString: e.target.value })}
             />
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('settings.rag.embedderDim')}</Label>
-            <Input
-              type="number"
-              min={1}
-              max={4096}
-              value={settings.embedderDim}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                if (Number.isFinite(v) && v > 0) setSettings({ ...settings, embedderDim: v });
-              }}
-            />
+
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!settings.neonConnectionString || testState.kind === 'testing'}
+              onClick={() => void handleTest()}
+            >
+              {testState.kind === 'testing' ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-3.5" />
+              )}
+              {t('settings.rag.testConnection')}
+            </Button>
+            <ConnectionStatusChip state={testState} />
+            {testState.kind === 'ok' && (
+              <span className="text-xs text-muted-foreground truncate">
+                v{testState.version}
+              </span>
+            )}
+            {testState.kind === 'err' && (
+              <span className="text-xs text-destructive truncate">
+                {testState.message}
+              </span>
+            )}
           </div>
-          <div className="space-y-1.5 col-span-2">
-            <Label className="text-xs">{t('settings.rag.embedderModel')}</Label>
-            <Input
-              value={settings.defaultEmbedModel}
-              onChange={(e) => setSettings({ ...settings, defaultEmbedModel: e.target.value })}
-              placeholder="text-embedding-3-small"
-            />
+        </div>
+
+        {/* Sub-block: Embedding model */}
+        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
+          <h4 className="text-sm font-medium">{t('settings.rag.embedderTitle')}</h4>
+          <p className="text-xs text-muted-foreground">{t('settings.rag.embedderHint')}</p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5 col-span-2">
+              <Label className="text-xs">{t('settings.rag.embedderBaseUrl')}</Label>
+              <Input
+                value={settings.embedderBaseUrl}
+                onChange={(e) => setSettings({ ...settings, embedderBaseUrl: e.target.value })}
+                placeholder="http://localhost:8317/v1"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('settings.rag.embedderApiKey')}</Label>
+              <Input
+                type="password"
+                autoComplete="off"
+                value={settings.embedderApiKey}
+                onChange={(e) => setSettings({ ...settings, embedderApiKey: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('settings.rag.embedderDim')}</Label>
+              <Input
+                type="number"
+                min={1}
+                max={4096}
+                value={settings.embedderDim}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (Number.isFinite(v) && v > 0) setSettings({ ...settings, embedderDim: v });
+                }}
+              />
+            </div>
+            <div className="space-y-1.5 col-span-2">
+              <Label className="text-xs">{t('settings.rag.embedderModel')}</Label>
+              <Input
+                value={settings.defaultEmbedModel}
+                onChange={(e) => setSettings({ ...settings, defaultEmbedModel: e.target.value })}
+                placeholder="text-embedding-3-small"
+              />
+            </div>
           </div>
         </div>
       </section>
 
-      {/* ─── Pinned RAG gate ─── */}
+      {/* ─── Card 2: Nạp tài liệu / Ingestion Pipeline — Chunking ─── */}
       <section className="space-y-3 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium">{t('settings.rag.pinGateTitle')}</h3>
-        <p className="text-xs text-muted-foreground">{t('settings.rag.pinGateHint')}</p>
-        <div className="space-y-1.5 max-w-xs">
-          <Label className="text-xs">{t('settings.rag.pinMinScore')}</Label>
-          <Input
-            type="number"
-            min={0}
-            max={1}
-            step={0.05}
-            value={settings.pinMinScore}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (Number.isFinite(v) && v >= 0 && v <= 1) setSettings({ ...settings, pinMinScore: v });
-            }}
-          />
-          <p className="text-[0.7rem] text-muted-foreground">
-            {t('settings.rag.pinMinScoreHint')}
-          </p>
-        </div>
-      </section>
-
-      {/* ─── Chunking ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium">{t('settings.rag.chunkingTitle')}</h3>
+        <h3 className="text-sm font-medium flex items-center gap-2">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-purple-50 text-purple-600 dark:bg-purple-950/40 dark:text-purple-400">
+            <Layers className="size-4" />
+          </span>
+          {t('settings.rag.chunkingTitle')}
+        </h3>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
             <Label className="text-xs">{t('settings.rag.chunkSize')}</Label>
@@ -459,75 +495,275 @@ export function RagSection() {
             />
           </div>
         </div>
+
+        {/* Card 2 nested: Contextual Retrieval (Lớp 0). Off-by-default
+            per Anthropic recipe — zero extra LLM cost unless the user
+            opts in. Field wiring mirrors the Rerank card: a Switch +
+            collapse / expand grid of inputs. */}
+        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="size-4 text-muted-foreground" />
+              <div>
+                <h4 className="text-sm font-medium">
+                  {t('settings.rag.contextualRetrievalTitle')}
+                </h4>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.rag.contextualRetrievalHint')}
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={settings.contextualRetrievalEnabled}
+              onCheckedChange={(v) =>
+                setSettings({ ...settings, contextualRetrievalEnabled: v })
+              }
+            />
+          </div>
+
+          {settings.contextualRetrievalEnabled && (
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <div className="space-y-1.5 col-span-2">
+                <Label className="text-xs">{t('settings.rag.contextualLlmBaseUrl')}</Label>
+                <Input
+                  value={settings.contextualLlmBaseUrl}
+                  onChange={(e) =>
+                    setSettings({ ...settings, contextualLlmBaseUrl: e.target.value })
+                  }
+                  placeholder="http://localhost:8317/v1"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('settings.rag.contextualLlmModel')}</Label>
+                <Input
+                  value={settings.contextualLlmModel}
+                  onChange={(e) =>
+                    setSettings({ ...settings, contextualLlmModel: e.target.value })
+                  }
+                  placeholder="gpt-4o-mini"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('settings.rag.contextualLlmApiKey')}</Label>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={settings.contextualLlmApiKey}
+                  onChange={(e) =>
+                    setSettings({ ...settings, contextualLlmApiKey: e.target.value })
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
-      {/* ─── Rerank (Lớp 2 — optional) ─── */}
+      {/* ─── Card 3: Retrieval & Ranking ───
+          Outer h3 + 3 sub-blocks (each h4): Retrieval mode, Relevance gate,
+          Rerank. Matches the visual rhythm of Card 1 (h3 + 2 sub-blocks)
+          and Card 2 (h3 + nested CR sub-card). The retrieval-mode and
+          relevance-gate sub-blocks stay unbordered (always-on controls);
+          Rerank stays as a bordered nested sub-card (opt-in toggle). */}
+      <section className="space-y-4 rounded-lg border border-border p-4">
+        <h3 className="text-sm font-medium flex items-center gap-2">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+            <SlidersHorizontal className="size-4" />
+          </span>
+          {t('settings.rag.retrievalRankingTitle')}
+        </h3>
+
+        {/* Sub-block: Retrieval mode radio. Hybrid is the recommended
+            default per the UI spec; flip to Vector-only via the radio. */}
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium">{t('settings.rag.retrievalMode')}</h4>
+          <RadioGroup
+            value={settings.retrievalMode}
+            onValueChange={(v) =>
+              setSettings({ ...settings, retrievalMode: v as 'vector' | 'hybrid' })
+            }
+            className="gap-2"
+          >
+            <label
+              className={cn(
+                'flex w-full items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors',
+                settings.retrievalMode === 'hybrid'
+                  ? 'border-emerald-500 bg-emerald-50/30 ring-1 ring-emerald-500/20 dark:bg-emerald-950/20'
+                  : 'border-border hover:bg-accent/50',
+              )}
+            >
+              <RadioGroupItem value="hybrid" className="mt-0.5" />
+              <span className="flex-1 space-y-1">
+                <span className="flex items-center gap-2">
+                  <span className="text-sm font-medium">
+                    {t('settings.rag.retrievalModeHybrid')}
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className="border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400 text-[0.65rem] h-4 px-1.5"
+                  >
+                    {t('settings.rag.retrievalModeRecommendedBadge')}
+                  </Badge>
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  {t('settings.rag.retrievalModeHybridSubLabel')}
+                </span>
+              </span>
+            </label>
+            <label
+              className={cn(
+                'flex w-full items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors',
+                settings.retrievalMode === 'vector'
+                  ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                  : 'border-border hover:bg-accent/50',
+              )}
+            >
+              <RadioGroupItem value="vector" className="mt-0.5" />
+              <span className="flex-1 space-y-1">
+                <span className="block text-sm font-medium">
+                  {t('settings.rag.retrievalModeVector')}
+                </span>
+              </span>
+            </label>
+          </RadioGroup>
+          {/* Hybrid-score-scale warning — only visible when the user has
+              both switched to Hybrid AND already set a non-zero threshold.
+              Cosine thresholds from the pre-Subtask-2 era sit in 0.3–0.5;
+              RRF tops out around 0.033, so a 0.35 gate would silently
+              filter every result. Nudge the user to start at 0. */}
+          {settings.retrievalMode === 'hybrid' && settings.pinMinScore > 0 && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+              {t('settings.rag.hybridScoreWarning')}
+            </div>
+          )}
+        </div>
+
+        {/* Sub-block: Relevance gate. Moved here from a standalone card so
+            all retrieval-time controls sit together. Label renamed from
+            "Min cosine score to attach (0–1)" → "Min relevance score" so
+            it makes sense under both modes (cosine AND RRF). */}
+        <div className="space-y-1.5">
+          <h4 className="text-sm font-medium">{t('settings.rag.pinGateTitle')}</h4>
+          <p className="text-xs text-muted-foreground">{t('settings.rag.pinGateHint')}</p>
+          <div className="space-y-1.5 max-w-xs pt-1">
+            <Label className="text-xs">{t('settings.rag.pinMinScore')}</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.pinMinScore}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (Number.isFinite(v) && v >= 0 && v <= 1) {
+                  setSettings({ ...settings, pinMinScore: v });
+                }
+              }}
+            />
+            <p className="text-[0.7rem] text-muted-foreground">
+              {t('settings.rag.pinMinScoreHint')}
+            </p>
+          </div>
+        </div>
+
+        {/* Sub-block: Rerank (Lớp 2 — optional). Bordered sub-card because
+            it's an opt-in toggle — when off the user still sees the toggle
+            row but the inputs collapse, matching the opt-in pattern of
+            Card 2's nested Contextual Retrieval sub-card. */}
+        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Sparkles className="size-4 text-muted-foreground" />
+              <div>
+                <h4 className="text-sm font-medium">{t('settings.rag.rerankTitle')}</h4>
+                <p className="text-xs text-muted-foreground">{t('settings.rag.rerankHint')}</p>
+              </div>
+            </div>
+            <Switch
+              checked={settings.rerankEnabled}
+              onCheckedChange={(v) => setSettings({ ...settings, rerankEnabled: v })}
+            />
+          </div>
+
+          {settings.rerankEnabled && (
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <div className="space-y-1.5 col-span-2">
+                <Label className="text-xs">{t('settings.rag.rerankBaseUrl')}</Label>
+                <Input
+                  value={settings.rerankBaseUrl}
+                  onChange={(e) => setSettings({ ...settings, rerankBaseUrl: e.target.value })}
+                  placeholder="http://localhost:8317/v1"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('settings.rag.rerankModel')}</Label>
+                <Input
+                  value={settings.rerankModel}
+                  onChange={(e) => setSettings({ ...settings, rerankModel: e.target.value })}
+                  placeholder="rerank-english-v3.0"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t('settings.rag.rerankTopN')}</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={settings.rerankTopN}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    if (Number.isFinite(v) && v > 0) setSettings({ ...settings, rerankTopN: v });
+                  }}
+                />
+              </div>
+              <div className="space-y-1.5 col-span-2">
+                <Label className="text-xs">{t('settings.rag.rerankApiKey')}</Label>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={settings.rerankApiKey}
+                  onChange={(e) => setSettings({ ...settings, rerankApiKey: e.target.value })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ─── Card 4: Agentic `rag_search` tool (Subtask 4 — opt-in) ─── */}
       <section className="space-y-3 rounded-lg border border-border p-4">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Sparkles className="size-4 text-muted-foreground" />
+          <div className="flex items-center gap-3">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400 shrink-0">
+              <Bot className="size-4" />
+            </span>
             <div>
-              <h3 className="text-sm font-medium">{t('settings.rag.rerankTitle')}</h3>
-              <p className="text-xs text-muted-foreground">{t('settings.rag.rerankHint')}</p>
+              <h3 className="text-sm font-medium">{t('settings.rag.ragSearchTitle')}</h3>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.rag.ragSearchHint')}
+              </p>
             </div>
           </div>
           <Switch
-            checked={settings.rerankEnabled}
-            onCheckedChange={(v) => setSettings({ ...settings, rerankEnabled: v })}
+            checked={settings.ragSearchEnabled}
+            onCheckedChange={(v) => setSettings({ ...settings, ragSearchEnabled: v })}
           />
         </div>
-
-        {settings.rerankEnabled && (
-          <div className="grid grid-cols-2 gap-3 pt-1">
-            <div className="space-y-1.5 col-span-2">
-              <Label className="text-xs">{t('settings.rag.rerankBaseUrl')}</Label>
-              <Input
-                value={settings.rerankBaseUrl}
-                onChange={(e) => setSettings({ ...settings, rerankBaseUrl: e.target.value })}
-                placeholder="http://localhost:8317/v1"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">{t('settings.rag.rerankModel')}</Label>
-              <Input
-                value={settings.rerankModel}
-                onChange={(e) => setSettings({ ...settings, rerankModel: e.target.value })}
-                placeholder="rerank-english-v3.0"
-                spellCheck={false}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">{t('settings.rag.rerankTopN')}</Label>
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={settings.rerankTopN}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  if (Number.isFinite(v) && v > 0) setSettings({ ...settings, rerankTopN: v });
-                }}
-              />
-            </div>
-            <div className="space-y-1.5 col-span-2">
-              <Label className="text-xs">{t('settings.rag.rerankApiKey')}</Label>
-              <Input
-                type="password"
-                autoComplete="off"
-                value={settings.rerankApiKey}
-                onChange={(e) => setSettings({ ...settings, rerankApiKey: e.target.value })}
-              />
-            </div>
-          </div>
-        )}
       </section>
 
       {/* ─── Collections ─── */}
       <section className="space-y-3 rounded-lg border border-border p-4">
         <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-medium">{t('settings.rag.collections')}</h3>
-            <p className="text-xs text-muted-foreground">{t('settings.rag.collectionsHint')}</p>
+          <div className="flex items-center gap-2">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-orange-50 text-orange-600 dark:bg-orange-950/40 dark:text-orange-400 shrink-0">
+              <Folder className="size-4" />
+            </span>
+            <div>
+              <h3 className="text-sm font-medium">{t('settings.rag.collections')}</h3>
+              <p className="text-xs text-muted-foreground">{t('settings.rag.collectionsHint')}</p>
+            </div>
           </div>
           <Button
             size="sm"
@@ -805,6 +1041,13 @@ function NewCollectionDialog({
         chunkOverlap: settings.chunkOverlap,
         onProgress: setProgress,
         signal: abortRef.current.signal,
+        // Contextual Retrieval (Subtask 3) — opt-in, only ships the
+        // LLM endpoint config when the master toggle is on so we
+        // don't leak the key to the indexer when CR is off.
+        contextualEnabled: settings.contextualRetrievalEnabled,
+        contextualLlmBaseUrl: settings.contextualLlmBaseUrl,
+        contextualLlmApiKey: settings.contextualLlmApiKey,
+        contextualLlmModel: settings.contextualLlmModel,
       });
       const now = Date.now();
       const collection: RagCollection = {
@@ -1003,6 +1246,17 @@ function NewCollectionDialog({
           {isExisting && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
               {t('settings.rag.reindexBanner', [folder])}
+            </div>
+          )}
+
+          {/* Contextual Retrieval cost hint — only when the master toggle
+              is on, so the user knows they're about to spend 1 LLM call
+              per chunk before clicking Index. Same amber styling as the
+              re-index banner so visually consistent with the "heads-up"
+              pattern. */}
+          {settings.contextualRetrievalEnabled && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+              {t('settings.rag.contextualHint')}
             </div>
           )}
 

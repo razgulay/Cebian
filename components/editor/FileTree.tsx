@@ -16,6 +16,76 @@ import { vfs } from '@/lib/persistence/vfs';
 import { cn } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 
+// ─── Top-level entry palette ───
+//
+// Immediate children of the workspace root (each skill / prompt folder) get a
+// small colored monogram badge so the user can scan a long list at a glance
+// instead of reading every name. Color is deterministic per-name (FNV-1a hash
+// → palette index) so the same skill keeps the same color across reloads.
+//
+// Palette mirrors the Settings-card scheme (blue / purple / emerald / indigo
+// / orange / pink / cyan / amber) for visual continuity with the rest of the
+// polished UI.
+
+interface PaletteEntry {
+  bg: string;        // light-mode badge background
+  fg: string;        // light-mode badge text/icon
+  bgDark: string;    // dark-mode badge background
+  fgDark: string;    // dark-mode badge text/icon
+}
+
+const TOP_LEVEL_PALETTE: PaletteEntry[] = [
+  { bg: 'bg-blue-50',      fg: 'text-blue-600',      bgDark: 'dark:bg-blue-950/40',      fgDark: 'dark:text-blue-400' },
+  { bg: 'bg-purple-50',    fg: 'text-purple-600',    bgDark: 'dark:bg-purple-950/40',    fgDark: 'dark:text-purple-400' },
+  { bg: 'bg-emerald-50',   fg: 'text-emerald-600',   bgDark: 'dark:bg-emerald-950/40',   fgDark: 'dark:text-emerald-400' },
+  { bg: 'bg-indigo-50',    fg: 'text-indigo-600',    bgDark: 'dark:bg-indigo-950/40',    fgDark: 'dark:text-indigo-400' },
+  { bg: 'bg-orange-50',    fg: 'text-orange-600',    bgDark: 'dark:bg-orange-950/40',    fgDark: 'dark:text-orange-400' },
+  { bg: 'bg-pink-50',      fg: 'text-pink-600',      bgDark: 'dark:bg-pink-950/40',      fgDark: 'dark:text-pink-400' },
+  { bg: 'bg-cyan-50',      fg: 'text-cyan-600',      bgDark: 'dark:bg-cyan-950/40',      fgDark: 'dark:text-cyan-400' },
+  { bg: 'bg-amber-50',     fg: 'text-amber-700',     bgDark: 'dark:bg-amber-950/40',     fgDark: 'dark:text-amber-400' },
+];
+
+/** 32-bit FNV-1a hash → deterministic non-negative integer. */
+function fnv1a(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Up to two leading Unicode letters/digits of a name, uppercased — gives
+ *  the badge enough entropy to separate same-initial entries (FE for
+ *  feynman-explainer vs FR for frontend-deploy) while still fitting a 20 px
+ *  badge at 10 px font. Falls back to '?' for purely symbolic / whitespace
+ *  names so we never render an empty box. */
+function monogramFor(name: string): string {
+  const match = name.trim().match(/^[\p{L}\p{N}]{1,2}/u);
+  return match ? match[0].toUpperCase() : '?';
+}
+
+interface TopLevelBadgeProps {
+  name: string;
+}
+
+/** Colored monogram badge rendered in place of the default folder/file icon
+ *  for the immediate children of the workspace root (skills / prompts). */
+function TopLevelBadge({ name }: TopLevelBadgeProps) {
+  const entry = TOP_LEVEL_PALETTE[fnv1a(name) % TOP_LEVEL_PALETTE.length]!;
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'inline-flex size-5 items-center justify-center rounded text-[10px] font-semibold shrink-0 overflow-hidden',
+        entry.bg, entry.fg, entry.bgDark, entry.fgDark,
+      )}
+    >
+      {monogramFor(name)}
+    </span>
+  );
+}
+
 // ─── Types ───
 
 interface TreeNodeData {
@@ -139,8 +209,12 @@ function NodeRenderer({ node, style, dragHandle, tree }: NodeRendererProps<TreeN
         <span className="shrink-0 size-4" />
       )}
 
-      {/* Icon */}
-      {node.isInternal ? (
+      {/* Icon: top-level entries (immediate children of the workspace root)
+          get a colored monogram badge so the user can scan a long skill /
+          prompt list at a glance. All nested entries keep the default icons. */}
+      {node.level === 0 ? (
+        <TopLevelBadge name={node.data.name} />
+      ) : node.isInternal ? (
         node.isOpen
           ? <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
           : <Folder className="size-4 shrink-0 text-muted-foreground" />

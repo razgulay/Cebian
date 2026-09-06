@@ -11,6 +11,7 @@ import {
   type WorkerRole,
 } from '@/lib/persistence/storage';
 import { t } from '@/lib/i18n';
+import { Sparkles, MousePointerClick, Users } from 'lucide-react';
 
 /**
  * AdvancedSection — 高级设置。
@@ -58,60 +59,79 @@ export function AdvancedSection() {
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
       <h2 className="text-base font-semibold">{t('settings.advanced.title')}</h2>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0 space-y-1">
-          <Label className="text-sm">{t('settings.advanced.compaction.label')}</Label>
-          <p className="text-xs text-muted-foreground">
-            {t('settings.advanced.compaction.hint')}
-          </p>
+      {/* ─── Card: Compaction model ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400 shrink-0">
+              <Sparkles className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <Label className="text-sm">{t('settings.advanced.compaction.label')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.advanced.compaction.hint')}
+              </p>
+            </div>
+          </div>
+          <div className="shrink-0">
+            <ModelSelector
+              activeModel={model}
+              configuredProviders={providers}
+              customProviders={customProviderList}
+              onSelect={(provider, modelId) => setModel({ provider, modelId })}
+              inheritOption={{
+                label: t('settings.advanced.compaction.followMain'),
+                onSelect: () => setModel(null),
+              }}
+            />
+          </div>
         </div>
-        <div className="shrink-0">
-          <ModelSelector
-            activeModel={model}
-            configuredProviders={providers}
-            customProviders={customProviderList}
-            onSelect={(provider, modelId) => setModel({ provider, modelId })}
-            inheritOption={{
-              label: t('settings.advanced.compaction.followMain'),
-              onSelect: () => setModel(null),
-            }}
-          />
-        </div>
-      </div>
+      </section>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0 space-y-1">
-          <Label className="text-sm">{t('settings.advanced.domSubAgent.label')}</Label>
-          <p className="text-xs text-muted-foreground">
-            {t('settings.advanced.domSubAgent.hint')}
-          </p>
+      {/* ─── Card: DOM sub-agent model ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400 shrink-0">
+              <MousePointerClick className="size-4" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <Label className="text-sm">{t('settings.advanced.domSubAgent.label')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('settings.advanced.domSubAgent.hint')}
+              </p>
+            </div>
+          </div>
+          <div className="shrink-0">
+            <ModelSelector
+              activeModel={domSub}
+              configuredProviders={providers}
+              customProviders={customProviderList}
+              onSelect={(provider, modelId) => setDomSub({ provider, modelId })}
+              inheritOption={{
+                label: t('settings.advanced.domSubAgent.off'),
+                onSelect: () => setDomSub(null),
+              }}
+            />
+          </div>
         </div>
-        <div className="shrink-0">
-          <ModelSelector
-            activeModel={domSub}
-            configuredProviders={providers}
-            customProviders={customProviderList}
-            onSelect={(provider, modelId) => setDomSub({ provider, modelId })}
-            inheritOption={{
-              label: t('settings.advanced.domSubAgent.off'),
-              onSelect: () => setDomSub(null),
-            }}
-          />
-        </div>
-      </div>
+      </section>
 
-      {/* ─── Worker team (multi-agent delegation) ─── */}
-      <div className="space-y-3 pt-2 border-t border-border">
-        <div className="space-y-1">
-          <h3 className="text-sm font-medium">{t('settings.advanced.workers.title')}</h3>
-          <p className="text-xs text-muted-foreground">
-            {t('settings.advanced.workers.hint')}
-          </p>
-        </div>
+      {/* ─── Card: Worker team (multi-agent delegation) ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <h3 className="text-sm font-medium flex items-center gap-2">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400">
+            <Users className="size-4" />
+          </span>
+          {t('settings.advanced.workers.title')}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {t('settings.advanced.workers.hint')}
+        </p>
         {WORKER_ROLES.map(({ key, labelKey, hintKey }) => {
           const activeModel = workerMap[key] ?? null;
           return (
-            <div key={key} className="flex items-center justify-between gap-4">
+            <div key={key} className="flex items-center justify-between gap-4 pt-1">
               <div className="min-w-0 space-y-1">
                 <Label className="text-sm">{t(labelKey)}</Label>
                 <p className="text-xs text-muted-foreground">{t(hintKey)}</p>
@@ -131,7 +151,7 @@ export function AdvancedSection() {
             </div>
           );
         })}
-      </div>
+      </section>
     </div>
   );
 }

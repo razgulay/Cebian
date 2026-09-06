@@ -48,6 +48,7 @@ import { useStorageItem } from '@/hooks/useStorageItem';
 import {
   buildEmbedder,
   countCollectionChunks,
+  DEFAULT_RAG_SETTINGS,
   deleteCollectionChunks,
   indexCollection,
   IndexCancelledError,
@@ -76,22 +77,6 @@ function isIngestable(file: File): boolean {
   if (name.endsWith(PDF_EXT)) return true;
   return SUPPORTED_TEXT_EXT.some((ext) => name.endsWith(ext));
 }
-
-const DEFAULT_RAG_SETTINGS: RagSettings = {
-  neonConnectionString: '',
-  embedderBaseUrl: 'http://localhost:8317/v1',
-  embedderApiKey: '',
-  defaultEmbedModel: 'text-embedding-3-small',
-  embedderDim: 1536,
-  chunkSize: 800,
-  chunkOverlap: 100,
-  rerankEnabled: false,
-  rerankBaseUrl: 'http://localhost:8317/v1',
-  rerankApiKey: '',
-  rerankModel: 'rerank-english-v3.0',
-  rerankTopN: 3,
-  pinMinScore: 0,
-};
 
 /**
  * CollectionsSection — Collections 列表 + 新建 / 重命名 / 重新索引 / 删除。
@@ -529,6 +514,13 @@ function NewCollectionDialog({
         chunkOverlap: settings.chunkOverlap,
         onProgress: setProgress,
         signal: abortRef.current.signal,
+        // Contextual Retrieval (Subtask 3) — opt-in, only ships the
+        // LLM endpoint config when the master toggle is on so we
+        // don't leak the key to the indexer when CR is off.
+        contextualEnabled: settings.contextualRetrievalEnabled,
+        contextualLlmBaseUrl: settings.contextualLlmBaseUrl,
+        contextualLlmApiKey: settings.contextualLlmApiKey,
+        contextualLlmModel: settings.contextualLlmModel,
       });
       const now = Date.now();
       const collection: RagCollection = {
