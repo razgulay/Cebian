@@ -156,7 +156,7 @@ const chatClientHandlers: ClientHandlerMap = {
     sessionManager.prompt(sessionId, msg.text, msg.attachments, {
       model: msg.model,
       thinkingLevel: msg.thinkingLevel,
-    }, msg.t0).catch((err) => {
+    }, msg.t0, msg.slashPrompt).catch((err) => {
       post(port, {
         type: 'error',
         sessionId,
@@ -287,50 +287,142 @@ const chatClientHandlers: ClientHandlerMap = {
   },
 
   async session_list(port) {
-    const sessions = await sessionStore.list();
-    // Annotate with live running state so the UI can show an indicator
-    // for sessions whose agent is currently mid-stream in the background.
-    const annotated = sessions.map(s => ({
-      ...s,
-      isRunning: sessionManager.getSessionState(s.id)?.isRunning === true,
-    }));
-    post(port, {
-      type: 'session_list_result',
-      sessions: annotated,
-    });
+    // 自己接住失败并走专用回复：交给 router 的通用 error 会被聊天视图当成本轮对话
+    // 出错（清运行态 + 弹错误条），而拉列表跟正在进行的对话没有任何关系。
+    try {
+      const sessions = await sessionStore.list();
+      // Annotate with live running state so the UI can show an indicator
+      // for sessions whose agent is currently mid-stream in the background.
+      const annotated = sessions.map(s => ({
+        ...s,
+        isRunning: sessionManager.getSessionState(s.id)?.isRunning === true,
+      }));
+      post(port, {
+        type: 'session_list_result',
+        sessions: annotated,
+      });
+    } catch (err) {
+      post(port, {
+        type: 'session_list_error',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 
-  async session_delete(_port, msg) {
-    // Validate sessionId before any path construction. The handler is a
-    // message boundary that must not trust client input — interpolating
-    // a malicious value (empty, `..`, `/etc`, `a/../b`) into the path
-    // would let `vfs.rm({recursive:true})` escape `/workspaces/` and
-    // wipe `/`, `/home`, or `~/.cebian/` (skills + prompts).
-    // Lock to the shape of `crypto.randomUUID()`.
-    if (!isValidSessionId(msg.sessionId)) {
-      console.warn('[session_delete] rejecting non-UUID sessionId:', msg.sessionId);
-      return;
+  /**
+   * 删除一个或多个会话。逐个串行处理而非并发：每条都要动 VFS 与 Dexie 事务，一起放出去
+   * 只会互相抢锁，各自的 `destroySession` / grace timer 副作用也该彼此隔离。
+   *
+   * 单条失败不影响其余：整条 handler 抛出会让 router 回一个通用 error，而已经删掉的
+   * 那些得不到广播，UI 就会显示出一份与库不符的列表。但失败也**不能**只写日志——客户端
+   * 是乐观删除的，咽掉错误会让一条其实还在的会话从界面上永久消失，故失败的 id 单独回
+   * 给发起方，由它把列表拉回来。
+   */
+  async session_delete(port, msg) {
+    const deleted: string[] = [];
+    const failed: string[] = [];
+    let lastError = '';
+    for (const sessionId of msg.sessionIds) {
+      // Validate sessionId before any path construction. The handler is a
+      // message boundary that must not trust client input — interpolating
+      // a malicious value (empty, `..`, `/etc`, `a/../b`) into the path
+      // would let `vfs.rm({recursive:true})` escape `/workspaces/` and
+      // wipe `/`, `/home`, or `~/.cebian/` (skills + prompts).
+      // Lock to the shape of `crypto.randomUUID()`. 批量下逐条校验——一条脏 id
+      // 不能让整批过关，也不该让整批失败。
+      if (!isValidSessionId(sessionId)) {
+        console.warn('[session_delete] rejecting non-UUID sessionId:', sessionId);
+        failed.push(sessionId);
+        lastError = 'invalid session id';
+        continue;
+      }
+      try {
+        // Cancel any pending grace timer — the session is going away.
+        cancelGrace(sessionId);
+        // Best-effort workspace cleanup. `vfs.rm({force:true})` already
+        // tolerates ENOENT, so no exists pre-check is needed. Tolerate any
+        // other VFS error and continue with DB deletion — a leaked workspace
+        // is recoverable via the VFS browser; an orphan session row would
+        // be more confusing.
+        const workspacePath = `/workspaces/${sessionId}`;
+        try {
+          await vfs.rm(workspacePath, { recursive: true, force: true });
+        } catch (err) {
+          console.warn(`[session_delete] failed to remove workspace ${workspacePath}:`, err);
+        }
+        await sessionStore.delete(sessionId);
+        deleted.push(sessionId);
+        // 库里已经删掉了 = 这条就算删成功。内存态清理单独隔离，免得它出错把一次
+        // 真实的删除误报成失败（下面会据 deleted / failed 分别广播与回报）。
+        try {
+          sessionManager.destroySession(sessionId);
+        } catch (err) {
+          console.warn(`[session_delete] failed to tear down agent for ${sessionId}:`, err);
+        }
+      } catch (err) {
+        console.warn(`[session_delete] failed to delete ${sessionId}:`, err);
+        failed.push(sessionId);
+        lastError = err instanceof Error ? err.message : String(err);
+      }
     }
-    // Cancel any pending grace timer — the session is going away.
-    cancelGrace(msg.sessionId);
-    // Best-effort workspace cleanup. `vfs.rm({force:true})` already
-    // tolerates ENOENT, so no exists pre-check is needed. Tolerate any
-    // other VFS error and continue with DB deletion — a leaked workspace
-    // is recoverable via the VFS browser; an orphan session row would
-    // be more confusing.
-    const workspacePath = `/workspaces/${msg.sessionId}`;
-    try {
-      await vfs.rm(workspacePath, { recursive: true, force: true });
-    } catch (err) {
-      console.warn(`[session_delete] failed to remove workspace ${workspacePath}:`, err);
-    }
-    await sessionStore.delete(msg.sessionId);
-    sessionManager.destroySession(msg.sessionId);
     // Broadcast deletion to all connected ports
-    broadcastAll({
-      type: 'session_deleted',
-      sessionId: msg.sessionId,
-    });
+    if (deleted.length > 0) broadcastAll({ type: 'session_deleted', sessionIds: deleted });
+    if (failed.length > 0) {
+      post(port, { type: 'session_write_failed', op: 'delete', sessionIds: failed, error: lastError });
+    }
+  },
+
+  /**
+   * 设置会话在历史列表里的位置（置顶 / 归档 / 普通）。一条消息覆盖四个动作，互斥由
+   * `updateSessionPlacement` 这个唯一写入点保证。
+   *
+   * 不碰工作区、不动活 agent——这只是列表怎么摆，与会话内容无关。
+   *
+   * 写库是单条 Dexie `.modify()`，整批同生共死，故无需像删除那样逐条隔离。但同样要
+   * 自己接住失败：交给 router 的通用 error 既会被聊天视图误当成本轮对话出错，也无法
+   * 让发起方撤销它已经做过的乐观更新。
+   */
+  async session_set_placement(port, msg) {
+    // 非法 id 与写失败一样要回报（而非只记日志）：发起方是乐观更新的，被悄悄丢掉的
+    // id 会让它的界面停在一个从未落库的状态上。与 session_delete 的处理保持一致。
+    const ids: string[] = [];
+    const invalid: string[] = [];
+    for (const id of msg.sessionIds) {
+      if (isValidSessionId(id)) {
+        ids.push(id);
+      } else {
+        console.warn('[session_set_placement] rejecting non-UUID sessionId:', id);
+        invalid.push(id);
+      }
+    }
+    if (ids.length > 0) {
+      try {
+        await sessionStore.updatePlacement(ids, msg.placement);
+        broadcastAll({
+          type: 'session_placement_changed',
+          sessionIds: ids,
+          placement: msg.placement,
+        });
+      } catch (err) {
+        console.warn('[session_set_placement] failed:', err);
+        invalid.push(...ids);
+        post(port, {
+          type: 'session_write_failed',
+          op: 'placement',
+          sessionIds: invalid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+    }
+    if (invalid.length > 0) {
+      post(port, {
+        type: 'session_write_failed',
+        op: 'placement',
+        sessionIds: invalid,
+        error: 'invalid session id',
+      });
+    }
   },
 
   async session_pin(_port, msg) {

@@ -1,105 +1,70 @@
 import { describe, expect, it } from 'vitest';
-import * as pathUtils from './path-utils';
+import { classifyFile, codeLanguageOf, dualViewTypeOf, sessionUuidOf, workspaceUuidOf } from '@/entrypoints/vfs/lib/path-utils';
+import type { FileMedia } from '@/entrypoints/vfs/types';
+
+const UUID = '3f2a9c1e-7b4d-4e8a-9f0c-1a2b3c4d5e6f';
 
 describe('classifyFile', () => {
-  it('classifies PDF separately from generic binary files', () => {
-    expect(pathUtils.classifyFile('report.PDF')).toBe('pdf');
-    expect(pathUtils.classifyFile('archive.zip')).toBe('binary');
+  it.each([
+    ['report.md', 'markdown'],
+    ['README.markdown', 'markdown'],
+    ['classify.ts', 'code'],
+    ['index.html', 'html'],
+    ['page.HTM', 'html'],
+    ['config.YAML', 'code'],
+    ['chart.svg', 'svg'],
+    ['feed.xml', 'code'],
+    ['photo.PNG', 'image'],
+    ['clip.mp4', 'video'],
+    ['voice.m4a', 'audio'],
+    ['paper.pdf', 'pdf'],
+    ['bundle.zip', 'binary'],
+    ['notes.txt', 'text'],
+    ['data.csv', 'text'],
+    ['app.log', 'text'],
+    ['Makefile', 'text'],
+    ['.gitignore', 'text'],
+  ] as const)('%s → %s', (name, expected) => {
+    expect(classifyFile(name)).toBe(expected);
   });
 
-  it('only treats explicitly supported extensions as text', () => {
-    expect(pathUtils.classifyFile('notes.txt')).toBe('text');
-    expect(pathUtils.classifyFile('script.py')).toBe('text');
-    expect(pathUtils.classifyFile('payload.bin')).toBe('unknown');
-    expect(pathUtils.classifyFile('README')).toBe('text');
-    expect(pathUtils.classifyFile('mystery')).toBe('unknown');
-  });
-
-  it('recognizes common source, config, dotfiles, and extensionless text files', () => {
-    for (const name of [
-      'Component.vue',
-      'Widget.svelte',
-      'guide.mdx',
-      '.npmrc',
-      '.editorconfig',
-      '.prettierrc',
-      'Package.swift',
-      'main.tf',
-      'yarn.lock',
-      'Gemfile',
-      'Procfile',
-    ]) {
-      expect(pathUtils.classifyFile(name), name).toBe('text');
-    }
-    expect(pathUtils.classifyFile('unknown.payload')).toBe('unknown');
-    expect(pathUtils.classifyFile('program.exe')).toBe('unknown');
-    expect(pathUtils.classifyFile('mystery')).toBe('unknown');
-  });
-
-  it('routes .html / .htm to the dedicated html bucket, not the generic text bucket', () => {
-    expect(pathUtils.classifyFile('page.html')).toBe('html');
-    expect(pathUtils.classifyFile('page.htm')).toBe('html');
-    expect(pathUtils.classifyFile('PAGE.HTML')).toBe('html');
-    // Regression guard: html/htm were previously in TEXT_EXTS, which routed
-    // them to the raw-<pre> branch. If anyone re-adds them to TEXT_EXTS
-    // without removing HTML_EXTS, the text branch wins by ordering and this
-    // test catches it.
+  it('原型链上的键不是源码扩展名（`in` 会误判，`Object.hasOwn` 不会）', () => {
+    expect(codeLanguageOf('constructor')).toBeNull();
+    expect(codeLanguageOf('__proto__')).toBeNull();
+    expect(codeLanguageOf('toString')).toBeNull();
+    expect(classifyFile('weird.constructor')).toBe('text');
+    expect(classifyFile('weird.__proto__')).toBe('text');
   });
 });
 
-describe('decodePreviewText', () => {
-  const decodePreviewText = (
-    pathUtils as unknown as { decodePreviewText?: (bytes: Uint8Array) => string | null }
-  ).decodePreviewText;
-
-  it('decodes valid UTF-8 bytes without changing their contents', () => {
-    expect(decodePreviewText).toBeTypeOf('function');
-    expect(decodePreviewText?.(new TextEncoder().encode('hello, 世界'))).toBe('hello, 世界');
+describe('sessionUuidOf / workspaceUuidOf', () => {
+  it('工作区下任意深度都能取到会话 UUID；工作区目录本身只有 workspaceUuidOf 认', () => {
+    expect(sessionUuidOf(`/workspaces/${UUID}`)).toBe(UUID);
+    expect(sessionUuidOf(`/workspaces/${UUID}/a/b/c.md`)).toBe(UUID);
+    expect(workspaceUuidOf(`/workspaces/${UUID}`)).toBe(UUID);
+    expect(workspaceUuidOf(`/workspaces/${UUID}/a`)).toBeNull();
   });
 
-  it('rejects malformed UTF-8 instead of producing replacement characters', () => {
-    expect(decodePreviewText).toBeTypeOf('function');
-    expect(decodePreviewText?.(new Uint8Array([0x66, 0x80, 0x6f]))).toBeNull();
-  });
-});
-
-describe('resolvePreviewOpenMode', () => {
-  const resolvePreviewOpenMode = (
-    pathUtils as unknown as {
-      resolvePreviewOpenMode?: (preference: string) => string;
-    }
-  ).resolvePreviewOpenMode;
-
-  it('maps versioned preferences to a preview/source opening mode', () => {
-    expect(resolvePreviewOpenMode).toBeTypeOf('function');
-    expect(resolvePreviewOpenMode?.('smart')).toBe('preview');
-    expect(resolvePreviewOpenMode?.('preview')).toBe('preview');
-    expect(resolvePreviewOpenMode?.('source')).toBe('source');
+  it('工作区根、其他路径、非法会话 ID 都返回 null', () => {
+    expect(sessionUuidOf('/workspaces')).toBeNull();
+    expect(sessionUuidOf('/workspaces/readme.md')).toBeNull();
+    expect(sessionUuidOf('/workspaces/not-a-uuid/x')).toBeNull();
+    expect(sessionUuidOf('/home/user/.cebian/prompts')).toBeNull();
+    expect(sessionUuidOf('/workspacesfoo/x')).toBeNull();
   });
 });
 
-describe('parseVfsLocation', () => {
-  it('keeps the VFS path separate from a requested markdown anchor', () => {
-    expect(pathUtils.parseVfsLocation('#%2Fworkspaces%2Fs%2Freadme.md', '?anchor=install%20run')).toEqual({
-      path: '/workspaces/s/readme.md',
-      anchor: 'install run',
-    });
-  });
-
-  it('keeps malformed percent escapes as literal path text', () => {
-    expect(pathUtils.parseVfsLocation('#/workspaces/s/bad%name.md', '?anchor=bad%value')).toEqual({
-      path: '/workspaces/s/bad%name.md',
-      anchor: 'bad%value',
-    });
-  });
-});
-
-describe('vfsNavigationUrl', () => {
-  it('builds ordinary navigation without carrying an anchor query', () => {
-    const navigationUrl = (
-      pathUtils as unknown as { vfsNavigationUrl?: (path: string, pathname: string) => string }
-    ).vfsNavigationUrl;
-    expect(navigationUrl).toBeTypeOf('function');
-    expect(navigationUrl?.('/workspaces/s/next.md', '/vfs.html')).toBe('/vfs.html#%2Fworkspaces%2Fs%2Fnext.md');
+describe('dualViewTypeOf', () => {
+  const text = { content: '', lines: 0, size: 0 };
+  it.each<[FileMedia, string | null]>([
+    [{ type: 'markdown', ...text }, 'markdown'],
+    [{ type: 'html', ...text }, 'html'],
+    [{ type: 'svg', ...text, url: 'blob:x' }, 'svg'],
+    [{ type: 'code', lang: 'typescript', ...text }, null],
+    [{ type: 'text', ...text }, null],
+    [{ type: 'image', mime: 'image/png', size: 0, url: 'blob:x' }, null],
+    [{ type: 'binary', size: 0 }, null],
+  ])('%o → %s', (media, expected) => {
+    expect(dualViewTypeOf(media)).toBe(expected);
   });
 });

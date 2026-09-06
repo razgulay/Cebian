@@ -170,6 +170,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Removed the Memory section from the sidebar drawer: the Memory block that previously sat between MCP and History no longer renders. Memory management (master toggle, organize configuration, file browse / edit) remains fully accessible via the `/settings/memory` settings page
 
+## 1.7.0 - 2026-09-05
+
 ## 1.5.1 - 2026-08-22
 
 ### 新增 / Added

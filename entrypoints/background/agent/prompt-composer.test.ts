@@ -3,7 +3,7 @@ import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { memorySettings, userInstructions } from '@/lib/persistence/storage';
 import { ragSettings } from '@/lib/rag/settings';
-import { composeSystemPrompt } from './prompt-composer';
+import { composeSystemPrompt, composeUserMessage } from './prompt-composer';
 
 // skills 索引扫描要读 VFS（IndexedDB），与本文件要验的「拼接 + 占位符替换」无关，
 // 故整模块打桩，让每个用例自己决定 skills 块内容。
@@ -11,6 +11,9 @@ vi.mock('@/lib/ai-config/scanner', () => ({
   scanSkillIndex: vi.fn(async () => []),
   buildSkillsBlock: vi.fn(() => ''),
 }));
+
+// 页面上下文要 chrome.tabs / scripting，与本文件要验的信封拼接无关。
+vi.mock('./page-context', () => ({ gatherPageContext: vi.fn(async () => '') }));
 
 describe('composeSystemPrompt', () => {
   beforeEach(() => {
@@ -140,5 +143,45 @@ describe('composeSystemPrompt', () => {
     // RAG Workflow step-5 — both the trigger keyword and the call site
     expect(prompt).toContain('call `rag_search`');
     expect(prompt).toContain('For deeper lookups beyond the pre-injected chunks');
+  });
+});
+
+describe('composeUserMessage', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('不带斜杠提示词 → 信封里没有 <slash-prompt> 块', async () => {
+    const msg = await composeUserMessage('你好', [], false);
+    expect(msg).not.toContain('<slash-prompt');
+    expect(msg).toContain('<user-request>\n你好\n</user-request>');
+  });
+
+  // 块必须在请求块之前：信封的不变式是「<user-request> 永远置末」。
+  it('带斜杠提示词 → 块排在 <user-request> 之前，用户文本仍独占请求块', async () => {
+    const msg = await composeUserMessage('顺便翻成英文', [], false, {
+      name: 'summarize',
+      body: '总结这个页面。',
+    });
+    expect(msg).toContain('<slash-prompt name="summarize">\n总结这个页面。\n</slash-prompt>');
+    expect(msg).toContain('<user-request>\n顺便翻成英文\n</user-request>');
+    expect(msg.indexOf('<slash-prompt')).toBeLessThan(msg.indexOf('<user-request>'));
+    // 「请求块恒为末块」是信封的不变式，也是 extractUserText / replaceUserText 以
+    // 「整串以 </user-request> 收尾」判定信封的前提——只比相对下标的话，末尾再追加一个
+    // 块也照样绿。
+    expect(msg.endsWith('</user-request>')).toBe(true);
+  });
+
+  // 只挂提示词、一个字没打：请求块留空会让模型以为这轮没有请求。
+  it('只挂提示词、用户没打字 → 请求块放一句指向提示词块的话', async () => {
+    const msg = await composeUserMessage('   ', [], false, { name: 'x', body: 'do it' });
+    expect(msg).toContain('<user-request>\nFollow the instructions in the slash-prompt block above.\n</user-request>');
+    // 占位句不能自带尖括号：它在 <user-request> 里，会变成没闭合的嵌套元素。
+    expect(msg).not.toContain('<slash-prompt> block');
+  });
+
+  it('既没提示词也没文本 → 请求块为空（维持旧行为）', async () => {
+    const msg = await composeUserMessage('   ', [], false);
+    expect(msg).toContain('<user-request>\n\n</user-request>');
   });
 });

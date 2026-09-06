@@ -7,6 +7,7 @@ import {
   applySessionsTransactional,
   getSessionMutations,
   toSessionRecord,
+  updateSessionPlacement,
   isValidSessionLike,
   type SessionBackupRecord,
   type SessionRecord,
@@ -110,6 +111,101 @@ describe('toSessionRecord', () => {
     expect(out.createdAt).toBe(1000);
     expect(out.updatedAt).toBe(2000);
     expect(out.messages).toBe(base.messages);
+  });
+
+  // 置顶 / 归档必须能过备份恢复这一关：toSessionRecord 是逐字段重建的，漏补就会被
+  // 静默丢弃（tsc 拦不住可选字段）。
+  it('置顶 / 归档时间戳原样透传', () => {
+    const pinned = toSessionRecord({ ...base, ...({ pinnedAt: 5000 } as object) } as SessionRecordLike);
+    expect(pinned.pinnedAt).toBe(5000);
+    expect(pinned.archivedAt).toBeUndefined();
+
+    const archived = toSessionRecord({ ...base, ...({ archivedAt: 6000 } as object) } as SessionRecordLike);
+    expect(archived.archivedAt).toBe(6000);
+    expect(archived.pinnedAt).toBeUndefined();
+  });
+
+  it('没带置顶 / 归档 → 字段整个不存在（不是 undefined 值）', () => {
+    const out = toSessionRecord({ ...base });
+    expect('pinnedAt' in out).toBe(false);
+    expect('archivedAt' in out).toBe(false);
+  });
+
+  it('置顶 / 归档类型不对或非有限数 → 当没这个标记', () => {
+    const out = toSessionRecord({
+      ...base,
+      ...({ pinnedAt: 'soon', archivedAt: NaN } as object),
+    } as SessionRecordLike);
+    expect('pinnedAt' in out).toBe(false);
+    expect('archivedAt' in out).toBe(false);
+  });
+
+  it('坏备份两个标记都带 → 置顶优先，归档被丢弃（二者互斥）', () => {
+    const out = toSessionRecord({
+      ...base,
+      ...({ pinnedAt: 5000, archivedAt: 6000 } as object),
+    } as SessionRecordLike);
+    expect(out.pinnedAt).toBe(5000);
+    expect('archivedAt' in out).toBe(false);
+  });
+});
+
+describe('updateSessionPlacement', () => {
+  const A = '6f9619ff-8b86-d011-b42d-00cf4fc964b1';
+  const B = '6f9619ff-8b86-d011-b42d-00cf4fc964b2';
+
+  /** `sessionTreeDb.sessions` 的静态类型是 SessionTreeMeta（树侧视图），取完整行需转型。 */
+  async function getRow(id: string): Promise<SessionRecord> {
+    return (await sessionTreeDb.sessions.get(id))! as unknown as SessionRecord;
+  }
+
+  async function seed(): Promise<void> {
+    await sessionTreeDb.open();
+    await sessionTreeDb.table('sessions').clear();
+    await sessionTreeDb.sessions.bulkPut([
+      toSessionRecord({ ...base, id: A }),
+      toSessionRecord({ ...base, id: B }),
+    ]);
+  }
+
+  beforeEach(seed);
+
+  it('置顶 / 归档互斥：设一个会清掉另一个', async () => {
+    await updateSessionPlacement([A], 'pinned');
+    let row = (await getRow(A));
+    expect(typeof row.pinnedAt).toBe('number');
+    expect('archivedAt' in row).toBe(false);
+
+    await updateSessionPlacement([A], 'archived');
+    row = (await getRow(A));
+    expect(typeof row.archivedAt).toBe('number');
+    expect('pinnedAt' in row).toBe(false);
+
+    await updateSessionPlacement([A], null);
+    row = (await getRow(A));
+    expect('pinnedAt' in row).toBe(false);
+    expect('archivedAt' in row).toBe(false);
+  });
+
+  it('批量：一次改多条，未点名的行不受影响', async () => {
+    await updateSessionPlacement([A, B], 'archived');
+    expect(typeof (await getRow(A)).archivedAt).toBe('number');
+    expect(typeof (await getRow(B)).archivedAt).toBe('number');
+
+    await updateSessionPlacement([A], null);
+    expect('archivedAt' in (await getRow(A))).toBe(false);
+    expect(typeof (await getRow(B)).archivedAt).toBe('number');
+  });
+
+  // 历史列表按 updatedAt 排序：改「摆在哪」不该把会话顶到最前面。
+  it('不动 updatedAt', async () => {
+    await updateSessionPlacement([A], 'pinned');
+    expect((await getRow(A)).updatedAt).toBe(base.updatedAt);
+  });
+
+  it('空 id 列表 → 无操作', async () => {
+    await updateSessionPlacement([], 'pinned');
+    expect('pinnedAt' in (await getRow(A))).toBe(false);
   });
 });
 

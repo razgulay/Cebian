@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assertJsonSerializable, type AgentMessage } from '@earendil-works/pi-agent-core';
-import { replaceUserText, sanitizeAgentMessages, stripDirectives, extractInlineDirectives, extractInlineDirectivesFromMessage, extractUserText, getAssistantText, getLeakedThinking } from './message-helpers';
+import { replaceUserText, sanitizeAgentMessages, stripDirectives, extractInlineDirectives, extractInlineDirectivesFromMessage, extractUserText, extractSlashPrompt, getAssistantText, getLeakedThinking } from './message-helpers';
 
 // 用 `as unknown as AgentMessage[]` 构造违反类型契约的运行时数据（这正是本函数要兜的场景）。
 const asMessages = (arr: unknown[]) => arr as unknown as AgentMessage[];
@@ -637,5 +637,104 @@ describe('think-tag leak handling', () => {
       const msg = asAssistant([{ type: 'thinking', thinking: 'only structured' }]);
       expect(getLeakedThinking(msg)).toEqual([]);
     });
+  });
+});
+
+// ─── 斜杠提示词块（issue #53）───
+
+const envelope = (slashBody: string | null, request: string) =>
+  [
+    '<context>\nd\n</context>',
+    ...(slashBody === null ? [] : [`<slash-prompt name="demo">\n${slashBody}\n</slash-prompt>`]),
+    `<user-request>\n${request}\n</user-request>`,
+  ].join('\n\n');
+
+/** 这些 helper 吃的是 pi-ai 的 `Message`（与 AgentMessage 不同源），从函数签名取类型
+ *  比再 import 一个类型更稳。 */
+type HelperMessage = Parameters<typeof extractUserText>[0];
+
+const userMsg = (raw: string) =>
+  ({ role: 'user', content: raw, timestamp: 1 }) as unknown as HelperMessage;
+
+describe('extractUserText / replaceUserText 与 <slash-prompt> 块共存', () => {
+  it('只取用户自己敲的字，不受提示词块影响', () => {
+    expect(extractUserText(userMsg(envelope('总结这页', '再翻成英文')))).toBe('再翻成英文');
+  });
+
+  // 提示词正文里已不可能出现字面量信封标签——buildSlashPromptBlock 在序列化时就剥掉了
+  // （见 slash-prompt.test.ts）。因此剩下唯一可能打出这些标签的地方是用户自己敲进请求
+  // 块内部的文字，外层开标签必然在它之前 —— 取「最靠前」的开标签才对。
+  it('用户在请求块里打了字面量 <user-request> → 取外层，拿到完整文本', () => {
+    const raw = envelope('总结这页', '解释一下 <user-request>x</user-request> 是什么');
+    expect(extractUserText(userMsg(raw))).toBe('解释一下 <user-request>x</user-request> 是什么');
+  });
+
+  it('编辑这类消息只改外层请求块，不留悬空的开标签', () => {
+    const raw = envelope('总结这页', '解释一下 <user-request>x</user-request> 是什么');
+    const out = replaceUserText(userMsg(raw), '新请求');
+    const content = out.content as unknown as string;
+    expect(extractUserText(out)).toBe('新请求');
+    expect(content.endsWith('<user-request>\n新请求\n</user-request>')).toBe(true);
+    expect(content).toContain('<slash-prompt name="demo">');
+  });
+
+  it('编辑消息只改末尾的请求块，提示词块原样保留', () => {
+    const raw = envelope('总结这页', '旧请求');
+    const out = replaceUserText(userMsg(raw), '新请求');
+    const content = out.content as unknown as string;
+    expect(extractUserText(out)).toBe('新请求');
+    expect(content).toContain('<slash-prompt name="demo">\n总结这页\n</slash-prompt>');
+    expect(content).not.toContain('旧请求');
+  });
+
+  // 只挂提示词、一个字没打：请求块里那句话是写给模型的，不该出现在气泡和 ↑ 历史里。
+  it('请求块只放占位句时，用户文本按空处理', () => {
+    const raw = envelope('做这件事', 'Follow the instructions in the slash-prompt block above.');
+    expect(extractUserText(userMsg(raw))).toBe('');
+  });
+
+  // 划词动作「在侧边栏继续」固化下来的是**没有信封包裹**的页面文本，整段都是用户的话，
+  // 一个字都不能吞。
+  it('裸文本原样返回，不做任何结构剥离', () => {
+    const raw = '文档里写：<slash-prompt name="demo">\nbody\n</slash-prompt>，就是这样。';
+    expect(extractUserText(userMsg(raw))).toBe(raw);
+  });
+
+  it('没有提示词块时，同样的句子照常当普通文本（不误伤）', () => {
+    const raw = envelope(null, 'Follow the instructions in the slash-prompt block above.');
+    expect(extractUserText(userMsg(raw))).toBe('Follow the instructions in the slash-prompt block above.');
+  });
+});
+
+describe('extractSlashPrompt', () => {
+  it('取出名字与正文；名字还原 XML 转义', () => {
+    const raw = `<slash-prompt name="a&amp;b">\nline1\nline2\n</slash-prompt>\n\n<user-request>\nx\n</user-request>`;
+    expect(extractSlashPrompt(userMsg(raw))).toEqual({ name: 'a&b', body: 'line1\nline2' });
+  });
+
+  it('没有块 → null', () => {
+    expect(extractSlashPrompt(userMsg(envelope(null, 'x')))).toBeNull();
+  });
+
+  it('非 user 消息 → null', () => {
+    const assistant = { role: 'assistant', content: '<slash-prompt name="x">y</slash-prompt>', timestamp: 1 };
+    expect(extractSlashPrompt(assistant as unknown as HelperMessage)).toBeNull();
+  });
+});
+
+describe('replaceUserText — 块数组形态定位末尾请求块', () => {
+  it('改的是最后那个带末尾请求块的 text 块，前面的块不动', () => {
+    const msg = {
+      role: 'user',
+      timestamp: 1,
+      content: [
+        { type: 'text', text: '<slash-prompt name="d">\n正文\n</slash-prompt>' },
+        { type: 'text', text: '<user-request>\n旧请求\n</user-request>' },
+      ],
+    } as unknown as HelperMessage;
+    const out = replaceUserText(msg, '新请求');
+    const blocks = out.content as unknown as { text: string }[];
+    expect(blocks[0].text).toBe('<slash-prompt name="d">\n正文\n</slash-prompt>');
+    expect(blocks[1].text).toBe('<user-request>\n新请求\n</user-request>');
   });
 });

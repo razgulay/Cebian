@@ -10,6 +10,8 @@ import type {
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { unescapeXml } from '@/lib/utils';
 import { stripThinkTags } from './think-tags';
+import { SLASH_PROMPT_ONLY_REQUEST } from '@/lib/ai-config/slash-prompt';
+import { USER_REQUEST_CLOSE, USER_REQUEST_OPEN, wrapUserRequest } from '@/lib/agent/prompt-envelope';
 
 // ─── Parsed attachment metadata for UI display ───
 
@@ -77,7 +79,37 @@ export function findToolResult(
   );
 }
 
-const USER_REQUEST_RE = /<user-request>\s*([\s\S]*?)\s*<\/user-request>/;
+/** 信封末尾那个 `<user-request>` 块：`{ start, end, text }`，没有则 null。 */
+interface UserRequestBlock {
+  /** `<user-request>` 开标签在原串里的下标。 */
+  start: number;
+  /** 闭标签之后的下标（切片用的右开区间）。 */
+  end: number;
+  text: string;
+}
+
+/**
+ * 定位信封的**末块** `<user-request>`。
+ *
+ * 判据是位置而非正则匹配：`composeUserMessage` 恒把请求块放在最后，所以合法的信封必然
+ * 以 `</user-request>` 收尾；而开标签取**最靠前**的那个。
+ *
+ * 「取最前」成立的前提是：请求块前面的各块都由本扩展生成，其中页面可控的部分已被转义
+ * （模板变量，见 lib/ai-config/template.ts）或剥离（页面上下文）。所以字面量
+ * `<user-request>` 基本只会出自用户敲进请求块**内部**的文本，外层开标签必然在它之前。
+ * 取最后一个反而会选中用户打出来的那个内层标签，提取出半截文本、编辑时留下一个悬空的
+ * 外层开标签。
+ */
+function matchUserRequest(raw: string): UserRequestBlock | null {
+  const trimmed = raw.trimEnd();
+  if (!trimmed.endsWith(USER_REQUEST_CLOSE)) return null;
+  const start = trimmed.indexOf(USER_REQUEST_OPEN);
+  if (start < 0) return null;
+  const bodyStart = start + USER_REQUEST_OPEN.length;
+  const bodyEnd = trimmed.length - USER_REQUEST_CLOSE.length;
+  if (bodyEnd < bodyStart) return null;
+  return { start, end: trimmed.length, text: trimmed.slice(bodyStart, bodyEnd).trim() };
+}
 
 // ─── 内联指令块（mention chip + slash command + quote）───
 // 共享同一个开头格式：
@@ -146,17 +178,30 @@ function getRawUserText(msg: Message): string {
   return '';
 }
 
+const SLASH_PROMPT_RE = /<slash-prompt name="([^"]*)">\n?([\s\S]*?)\n?<\/slash-prompt>/;
+
 /** Extract the user's actual input text from a structured user message.
  *  Reads the content of the <user-request> block, then strips any inline
  *  directive blocks (mention chips / slash commands) so the bubble shows
  *  only the words the user actually typed. The model still receives the
- *  full directive block via the agent runtime. */
+ *  full directive block via the agent runtime.
+ *
+ *  只挂了斜杠提示词、一个字没打的那一轮，请求块里放的是指向提示词块的占位句
+ *  （`SLASH_PROMPT_ONLY_REQUEST`，见 lib/ai-config/slash-prompt.ts）。那句话是写给
+ *  模型看的，不是用户的输入——这里当作空文本，免得它出现在用户气泡和 ↑ 历史里。
+ *
+ *  没有 `<user-request>` 信封包裹的裸文本只剩一种来源：划词动作「在侧边栏继续」
+ *  固化下来的页面文本（UI 的乐观消息现在也带完整信封，见 dispatchPrompt）。那种
+ *  情况整段就是用户的话。 */
 export function extractUserText(msg: Message): string {
   if (msg.role !== 'user') return '';
   const raw = getRawUserText(msg);
-  const match = raw.match(USER_REQUEST_RE);
-  const inner = match ? match[1] : raw;
-  return stripDirectives(inner);
+  const requestMatch = matchUserRequest(raw);
+  const inner = requestMatch ? requestMatch.text : raw;
+  const text = stripDirectives(inner).trim();
+  // 占位句是精确匹配（见上方注释）。
+  if (text === SLASH_PROMPT_ONLY_REQUEST && SLASH_PROMPT_RE.test(raw)) return '';
+  return text;
 }
 
 /** 从 user 消息的 `<user-request>` 内文里抽出所有内联指令（PROMPT/SKILL/COMMAND/QUOTE）。
@@ -165,9 +210,18 @@ export function extractUserText(msg: Message): string {
 export function extractInlineDirectivesFromMessage(msg: Message): InlineDirective[] {
   if (msg.role !== 'user') return [];
   const raw = getRawUserText(msg);
-  const match = raw.match(USER_REQUEST_RE);
-  const inner = match ? match[1] : raw;
+  const match = matchUserRequest(raw);
+  const inner = match ? match.text : raw;
   return extractInlineDirectives(inner);
+}
+
+/** 取出这一轮携带的斜杠提示词（名字 + 正文），没有则返回 null。
+ *  与 `buildSlashPromptBlock` 反向对应；`name` 建块时按属性转义过，这里还原回去。 */
+export function extractSlashPrompt(msg: Message): { name: string; body: string } | null {
+  if (msg.role !== 'user') return null;
+  const match = getRawUserText(msg).match(SLASH_PROMPT_RE);
+  if (!match) return null;
+  return { name: unescapeXml(match[1]), body: match[2] };
 }
 
 const ELEMENT_RE = /<selected-element\s+selector="([^"]*)"[^>]*>/g;
@@ -244,27 +298,40 @@ export function truncateForRetry<M extends { role: string }>(messages: M[]): M[]
  * - 有 `<user-request>` 包裹（composeUserMessage 的产物）时只替换其内文，
  *   `<attachments>` 等兄弟块原样保留；
  * - 无包裹（划词固化等裸文本）时替换整段文本；
- * - content 为块数组时替换第一个含 `<user-request>` 的 text 块（无则第一个
- *   text 块；一个 text 块都没有则追加一个），image 等其它块不动。
+ * - content 为块数组时替换**最后**一个含末尾请求块的 text 块（无则第一个 text 块；
+ *   一个 text 块都没有则追加一个），image 等其它块不动。
  *
  * 与后台 editMessage / 前端乐观更新共用，保证多窗口收敛时两侧算出同一形状。
  * 纯函数、不改入参。
  */
 export function replaceUserText<M extends Message>(msg: M, newText: string): M {
-  // replacement 用函数形式，避免 newText 里的 `$&` / `$1` 被 String.replace 当特殊模式展开
-  const replaceInRaw = (raw: string): string =>
-    USER_REQUEST_RE.test(raw)
-      ? raw.replace(USER_REQUEST_RE, () => `<user-request>\n${newText}\n</user-request>`)
-      : newText;
+  // 只替换**末尾**那个 `<user-request>`（理由见 matchUserRequest）。按下标切片而非
+  // String.replace，顺带也避开了 newText 里的 `$&` / `$1` 被当特殊模式展开。
+  const replaceInRaw = (raw: string): string => {
+    const match = matchUserRequest(raw);
+    if (!match) return newText;
+    return (
+      raw.slice(0, match.start) +
+      wrapUserRequest(newText) +
+      raw.slice(match.end)
+    );
+  };
 
   if (typeof msg.content === 'string') {
     return { ...msg, content: replaceInRaw(msg.content) };
   }
   if (Array.isArray(msg.content)) {
     const blocks = msg.content as { type?: string; text?: string }[];
-    let target = blocks.findIndex(
-      (b) => b.type === 'text' && typeof b.text === 'string' && USER_REQUEST_RE.test(b.text),
-    );
+    // 从后往前找：请求块恒在信封末尾，因此带着它的必然是**最后**一个符合条件的 text
+    // 块。从前往后找会被前面块里的字面量骗走，改错地方而不报错。
+    let target = -1;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (b.type === 'text' && typeof b.text === 'string' && matchUserRequest(b.text) !== null) {
+        target = i;
+        break;
+      }
+    }
     if (target < 0) target = blocks.findIndex((b) => b.type === 'text');
     if (target < 0) {
       return { ...msg, content: [...blocks, { type: 'text', text: newText }] } as M;

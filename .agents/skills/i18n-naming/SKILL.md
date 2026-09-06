@@ -227,6 +227,7 @@ usage frequently picks a different word entirely.
 | Sign in / Login   | 登录             | 登入             | TW: 登入 (not 登錄)                |
 | Sign out / Logout | 退出             | 登出             | TW: 登出                           |
 | Verify            | 验证             | 驗證             |                                    |
+| Archive (verb)    | 归档             | 封存             | TW: 封存 (not 歸檔)                |
 | Save              | 保存             | 儲存             | TW: 儲存 (not 保存)                |
 | Cancel            | 取消             | 取消             |                                    |
 | Delete            | 删除             | 刪除             |                                    |

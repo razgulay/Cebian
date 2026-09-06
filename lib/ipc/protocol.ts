@@ -8,7 +8,6 @@
 //
 // 约定：一个 UI 实例只开一条端口，同一上下文里的其它域走 channel shim 复用它
 // （见 lib/mcp/sidepanel-channel.ts、lib/recorder/sidepanel-channel.ts）。
-// 现状有例外：HistoryPanel 为 session_list / session_delete 各开一条一次性端口，待收口。
 //
 // 注意 `chrome.runtime.sendMessage` 不是寻址投递：它送达发送方之外的所有扩展上下文
 // （background 与已打开的扩展页面；要定向到内容脚本得用 chrome.tabs.sendMessage）。
@@ -18,9 +17,10 @@
 // flush 信号（issue #14）。
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { SessionRecord } from '@/lib/persistence/db';
+import type { SessionPlacement, SessionRecord } from '@/lib/persistence/db';
 import type { ModelIdentity, ThinkingLevel } from '@/lib/persistence/storage';
 import type { Attachment } from '@/lib/agent/attachments';
+import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import type { RecordedSession } from '@/lib/recorder/types';
 import type { MCPResourceContents } from '@/lib/mcp/client';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
@@ -62,11 +62,23 @@ export type ClientMessage =
    *  选择。新会话据此建行；已有会话据此就地刷新活 agent 并落库到会话行（会话行是真相）。
    *  缺省时后台回退到全局 lastSelectedModel 充当「新对话默认种子」（向后兼容）。
    *
+   *  `slashPrompt`（可选）：本轮携带的斜杠提示词（`/` 菜单选中的模板，模板变量
+   *  已在页面侧展开）。正文由 UI 传而非后台按名字回读文件：模板变量要
+   *  chrome.tabs / scripting / 剪贴板，是侧边栏专有能力，后台引不得
+   *  （见 lib/ai-config/template-vars-sidepanel.ts）。
+   *
    *  `t0`（可选）：发起侧捕获的 `performance.now()` 锚点，由「send→reply 流水
    *  线临时诊断」用——后台读取后用同一个锚点算 `Δt`，保证跨 context 时间线可
    *  比（renderer 与 SW 的 `performance.now()` 起点不同）。不影响行为，缺省
    *  即退化到本地锚点（旧客户端也无副作用）。 */
-  | ({ type: 'prompt'; sessionId: string | null; text: string; attachments?: Attachment[]; t0?: number } & TurnSettings)
+  | ({
+      type: 'prompt';
+      sessionId: string | null;
+      text: string;
+      attachments?: Attachment[];
+      slashPrompt?: SlashPrompt;
+      t0?: number;
+    } & TurnSettings)
   | { type: 'cancel'; sessionId: string }
   /** Re-run the last user turn for `sessionId`. The background drops any
    *  trailing assistant / toolResult messages (typically a failed turn or
@@ -114,9 +126,15 @@ export type ClientMessage =
    *  message; the next prompt proceeds normally. */
   | { type: 'compact_now'; sessionId: string }
   | { type: 'session_list' }
-  | { type: 'session_delete'; sessionId: string }
-  /** Pin / unpin a session in the sidebar. Bg flips the bit on the row and
-   *  broadcasts `session_changed` so all open sidepanels reconcile. */
+  /** 删除会话。天生批量——单条就是长度 1 的数组，不为它单开一条消息。后台逐个清理
+   *  （工作区 / DB / 活 agent），成功的那些统一由一条 `session_deleted` 广播回来；
+   *  有失败的则向发起端口回一条 `session_write_failed`。 */
+  | { type: 'session_delete'; sessionIds: string[] }
+  /** 设置会话在历史列表里的位置：置顶 / 归档 / 普通（null）。三态互斥，故一条消息
+   *  就覆盖了置顶、取消置顶、归档、取消归档四个动作。同样天生批量。 */
+  | { type: 'session_set_placement'; sessionIds: string[]; placement: SessionPlacement }
+  /** Pin / unpin a session in the sidebar (legacy single-id form, kept for
+   *  older clients). New code should use session_set_placement above. */
   | { type: 'session_pin'; sessionId: string }
   /** Rename a session (sidebar "Rename" action). Bg updates the row and
    *  broadcasts `session_changed`. */
@@ -169,6 +187,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'switch_branch',
   'session_list',
   'session_delete',
+  'session_set_placement',
   'recorder_start',
   'recorder_stop',
   'hello',
@@ -295,7 +314,18 @@ export type ServerMessage =
   | { type: 'tool_resolved'; sessionId: string; toolName: string }
   | { type: 'session_loaded'; sessionId: string; session: SessionSnapshot | null }
   | { type: 'session_list_result'; sessions: SessionMeta[] }
-  | { type: 'session_deleted'; sessionId: string }
+  /** `session_list` 失败。刻意不复用通用 `error`：那条会被聊天视图当成本轮对话出错，
+   *  清掉运行态并弹错误条，而拉列表失败与正在进行的对话毫无关系。 */
+  | { type: 'session_list_error'; error: string }
+  /** 这批会话已被删除。与 `session_delete` 同为批量形态；只列真正删成功的。 */
+  | { type: 'session_deleted'; sessionIds: string[] }
+  /** 一次会话写操作失败了（删除 / 改位置）。只回发起端口——客户端是乐观更新的：它已经
+   *  把这些会话摘掉或改了位置，收到这条必须把权威列表拉回来，否则界面会永久停在一个
+   *  库里并不存在的状态上。刻意不复用通用 `error`：那条会被聊天视图当成本轮对话出错。 */
+  | { type: 'session_write_failed'; op: 'delete' | 'placement'; sessionIds: string[]; error: string }
+  /** 会话的列表位置变了。广播给所有端口，让其它窗口已打开的历史面板同步，
+   *  与 `session_deleted` 同款。 */
+  | { type: 'session_placement_changed'; sessionIds: string[]; placement: SessionPlacement }
   | { type: 'session_created'; sessionId: string; title: string }
   /** Broadcast when a session's metadata (pin / rename / title) changes.
    *  Carries the full updated `SessionMeta` so any open sidepanel can

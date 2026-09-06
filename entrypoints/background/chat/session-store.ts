@@ -10,8 +10,10 @@ import {
   listSessions,
   retryTreeMigration,
   sessionTreeDb,
+  updateSessionPlacement,
   updateSessionSettings,
   type SessionBackupRecord,
+  type SessionPlacement,
   type SessionRecord,
 } from '@/lib/persistence/db';
 import { DexieSessionRepo, type SessionTreeMeta } from '@/lib/persistence/session-tree';
@@ -121,6 +123,11 @@ class SessionStore {
     settings: { provider?: string; model?: string; thinkingLevel?: string },
   ): Promise<void> {
     await updateSessionSettings(id, settings);
+  }
+
+  /** 批量设置会话在历史列表里的位置（置顶 / 归档 / 普通）。单条 = 长度 1 的数组。 */
+  async updatePlacement(ids: string[], placement: SessionPlacement): Promise<void> {
+    await updateSessionPlacement(ids, placement);
   }
 
   /**

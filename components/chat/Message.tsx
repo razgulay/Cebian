@@ -7,7 +7,7 @@ import { CopyButton } from '@/components/common/CopyButton';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { MessageMetaRow, type MessageMetaProps } from '@/components/chat/MessageMetaRow';
 import { StreamingCursor } from '@/components/chat/StreamingCursor';
-import { extractUserText, extractUserAttachments, extractInlineDirectivesFromMessage } from '@/lib/agent/message-helpers';
+import { extractUserText, extractUserAttachments, extractSlashPrompt, extractInlineDirectivesFromMessage } from '@/lib/agent/message-helpers';
 import { showDialog } from '@/lib/ui/dialog';
 import { RECORDING_MIME } from '@/lib/agent/attachments';
 import { t } from '@/lib/i18n';
@@ -89,6 +89,7 @@ export function UserMessageBubble({
   isLast?: boolean;
 }) {
   const text = msg ? extractUserText(msg) : null;
+  const slashPrompt = useMemo(() => msg ? extractSlashPrompt(msg) : null, [msg]);
   const attachments = useMemo(() => msg ? extractUserAttachments(msg) : null, [msg]);
   // 内联指令块（PROMPT / SKILL / COMMAND）抽自 `<user-request>` 内文——
   // 来自与 `extractUserText` 同一段原始 inner，但跳过 stripDirectives 步骤，
@@ -155,6 +156,15 @@ export function UserMessageBubble({
       </div>
     );
   }
+
+  // 携带的提示词就写成气泡里的第一段普通文字 `/名字`，与用户自己敲的话同一个样式——
+  // 它本来就是这一轮消息的一部分，不值得为它单开一块 UI。正文（模板展开后的那一大段）
+  // 不在气泡里露出：气泡只显示用户看得懂、也确实「打过」的那几个字。
+  const slashText = slashPrompt ? `/${slashPrompt.name}` : null;
+  const bubbleText = slashText ? (text ? `${slashText} ${text}` : slashText) : text;
+  const bubble = bubbleText ?? children;
+  // 一个字没打、也没挂提示词的空消息不渲染气泡框，免得留一个空壳。
+  const hasBubble = typeof bubble === 'string' ? bubble.length > 0 : bubble != null;
 
   return (
     <div
@@ -234,9 +244,11 @@ export function UserMessageBubble({
         </div>
       )}
 
-      <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
-        {text ?? children}
-      </div>
+      {hasBubble && (
+        <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
+          {bubble}
+        </div>
+      )}
 
       {hasAttachments && (
         <div className="flex gap-1.5 flex-wrap items-center justify-end mt-1.5 px-1">
@@ -298,7 +310,12 @@ export function UserMessageBubble({
       {text != null && (
         <div className="flex h-8 items-center justify-end gap-1.5 px-1">
           <div className="flex items-center gap-1 opacity-0 pointer-events-none transition-opacity group-hover/user:opacity-100 group-hover/user:pointer-events-auto group-focus-within/user:opacity-100 group-focus-within/user:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto">
-            <CopyButton text={text} />
+            {/*
+              * 复制的就是气泡里显示的那段（含开头的 `/名字`），所见即所得。
+              * `hasBubble` 为真时它必然非空，空消息也就不会给出一个「复制了空字符串」
+              * 的假成功。
+              */}
+            {hasBubble && <CopyButton text={bubbleText ?? ''} />}
             {onEdit && (
               <Tooltip>
                 <TooltipTrigger asChild>

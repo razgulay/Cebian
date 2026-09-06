@@ -1,6 +1,6 @@
 import { getBuiltinModels, type BuiltinProvider } from '@earendil-works/pi-ai/providers/all';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import type { ProviderCredentials, CustomProviderConfig } from '@/lib/persistence/storage';
+import type { ModelIdentity, ProviderCredentials, CustomProviderConfig } from '@/lib/persistence/storage';
 import { isCustomProvider, getCustomModels, customProviderKey } from '@/lib/providers/custom-models';
 
 /** 一组可选模型：同一 provider 下的全部模型 + 展示用 label。 */
@@ -61,4 +61,24 @@ export function hasUsableModel(
   customProviders: CustomProviderConfig[],
 ): boolean {
   return listUsableModelGroups(credentials, customProviders).length > 0;
+}
+
+/**
+ * 某个模型身份此刻是否还选得出来。与 `listUsableModelGroups` 同源，因此「下拉里有没有
+ * 它」与「能不能用它发送」永远是同一个答案。
+ *
+ * 两种失效都覆盖：模型从 provider 的模型列表里消失（官方下架 / 自定义模型被删），以及
+ * provider 的凭据被删或未验证——后者 `resolveModel` 依然能解析成 `Model`，请求却必然
+ * 失败，所以不能拿它当判据（issue #62）。
+ */
+export function isUsableModel(
+  identity: ModelIdentity,
+  credentials: ProviderCredentials,
+  customProviders: CustomProviderConfig[],
+): boolean {
+  return listUsableModelGroups(credentials, customProviders).some(
+    (group) =>
+      group.provider === identity.provider &&
+      group.models.some((model) => model.id === identity.modelId),
+  );
 }

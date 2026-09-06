@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { getBuiltinModels, type BuiltinProvider } from '@earendil-works/pi-ai/providers/all';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { listUsableModelGroups, hasUsableModel } from '@/lib/providers/usable-models';
+import { listUsableModelGroups, hasUsableModel, isUsableModel } from '@/lib/providers/usable-models';
 import { customProviderKey } from '@/lib/providers/custom-models';
+import { resolveModel } from '@/lib/providers/resolve-model';
 import type {
   ProviderCredentials,
   CustomProviderConfig,
@@ -67,5 +68,42 @@ describe('listUsableModelGroups / hasUsableModel', () => {
       'github-copilot': { authType: 'oauth', accessToken: 't', verified: true },
     };
     expect(hasUsableModel(verified, NO_CUSTOM)).toBe(true);
+  });
+});
+
+describe('isUsableModel', () => {
+  const customKey = customProviderKey('acme');
+
+  it('自定义 provider 里存在的模型 → true；不在列表里的 modelId → false', () => {
+    expect(isUsableModel({ provider: customKey, modelId: 'acme-fast' }, NO_CREDS, [customConfig])).toBe(true);
+    expect(isUsableModel({ provider: customKey, modelId: 'acme-gone' }, NO_CREDS, [customConfig])).toBe(false);
+  });
+
+  it('自定义 provider 整个被删 → false', () => {
+    expect(isUsableModel({ provider: customKey, modelId: 'acme-fast' }, NO_CREDS, NO_CUSTOM)).toBe(false);
+  });
+
+  it('内置 provider：模型仍在目录里且有凭据 → true；modelId 已下架 → false', () => {
+    if (!builtinWithModels('openai')) return;
+    const creds: ProviderCredentials = {
+      openai: { authType: 'apiKey', apiKey: 'sk-x', verified: true },
+    };
+    const existing = (getBuiltinModels('openai') as Model<Api>[])[0].id;
+    expect(isUsableModel({ provider: 'openai', modelId: existing }, creds, NO_CUSTOM)).toBe(true);
+    expect(isUsableModel({ provider: 'openai', modelId: 'gpt-does-not-exist' }, creds, NO_CUSTOM)).toBe(false);
+  });
+
+  // 这条是本判据存在的理由：凭据被删后 resolveModel 依然解析得出，若拿它当门禁就会
+  // 放行一个必然失败的请求（issue #62）。
+  it('凭据被移除后：resolveModel 仍解析得出，isUsableModel 判 false', () => {
+    if (!builtinWithModels('openai')) return;
+    const existing = (getBuiltinModels('openai') as Model<Api>[])[0].id;
+    const identity = { provider: 'openai', modelId: existing };
+    expect(resolveModel(identity, NO_CREDS, NO_CUSTOM)).not.toBeNull();
+    expect(isUsableModel(identity, NO_CREDS, NO_CUSTOM)).toBe(false);
+  });
+
+  it('未知 provider → false', () => {
+    expect(isUsableModel({ provider: 'nope', modelId: 'x' }, NO_CREDS, NO_CUSTOM)).toBe(false);
   });
 });

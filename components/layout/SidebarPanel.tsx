@@ -245,13 +245,13 @@ export function SidebarPanel({ open, onClose, onSelectSession, onDeleteSession }
       // Send delete to background (handles DB + agent cleanup)
       const port = chrome.runtime.connect({ name: CLIENT_PORT });
       const onMessage = (msg: ServerMessage) => {
-        if (msg.type === 'session_deleted' && msg.sessionId === id) {
+        if (msg.type === 'session_deleted' && msg.sessionIds.includes(id)) {
           port.onMessage.removeListener(onMessage);
           port.disconnect();
         }
       };
       port.onMessage.addListener(onMessage);
-      port.postMessage({ type: 'session_delete', sessionId: id } satisfies ClientMessage);
+      port.postMessage({ type: 'session_delete', sessionIds: [id] } satisfies ClientMessage);
       // Safety timeout: disconnect after 5s if no response
       setTimeout(() => {
         port.onMessage.removeListener(onMessage);

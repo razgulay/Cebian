@@ -19,6 +19,7 @@ common:
     month: "30 天內"
     older: "更早"
     pinned: "已釘選"
+    archived: "已封存"
   toggleTheme: "切換主題"
   settings: "設定"
   back: "返回"
@@ -74,15 +75,31 @@ common:
     # $1 = 年數
     yearsAgo: "$1 年前"
   session:
-    deleteConfirmTitle: "刪除會話？"
-    # $1 = 會話標題
+    deleteConfirmTitle: "刪除對話？"
+    # $1 = 對話標題
     deleteConfirmDescription: "「$1」以及它的工作區檔案將被永久刪除，此操作無法復原。"
     running: "工作中"
     pin: "釘選"
     unpin: "取消釘選"
     rename: "重新命名"
     moreActions: "更多動作"
-    # $1 = 訊息數
+    archive: "封存"
+    unarchive: "取消封存"
+    select: "選取"
+    # $1 = 已選取的對話數
+    selectedCount:
+      1: "已選 1 項"
+      n: "已選 $1 項"
+    # $1 = 待刪除的對話數
+    deleteManyConfirmTitle:
+      1: "刪除該對話？"
+      n: "刪除這 $1 個對話？"
+    # $1 = 待刪除的對話數
+    deleteManyConfirmDescription:
+      1: "該對話及其工作區檔案將被永久刪除，且無法復原。"
+      n: "這 $1 個對話及其工作區檔案將被永久刪除，且無法復原。"
+    deleteFailed: "刪除失敗，對話仍在。"
+    placementFailed: "更新失敗，未做變更。"    # $1 = 訊息數
     messageCount:
       0: "尚無訊息"
       1: "1 則訊息"
@@ -1180,7 +1197,31 @@ vfs:
   pdfPasswordRequired: "此 PDF 需要密碼。"
   pdfWrongPassword: "密碼錯誤，請重試。"
   pdfLoadFailed: "PDF 預覽失敗：$1"
-  # $1 = 路徑
+  viewMode: "檢視模式"
+  location: "目前位置"
+  # 麵包屑裡代替原始路徑顯示的根目錄錨點
+  roots:
+    workspaces: "工作區"
+    cebian: "Cebian"
+  copyPath: "複製路徑"
+  pathCopied: "已複製路徑"
+  showCollapsed: "顯示收合的層級"
+  sandboxPreview: "沙箱預覽"
+  sandboxPreviewHint: "在獨立的沙箱頁中渲染。腳本可以執行，但無法存取擴充功能 API 或 Cebian 儲存的其他資料。"
+  staticPreview: "靜態預覽"
+  staticPreviewHint: "目前的瀏覽器無法在預覽中執行腳本，頁面以無 JavaScript 的方式渲染。"
+  # $1 = 目前頁，$2 = 總頁數
+  pageIndicator: "第 $1 / $2 頁"
+  # $1 = 總頁數
+  pageCount:
+    0: "0 頁"
+    1: "1 頁"
+    n: "$1 頁"
+  # $1 = 資料夾內的項目數
+  itemCount:
+    0: "空"
+    1: "1 個項目"
+    n: "$1 個項目"  # $1 = 路徑
   pathNotFound: "路徑不存在：$1"
   unknownError: "未知錯誤"
   # 工作區目錄還在、但對應對話已被刪除。$1 = 短 id
@@ -1242,9 +1283,12 @@ permission:
 
 # ─── 錯誤（toast、抛出的錯誤訊息）───
 errors:
+  pdfEncrypted: "這個 PDF 有密碼保護，無法預覽。請改用下載。"
+  pdfRenderFailed: "這個 PDF 無法渲染。請改用下載。"
   pagePattern:
     invalid: "頁面比對規則格式錯誤。"
     duplicate: "該規則已存在。"
+  modelUnavailable: "所選模型已無法使用，請重新選擇。"
   pageActionGone: "找不到該操作。"
   pageActionSaveFailed: "儲存失敗，請重試。"
   oauth:

@@ -19,6 +19,7 @@ common:
     month: "30 天内"
     older: "更早"
     pinned: "已固定"
+    archived: "已归档"
   toggleTheme: "切换主题"
   settings: "设置"
   back: "返回"
@@ -82,7 +83,23 @@ common:
     unpin: "取消固定"
     rename: "重命名"
     moreActions: "更多操作"
-    # $1 = 消息数
+    archive: "归档"
+    unarchive: "取消归档"
+    select: "选择"
+    # $1 = 已选中的会话数
+    selectedCount:
+      1: "已选 1 项"
+      n: "已选 $1 项"
+    # $1 = 待删除的会话数
+    deleteManyConfirmTitle:
+      1: "删除该会话？"
+      n: "删除这 $1 个会话？"
+    # $1 = 待删除的会话数
+    deleteManyConfirmDescription:
+      1: "该会话及其工作区文件将被永久删除，且无法恢复。"
+      n: "这 $1 个会话及其工作区文件将被永久删除，且无法恢复。"
+    deleteFailed: "删除失败，会话仍在。"
+    placementFailed: "更新失败，未做改动。"    # $1 = 消息数
     messageCount:
       0: "暂无消息"
       1: "1 条消息"
@@ -1181,7 +1198,31 @@ vfs:
   pdfPasswordRequired: "此 PDF 需要密码。"
   pdfWrongPassword: "密码错误，请重试。"
   pdfLoadFailed: "PDF 预览失败：$1"
-  # $1 = 路径
+  viewMode: "视图模式"
+  location: "当前位置"
+  # 面包屑里代替裸路径显示的根目录锚点
+  roots:
+    workspaces: "工作区"
+    cebian: "Cebian"
+  copyPath: "复制路径"
+  pathCopied: "已复制路径"
+  showCollapsed: "显示折叠的层级"
+  sandboxPreview: "沙箱预览"
+  sandboxPreviewHint: "在独立的沙箱页中渲染。脚本可以运行，但无法访问扩展 API 或 Cebian 存储的其他数据。"
+  staticPreview: "静态预览"
+  staticPreviewHint: "当前浏览器不能在预览中运行脚本，页面以无 JavaScript 的方式渲染。"
+  # $1 = 当前页，$2 = 总页数
+  pageIndicator: "第 $1 / $2 页"
+  # $1 = 总页数
+  pageCount:
+    0: "0 页"
+    1: "1 页"
+    n: "$1 页"
+  # $1 = 文件夹内的条目数
+  itemCount:
+    0: "空"
+    1: "1 项"
+    n: "$1 项"  # $1 = 路径
   pathNotFound: "路径不存在：$1"
   unknownError: "未知错误"
   # 工作区目录还在、但对应会话已被删除。$1 = 短 id
@@ -1243,9 +1284,12 @@ permission:
 
 # ─── 错误（toast、抛出的错误信息）───
 errors:
+  pdfEncrypted: "这个 PDF 有密码保护，无法预览。请改用下载。"
+  pdfRenderFailed: "这个 PDF 无法渲染。请改用下载。"
   pagePattern:
     invalid: "页面匹配规则格式错误。"
     duplicate: "该规则已存在。"
+  modelUnavailable: "所选模型已不可用，请重新选择。"
   pageActionGone: "找不到该操作。"
   pageActionSaveFailed: "保存失败，请重试。"
   oauth:

@@ -50,7 +50,7 @@ import {
 } from '@/lib/agent/message-helpers';
 import { getToolLabel } from '@/lib/tools/labels';
 import { uiToolRegistry } from '@/lib/tools/ui-registry';
-import { isCompactionSummary } from '@/lib/agent/compaction';
+import { isCompactionSummary } from '@/lib/agent/compaction-summary';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
 import { useContextUsage } from '@/components/chat/context/useContextUsage';
@@ -61,6 +61,7 @@ import { useStorageItem } from '@/hooks/useStorageItem';
 import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
 import { hasUsableModel } from '@/lib/providers/usable-models';
 import type { Attachment } from '@/lib/agent/attachments';
+import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import type { SessionSnapshot } from '@/lib/ipc/protocol';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
@@ -353,7 +354,12 @@ export function ChatPage({
 
   // Gemini-style send handler: bumps the snap token on successful dispatch.
   const handleSend = useCallback(
-    async (text: string, attachments: Attachment[] | undefined, expectedSessionId: string | null, options?: { displayText?: string }) => {
+    async (
+      text: string,
+      attachments: Attachment[] | undefined,
+      expectedSessionId: string | null,
+      slashPrompt: SlashPrompt | undefined,
+    ) => {
       // 临时诊断：捕获 send→reply 流水线的 `t0` 锚点。锚点通过 IPC 透传给
       // background（让 BG 算出可比 Δt），本地也立刻打 `chat:t0` 作为边界
       // 标记。锚点分配在本 tick（user click → dispatch 之前），反映从用
@@ -366,6 +372,9 @@ export function ChatPage({
       pendingTraceRef.current = trace;
       debugLog.info('ui', 'chat:handle_send',
         withSession({ sessionId: expectedSessionId ?? '', textLen: text.length }, expectedSessionId ?? ''));
+      // 切换到已有会话但其会话行尚未加载完（sessionLoading）时拒绝派发：此刻
+      // turnModel 还是上一个会话的本地草稿，若此时发送会把旧模型携带给新会话、
+      // 污染新会话行。等 onSessionLoaded 把 turnModel 重新 seed 后再放行。
       if (!isNewChat && routeSessionId !== activeSessionId) {
         return { status: 'notDispatched', reason: 'unavailable' } as const;
       }
@@ -382,7 +391,7 @@ export function ChatPage({
       const result = await send(text, attachments, expectedSessionId, {
         model: turnModel ?? undefined,
         thinkingLevel: turnThinking,
-      }, options?.displayText, pendingTraceRef.current?.t0);
+      }, slashPrompt, pendingTraceRef.current?.t0);
       if (result.status === 'dispatched') {
         hasUserOverrideModelRef.current = false;
         hasUserOverrideThinkingRef.current = false;

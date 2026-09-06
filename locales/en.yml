@@ -20,6 +20,7 @@ common:
     month: "Previous 30 days"
     older: "Older"
     pinned: "Pinned"
+    archived: "Archived"
   toggleTheme: "Toggle theme"
   settings: "Settings"
   back: "Back"
@@ -86,7 +87,23 @@ common:
     unpin: "Unpin"
     rename: "Rename"
     moreActions: "More actions"
-    # $1 = message count
+    archive: "Archive"
+    unarchive: "Unarchive"
+    select: "Select"
+    # $1 = number of selected chats
+    selectedCount:
+      1: "1 selected"
+      n: "$1 selected"
+    # $1 = number of chats to delete
+    deleteManyConfirmTitle:
+      1: "Delete 1 chat?"
+      n: "Delete $1 chats?"
+    # $1 = number of chats to delete
+    deleteManyConfirmDescription:
+      1: "The chat and its workspace files will be permanently removed. This cannot be undone."
+      n: "$1 chats and their workspace files will be permanently removed. This cannot be undone."
+    deleteFailed: "Could not delete. The chat is still there."
+    placementFailed: "Could not update the chat. Nothing changed."    # $1 = message count
     messageCount:
       0: "No messages"
       1: "1 message"
@@ -1208,7 +1225,31 @@ vfs:
   pdfPasswordRequired: "This PDF requires a password."
   pdfWrongPassword: "Incorrect password. Try again."
   pdfLoadFailed: "PDF preview failed: $1"
-  # $1 = path
+  viewMode: "View mode"
+  location: "Location"
+  # Semantic root anchors shown in the breadcrumb instead of raw paths
+  roots:
+    workspaces: "Workspaces"
+    cebian: "Cebian"
+  copyPath: "Copy path"
+  pathCopied: "Path copied"
+  showCollapsed: "Show collapsed folders"
+  sandboxPreview: "Sandboxed preview"
+  sandboxPreviewHint: "Rendered in an isolated sandbox page. Scripts can run, but cannot reach the extension APIs or anything Cebian stores."
+  staticPreview: "Static preview"
+  staticPreviewHint: "This browser cannot run scripts inside the preview. The page is rendered without JavaScript."
+  # $1 = current page, $2 = total pages
+  pageIndicator: "Page $1 of $2"
+  # $1 = total pages
+  pageCount:
+    0: "No pages"
+    1: "1 page"
+    n: "$1 pages"
+  # $1 = number of entries in the folder
+  itemCount:
+    0: "Empty"
+    1: "1 item"
+    n: "$1 items"  # $1 = path
   pathNotFound: "Path not found: $1"
   unknownError: "Unknown error"
   # Session whose workspace dir survives but the session itself was deleted. $1 = short id
@@ -1275,9 +1316,12 @@ permission:
 
 # ─── Errors (toasts, thrown messages) ───
 errors:
+  pdfEncrypted: "This PDF is password-protected and cannot be previewed. Use Download instead."
+  pdfRenderFailed: "This PDF could not be rendered. Use Download instead."
   pagePattern:
     invalid: "Not a valid match pattern."
     duplicate: "This pattern is already in the list."
+  modelUnavailable: "The selected model is no longer available. Pick another one."
   pageActionGone: "This action no longer exists."
   pageActionSaveFailed: "Could not save the action."
   oauth:

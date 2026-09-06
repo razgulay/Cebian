@@ -1,5 +1,6 @@
-// 上下文压缩（compaction）领域模块：集中存放压缩消息类型、切点计算与摘要生成，
-// 使压缩特性自包含。具体的「何时压缩 / 插入摘要 / 状态广播」编排在 session-manager。
+// 上下文压缩（compaction）领域模块：切点计算与摘要生成（依赖 pi-ai 的模型注册表）。
+// 摘要消息的类型增广与纯辅助在 compaction-summary.ts，供不需要 pi-ai 的消费者引用。
+// 具体的「何时压缩 / 插入摘要 / 状态广播」编排在 session-manager。
 
 import type { Api, Model, Models } from '@earendil-works/pi-ai';
 import {
@@ -161,8 +162,6 @@ declare module '@earendil-works/pi-agent-core' {
     structured?: StructuredSummary;
   }
 }
-
-export type { CompactionSummaryMessage };
 
 /** 取回 retainedTail 的具体类型（声明层为 unknown[]，见上方注释）；缺失返回 []。 */
 export function getRetainedTail(msg: CompactionSummaryMessage): AgentMessage[] {
@@ -562,3 +561,8 @@ export function buildArchiveFilename(compactAt: number, rng: () => number = Math
   const suffix = Math.floor(rng() * 0xffffff).toString(16).padStart(6, '0');
   return `${iso}-${suffix}.json`;
 }
+
+/** Re-export pi-agent-core's CompactionSummaryMessage so other modules can pull it
+ *  from this consolidation point without taking a direct dep on pi-agent-core's
+ *  internal type layout. */
+export type { CompactionSummaryMessage };

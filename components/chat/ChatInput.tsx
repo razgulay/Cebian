@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
 import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
@@ -14,10 +14,13 @@ import { MentionPopover } from '@/components/chat/MentionPopover';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
+import { resolveModel } from '@/lib/providers/resolve-model';
+import { isUsableModel } from '@/lib/providers/usable-models';
 import { startElementPicker, cancelElementPicker } from '@/lib/browser/element-picker';
 import { scanPrompts, type PromptMeta } from '@/lib/ai-config/scanner';
 import { replaceTemplateVars } from '@/lib/ai-config/template';
 import { gatherTemplateVars } from '@/lib/ai-config/template-vars-sidepanel';
+import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import { vfs } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import { CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
@@ -69,7 +72,7 @@ interface ChatInputProps {
     message: string,
     attachments: Attachment[] | undefined,
     expectedSessionId: string | null,
-    options?: { displayText?: string },
+    slashPrompt: SlashPrompt | undefined,
   ) => Promise<PromptDispatchResult>;
   onOpenSettings?: () => void;
   /** 跳转到「文件系统」设置页（独立的快捷入口 — 放在工具栏左侧、靠近 pick element，
@@ -135,6 +138,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 ) {
   const [value, setValue] = useState(() => initialValue ?? '');
   const [showSlash, setShowSlash] = useState(false);
+  // 本轮挂着的斜杠提示词。选中 `/x` 不把正文倒进输入框，而是在输入框首行左端挂一枚
+  // `/名字` 标记，正文在发送时自成信封里的一段，不掺进用户自己敲的话（issue #53）。
+  // 标记是独立元素、不是文本：因此它天然不可分割——选区碰不到它、光标进不去，
+  // 也就不需要任何「从文本里认出它」的解析。
+  const [slashPrompt, setSlashPrompt] = useState<SlashPrompt | null>(null);
+  // 标记的实测宽度。textarea 的 `text-indent` 只缩进首行，用它给标记让出位置，
+  // 文字便从标记右侧接着流，换行后第二行自动回到整宽。
+  const slashPillRef = useRef<HTMLSpanElement>(null);
+  const [slashPillWidth, setSlashPillWidth] = useState(0);
+  // 选中一条提示词要 await 读 VFS + 采集模板变量（页面脚本注入、剪贴板），期间用户可能
+  // 已经切了会话、又点了另一条、把已挂的标记退格摘掉，或者干脆已经把消息发出去了。
+  // 这四处都自增，选中落定前比对世代号，过期的结果直接丢弃。
+  const slashPromptSeqRef = useRef(0);
   const [prompts, setPrompts] = useState<PromptMeta[]>([]);
   const [selectedPromptIndex, setSelectedPromptIndex] = useState(0);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -191,6 +207,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // 图片 / 支持哪些思考档 等能力派生共用这一次解析。`useContextUsage` 走同一份
   // ——避免两份 useStorageItem 监听 + 两次 resolveModel 各自漂移（review 标记过）。
   const { model: resolvedModel } = useResolvedModel(currentModel);
+
+  // 选中的模型是否还选得出来。`resolveModel` 不看凭据（凭据被删也照样解析成功），因此
+  // 不能拿它当门禁——发送前的拦截与 ModelSelector 的失效标记共用 `isUsableModel`
+  // 这一个判据（issue #62）。
+  const modelUsable = useMemo(
+    () => !!currentModel && isUsableModel(currentModel, providers, customProviderList),
+    [currentModel, providers, customProviderList],
+  );
 
   // 当前模型支持的思考档：pi 按模型 thinkingLevelMap 推导（非推理模型只返回 ['off']），
   // 多于一档可选时才显示选择器。存的档位可能超出当前模型上限（切到弱模型）→ 夹进支持集
@@ -355,6 +379,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     openMicPermissionPage();
   }, [speechActive, finalizePendingInterim, speech]);
 
+  /** 输入框滚动时把标记一并带走。它绝对定位在容器上、不跟随文本滚动，不同步就会
+   *  浮在原地压住滚上来的第二屏文字。外层的 `overflow-hidden` 负责裁掉溢出部分。 */
+  const syncSlashPillOffset = useCallback(() => {
+    const pill = slashPillRef.current;
+    const ta = textareaRef.current;
+    if (pill && ta) pill.style.transform = `translateY(${-ta.scrollTop}px)`;
+  }, []);
+
   // Auto-resize textarea. When the value is empty (initial mount, after
   // send) we clear the inline height entirely and let CSS `min-h-13 /
   // max-h-37.5` drive sizing. This avoids a first-paint race in the
@@ -372,7 +404,31 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     }
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 150) + 'px';
-  }, [value]);
+    // 高度变了 scrollTop 可能被浏览器悄悄改掉（且不发 scroll 事件），补一次同步。
+    syncSlashPillOffset();
+    // 也要盯着 `slashPillWidth`：标记挂上/摘掉会改变 `text-indent`，首行随之重排、
+    // 行数可能变，但 value 一个字都没动——只看 value 的话高度就停在旧值上了。
+  }, [value, slashPillWidth, syncSlashPillOffset]);
+
+  // 标记宽度只能实测：提示词名字的长度、界面字体、侧边栏宽度（`max-w-[45%]` 截断）
+  // 都会改变它，写死任何常量都会让首行文字与标记错位。ResizeObserver 覆盖字体加载
+  // 完成、侧边栏拖宽这些迟到的变化。
+  useLayoutEffect(() => {
+    const pill = slashPillRef.current;
+    if (!pill) {
+      setSlashPillWidth(0);
+      return;
+    }
+    // +6px：标记与正文之间的呼吸位。
+    const measure = () => {
+      setSlashPillWidth(Math.ceil(pill.getBoundingClientRect().width) + 6);
+      syncSlashPillOffset();
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(pill);
+    return () => observer.disconnect();
+  }, [slashPrompt?.name, syncSlashPillOffset]);
 
   // Cancel picker on unmount
   useEffect(() => {
@@ -417,7 +473,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSlash]);
 
-  const canSend = value.trim().length > 0 || quoteChips.length > 0 || mentions.length > 0;
+  // 可发条件：用户打了字、挂着提示词、或者挂了 quote / mention chip 任一——
+  // 后两者即便输入框为空也算可发，因为 chip 自己就是这一轮的请求内容。
+  const canSend = value.trim().length > 0 || quoteChips.length > 0 || mentions.length > 0 || slashPrompt !== null;
 
   // Recorder integration. The captured session lands in attachments via
   // the channel subscription below — NOT via `recorder.stop()`'s return
@@ -475,9 +533,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       debugLog.info('ui', 'send:rejected', { reason: 'busy' });
       return;
     }
-    if (!currentModel) {
-      debugLog.info('ui', 'send:rejected', { reason: 'no_model' });
-      toast.error(t('chat.composer.needModel'), {
+    // 没选模型 → 引导去选；选了但已失效（下架 / 凭据被删）→ 说明原因并让用户重选。
+    // 在这里拦住，用户输入的文案就还留在输入框里，不会因为后台 throw 而白打一遍。
+    if (!currentModel || !modelUsable) {
+      debugLog.info('ui', 'send:rejected', { reason: currentModel ? 'model_unusable' : 'no_model' });
+      toast.error(currentModel ? t('errors.modelUnavailable') : t('chat.composer.needModel'), {
         action: onOpenSettings ? { label: t('chat.composer.goToSettings'), onClick: onOpenSettings } : undefined,
       });
       return;
@@ -496,21 +556,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // chip-prepended version) as the slash-command candidate — see the
     // comment in the slash block below.
     let text = outgoingText.trim();
-    // `displayText` is what shows in the user's bubble in chat history.
-    // Slash commands (`/foo bar`) overwrite both `text` and `displayText`
-    // below so the bubble shows the user's typed words after the command
-    // (`bar`), never the expanded prompt body. Quote chips render as their
-    // own inline-directive shape on send — see the splice block below —
-    // so the bubble's `extractUserText` strips the directive via the same
-    // path that strips mention / slash directives, and the bubble body
-    // shows just the user's typed words. The quote chip itself surfaces
-    // above the bubble via `extractInlineDirectivesFromMessage` (same
-    // pipeline as mention chips).
-    let displayText = outgoingText.trim();
+    // 用户 bubble 显示逻辑：slug `/foo bar` 时，bubble 只显示 `bar`，prompt body
+    // 通过 chip 单独显示。Quote chips / mention chips 也是同样的「chip 在前、
+    // bubble 只剩用户原话」模型，由 `extractUserText` / `extractInlineDirectivesFromMessage`
+    // 通过 [DIRECTIVE — ...] 形态剥离（与 mention chip 同管线）。
     const dispatchSessionId = sessionIdRef.current;
 
     isDispatchingRef.current = true;
     setIsDispatching(true);
+    // 作废在途的提示词选中。只靠 stillCurrent() 里那个 isDispatchingRef 快照不够：
+    // 一整轮发送完全可能在选中的 await 窗口内起止（gatherTemplateVars 要注入页面脚本、
+    // 读剪贴板，比一次纯文本发送慢得多），等选中落定时该标志已经变回 false，那条被
+    // 放弃的提示词就会重新挂上，抹掉用户已经在写的下一条消息并抢走焦点。
+    slashPromptSeqRef.current++;
 
     try {
       // Resolve prompt at send-time if inline expansion is disabled. The
@@ -551,11 +609,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               const slashDirective =
                 `[DIRECTIVE — ATTACHED COMMAND: "${foundPrompt.name}"]\n\n${replaced}\n\n[END DIRECTIVE]`;
               text = userInput ? `${slashDirective}\n\n---\n\n${userInput}` : slashDirective;
-              // Bubble shows just the user-typed words (not the expanded
-              // prompt body — that lives behind the chip). Empty input
-              // means the bubble renders as empty; the chip in the strip
-              // is what the user actually sees for "what command did I run".
-              displayText = userInput;
+              // bubble 显示由 `extractUserText` 从 [DIRECTIVE — ...] 形态剥离后只
+              // 剩用户原话；空输入 → bubble 为空（chip 替代），符合「这一轮我点了
+              // 哪个 command」的可视化预期。
             } catch {
               debugLog.info('ui', 'send:rejected', { reason: 'slash_read_failed', name });
               toast.error(t('chat.composer.readPromptFailed'));
@@ -867,7 +923,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         text,
         outgoing.length > 0 ? outgoing : undefined,
         dispatchSessionId,
-        { displayText },
+        slashPrompt ?? undefined,
       );
       if (result.status !== 'dispatched') return;
       if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
@@ -875,6 +931,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       setValue('');
       setAttachments([]);
       attachmentsRef.current = [];
+      setSlashPrompt(null);
       setShowSlash(false);
       setHistoryIndex(null);
       setDraft('');
@@ -919,6 +976,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     quoteChipsRef.current = [];
     setMentions([]);
     mentionsRef.current = [];
+    setSlashPrompt(null);
+    slashPromptSeqRef.current++;
     const prev = previousSessionIdRef.current;
     const next = sessionId ?? null;
     if (prev !== null && prev !== next) {
@@ -965,6 +1024,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
     }
 
+    // 光标停在最前面再按退格 = 摘掉挂着的提示词。标记就在文字前面，「往前删」删到的
+    // 正是它——与 ChatGPT / Claude 的 pill 一致。整块摘除是唯一的粒度，因为它压根
+    // 不是文本，没有「删掉一半」这回事。
+    if (e.key === 'Backspace' && slashPrompt) {
+      const ta = textareaRef.current;
+      if (ta && ta.selectionStart === 0 && ta.selectionEnd === 0) {
+        e.preventDefault();
+        setSlashPrompt(null);
+        slashPromptSeqRef.current++;
+        return;
+      }
+    }
+
     // ↑ / ↓ navigate previously sent user messages, but only when the caret
     // is at the absolute start (↑) or end (↓) of the textarea, so multi-line
     // editing is never disturbed. The slash command menu (when visible)
@@ -986,6 +1058,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           });
         };
 
+        // 翻历史只换文本，不动挂着的提示词：「这一轮带什么指令」与「这一轮说什么话」
+        // 是两件事。外部 `fill()` 同理。
         if (e.key === 'ArrowUp' && ta.selectionStart === 0 && ta.selectionEnd === 0) {
           if (historyIndex === null) {
             e.preventDefault();
@@ -1046,13 +1120,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     if (historyIndex !== null) setHistoryIndex(null);
   };
 
-  // 由外部（欢迎页示例卡片）填入文本并聚焦，不夺走输入框对 value 的所有权。
-  const fill = useCallback((text: string) => {
-    setValue(text);
-    const lastToken = text.split(/\s/).at(-1) ?? '';
-    setShowSlash(lastToken.startsWith('/'));
-    setHistoryIndex(null);
-    // 等 value 提交后再聚焦并把光标移到末尾，方便用户接着改。
+  /** 聚焦输入框并把光标移到末尾。value 是受控的，得等这一次提交渲染完再设光标。 */
+  const focusCaretAtEnd = useCallback(() => {
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
@@ -1060,6 +1129,16 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       el.setSelectionRange(el.value.length, el.value.length);
     });
   }, []);
+
+  // 由外部（欢迎页示例卡片）填入文本并聚焦，不夺走输入框对 value 的所有权。
+  const fill = useCallback((text: string) => {
+    setValue(text);
+    const lastToken = text.split(/\s/).at(-1) ?? '';
+    setShowSlash(lastToken.startsWith('/'));
+    setHistoryIndex(null);
+    // 等 value 提交后再聚焦并把光标移到末尾，方便用户接着改。
+    focusCaretAtEnd();
+  }, [focusCaretAtEnd]);
 
   // Insert text at the current caret position (or append if caret is at end).
   // Used by the "Quote" feature when the user selects text in an assistant
@@ -1237,8 +1316,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // 经过这里，popover 不会被这次 focus 关闭。
   }, []);
 
-  useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
-
   // Quote 按钮 click 后把焦点送回 textarea — 在 quoteChips 增长时 commit 后
   // 触发 focus（synchronously 在 onClick 内调 focus() 会被后续 commit 偷走）。
   // `preventScroll: true` 防止 sidepanel 滚到 textarea（一般不需要，但避免
@@ -1268,6 +1345,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     }
     prevAttachmentCountRef.current = attachments.length;
   }, [attachments]);
+
+  useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
 
   // Scan prompts when slash menu opens
   useEffect(() => {
@@ -1351,30 +1430,38 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // Handle prompt selection from slash menu
   const handlePromptSelect = async (prompt: PromptMeta) => {
     if (isDispatchingRef.current) return;
-    if (isExpandInline) {
-      try {
-        const raw = await vfs.readFile(`${CEBIAN_PROMPTS_DIR}/${prompt.fileName}`, 'utf8');
-        const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
-        const { body } = parseFrontmatter(content);
-        const vars = await gatherTemplateVars();
-        const replaced = replaceTemplateVars(body.trim(), vars);
-        if (isDispatchingRef.current) return;
-        setValue(replaced);
-        setShowSlash(false);
-        textareaRef.current?.focus();
-      } catch {
-        toast.error(t('chat.composer.readPromptFailed'));
-      }
-    } else {
-      // Replace only the last whitespace-separated token (the `/writing` part)
-      // with the selected command, preserving any text the user typed before it.
-      const lastTokenStart = value.search(/\S+$/);
-      const next = lastTokenStart >= 0
-        ? value.slice(0, lastTokenStart) + `/${prompt.name} `
-        : `/${prompt.name} `;
-      setValue(next);
+    const seq = ++slashPromptSeqRef.current;
+    const selectedSessionId = sessionIdRef.current;
+    // 选中那一刻输入框里的内容（就是用来筛选的 `/xxx`）。落定时按它剥前缀，
+    // 等待期间接着敲进去的话必须原样留下。
+    const queryAtSelect = value;
+    // 结果落定时仍是同一个会话、且没有更晚的选中把它顶掉，才允许写入。
+    const stillCurrent = () =>
+      !isDispatchingRef.current
+      && slashPromptSeqRef.current === seq
+      && sessionIdRef.current === selectedSessionId;
+    try {
+      const raw = await vfs.readFile(`${CEBIAN_PROMPTS_DIR}/${prompt.fileName}`, 'utf8');
+      const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw as Uint8Array);
+      const { body } = parseFrontmatter(content);
+      const vars = await gatherTemplateVars();
+      // 模板变量在**选中的这一刻**展开：挂上去的正文就是最终会发出去的文本。
+      const replaced = replaceTemplateVars(body.trim(), vars);
+      if (!stillCurrent()) return;
+      setSlashPrompt({ name: prompt.name, body: replaced });
+      // 清掉用来筛选的那截 `/xxx`——它的使命结束了，提示词已经挂成标记。
+      // 读 VFS + 采集模板变量是个不短的 await，期间用户完全可能接着往下敲，
+      // 那些字是他要发的正文，一个都不能抹掉。
+      setValue((v) => {
+        if (v.startsWith(queryAtSelect)) return v.slice(queryAtSelect.length).replace(/^[ \t]+/, '');
+        // 等待期间把筛选词自己改短 / 改乱了：仍按「开头那截非空白」当筛选词剥掉。
+        if (v.startsWith('/')) return v.replace(/^\/\S*/, '').replace(/^[ \t]+/, '');
+        return v;
+      });
       setShowSlash(false);
-      textareaRef.current?.focus();
+      focusCaretAtEnd();
+    } catch {
+      if (stillCurrent()) toast.error(t('chat.composer.readPromptFailed'));
     }
   };
 
@@ -2181,19 +2268,36 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           )}
         </div>
 
-        {/* Textarea */}
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={value}
-          onChange={(e) => handleInput(e.target.value)}
-          onKeyDown={(e) => { handleKeyDown(e); if (e.key === 'Escape' && onCancelEdit) { e.preventDefault(); onCancelEdit(); } }}
-          onPaste={handlePaste}
-          placeholder={t('chat.composer.placeholder')}
-          disabled={isDispatching}
-          spellCheck={false}
-          className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[length:var(--chat-font-size)] font-medium px-1.5 py-0.5 min-h-6 max-h-37.5 leading-tight placeholder:text-muted-foreground/50"
-        />
+        {/* Textarea + slash prompt pill.
+          * 标记绝对定位在首行左端，textarea 用 `text-indent` 给它让出首行的位置；
+          * 外层 `overflow-hidden` 负责在输入框滚动时把它裁掉。 */}
+        <div className="relative overflow-hidden">
+          {slashPrompt && (
+            <span
+              ref={slashPillRef}
+              // `top-2 / left-3` 对齐 textarea 的 `py-2 / px-3`；字号行高与首行文字
+              // 完全一致，标记的盒高因此正好是一个行框，天然坐在首行上。
+              // `max-w-[45%]` 保证名字再长，首行也总还有地方写字。
+              className="pointer-events-none absolute top-2 left-3 max-w-[45%] truncate rounded-md bg-primary/10 px-1.5 font-mono text-[0.85rem] leading-relaxed text-primary"
+            >
+              /{slashPrompt.name}
+            </span>
+          )}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={value}
+            onChange={(e) => handleInput(e.target.value)}
+            onKeyDown={(e) => { handleKeyDown(e); if (e.key === 'Escape' && onCancelEdit) { e.preventDefault(); onCancelEdit(); } }}
+            onPaste={handlePaste}
+            onScroll={syncSlashPillOffset}
+            placeholder={t('chat.composer.placeholder')}
+            disabled={isDispatching}
+            spellCheck={false}
+            style={slashPrompt && slashPillWidth ? { textIndent: slashPillWidth } : undefined}
+            className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[0.85rem] px-3 py-2 min-h-13 max-h-37.5 leading-relaxed placeholder:text-muted-foreground/50"
+          />
+        </div>
 
         {/* Toolbar — two fixed rows so every action has a stable slot:
           *

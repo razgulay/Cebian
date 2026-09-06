@@ -23,6 +23,7 @@ import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-a
 import { clampThinkingLevel } from '@earendil-works/pi-ai';
 import { createCebianAgent } from '../agent/factory';
 import { composeUserMessage, composeSystemPrompt } from '../agent/prompt-composer';
+import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import { resolveProviderApiKey } from '../providers/credentials';
 import {
   COMPACTION_SETTINGS,
@@ -31,15 +32,17 @@ import {
   clampedCompactionKeepRecent,
   clampedCompactionReserve,
   findCompactionCutPoint,
-  getRetainedTail,
   runCompaction,
   parseStructuredSummary,
-  createCompactionSummaryMessage,
-  isCompactionSummary,
   usableCompactionTarget,
-  type CompactionSummaryMessage,
   type CompactionTarget,
 } from '@/lib/agent/compaction';
+import {
+  createCompactionSummaryMessage,
+  getRetainedTail,
+  isCompactionSummary,
+  type CompactionSummaryMessage,
+} from '@/lib/agent/compaction-summary';
 import { appendSessionMessage, sessionStore } from './session-store';
 import type { SessionTreeMeta } from '@/lib/persistence/session-tree';
 import {
@@ -189,6 +192,13 @@ interface AgentSession {
    */
   compactionController?: AbortController;
   modelKey: string;
+  /**
+   * 活 agent 当前挂的是「兜底模型」——会话行里的模型身份解析不出（被下架 / provider
+   * 被删），`createAgent` 用全局种子顶上，好让打开旧会话、切分支这类不发请求的操作
+   * 仍然可用（issue #62）。此时会话行与 agent 不一致，**不允许派发**：prompt / retry
+   * 只有在本轮 turn 显式带来一个能解析的模型时才清掉此标记并放行，否则诚实报错。
+   */
+  modelFallback?: boolean;
   /** Unified interactive tool bridge manager for this session. */
   toolCtx: SessionToolContext;
   /**
@@ -672,22 +682,46 @@ class SessionManager {
     return { model: fallback, apiKey: await resolveProviderApiKey(fallback.provider) };
   }
 
-  /** Get or create the `AgentSession` for a session id */
-  private async getOrCreateAgent(sessionId: string): Promise<AgentSession> {
-    const existing = this.sessions.get(sessionId);
-    if (existing) return existing;
+  /** Get or create the `AgentSession` for a session id.
+   *
+   *  `turnModel` 是本轮发送携带的模型身份（prompt / retry / editMessage 的 `turn.model`）。
+   *  仅在需要冷建 agent 时生效，用于让用户当下的选择压过会话行里可能已失效的旧模型
+   *  （issue #62）。不带 turn 的入口（如 switchBranch）省略即可。
+   *
+   *  并发去重（`creating`）按 sessionId 合并：同一会话的并发冷建只跑一次，后到者拿到
+   *  先到者的 agent；后到者自己的 `turnModel` 随后在 prompt / retry 的 modelChanged
+   *  分支里照常生效。但先到者可能正是拿着那份失效身份建失败的——那种情况下带了
+   *  `turnModel` 的调用方不该被连坐，清掉失败的 pending 后重跑一轮，用自己的身份建。 */
+  private async getOrCreateAgent(
+    sessionId: string,
+    turnModel?: ModelIdentity,
+  ): Promise<AgentSession> {
+    for (;;) {
+      const existing = this.sessions.get(sessionId);
+      if (existing) return existing;
 
-    // Guard against concurrent creation
-    const pending = this.creating.get(sessionId);
-    if (pending) return pending;
+      // Guard against concurrent creation
+      const pending = this.creating.get(sessionId);
+      if (pending) {
+        try {
+          return await pending;
+        } catch (err) {
+          // 自己没带身份 → 没有比先到者更好的牌可打，如实抛出。
+          if (!turnModel) throw err;
+          if (this.creating.get(sessionId) === pending) this.creating.delete(sessionId);
+          continue;
+        }
+      }
 
-    const promise = this.createAgent(sessionId);
-    this.creating.set(sessionId, promise);
-    try {
-      const agentSession = await promise;
-      return agentSession;
-    } finally {
-      this.creating.delete(sessionId);
+      const promise = this.createAgent(sessionId, turnModel);
+      this.creating.set(sessionId, promise);
+      try {
+        const agentSession = await promise;
+        return agentSession;
+      } finally {
+        // 只清自己那一条：失败重试的窗口里可能已有别的调用方装上了新的 pending。
+        if (this.creating.get(sessionId) === promise) this.creating.delete(sessionId);
+      }
     }
   }
 
@@ -700,8 +734,13 @@ class SessionManager {
    * 到达这里时会话行一定已存在：brand-new 会话的行由 prompt() 在本函数前写好（带本轮
    * 携带的选择），已有会话的行带它自己存的选择。in-place 的 retry / 切模型路径复用活
    * agent，不走这里。
+   *
+   * 模型身份优先级：本轮 turn（`turnModel`）> 会话行 > 全局种子。见下方注释。
    */
-  private async createAgent(sessionId: string): Promise<AgentSession> {
+  private async createAgent(
+    sessionId: string,
+    turnModel?: ModelIdentity,
+  ): Promise<AgentSession> {
     // 会话行 = 本会话模型 / 思考档的真相来源；transcript 从会话树投影
     //（store.open 已 sanitize，issue #43，此处拿到的即干净数据）。
     const loaded = await sessionStore.open(sessionId);
@@ -709,15 +748,56 @@ class SessionManager {
     const messages: AgentMessage[] = existingSession?.messages ?? [];
     const sessionCreated = !!existingSession;
 
-    // 从会话行自己的模型身份解析（而非全局 lastSelectedModel）。行里没有可用模型（空串 /
-    // 旧备份恢复来的）时传 undefined，让 resolveSessionModel 回退全局；仍解析不出则
-    // throw（诚实报错，让用户重选），与 prompt / retry 三路一致。
+    // 模型身份三级优先：本轮 turn（`turnModel`）> 会话行 > 全局种子。
+    //
+    // turn 必须压过会话行：模型被下架（provider 更新模型列表 / pi-ai 升级）后，会话行
+    // 里存的旧模型再也解析不出，而用户已经在输入框换成了仍然可用的模型。若此处只认会话
+    // 行就会先 throw，用户换任何模型都发不出去（issue #62）。
+    //
+    // 行里没有可用模型（空串 / 旧备份恢复来的）时传 undefined，让 resolveSessionModel
+    // 回退全局种子。
     const sessionIdentity: ModelIdentity | undefined =
       existingSession?.provider && existingSession?.model
         ? { provider: existingSession.provider, modelId: existingSession.model }
         : undefined;
-    const resolved = await this.resolveSessionModel(sessionIdentity);
-    if (!resolved) throw new Error('No model selected or model not found');
+    // 逐级降落。turn 身份解析不出（用户选的模型也没了 / 凭据被并行 tab 拔掉）时要先落回
+    // 会话行，而不是直接跳到全局种子——会话行往往仍然有效，跳过它会让本可成功的冷建失败，
+    // 连带把并发等在同一次冷建上的其它调用方一起拖垮。
+    let resolved = turnModel ? await this.resolveSessionModel(turnModel) : null;
+    let usedIdentity: 'turn' | 'row' | 'seed' = 'turn';
+    if (!resolved) {
+      // sessionIdentity 为空时 resolveSessionModel 自己会回退全局种子（旧会话行 / 旧备份）
+      resolved = await this.resolveSessionModel(sessionIdentity);
+      usedIdentity = sessionIdentity ? 'row' : 'seed';
+    }
+    if (!resolved && sessionIdentity) {
+      // 会话行的模型也解析不出（下架 / provider 被删）：用全局种子顶上，让「打开旧会话」
+      // 「切分支」这类不发请求的操作不至于整体不可用。顶上的身份不落库——会话行保留原身份，
+      // UI 据它把失效模型显示出来让用户重选。
+      console.warn('[session-manager] session model cannot be resolved, falling back to global default', sessionId, sessionIdentity);
+      resolved = await this.resolveSessionModel(undefined);
+      usedIdentity = 'seed';
+    }
+    if (!resolved) throw new Error(t('errors.modelUnavailable'));
+
+    // 活 agent 挂的是全局种子、而会话行明明写着另一个（已失效的）模型：两者不一致，标记之。
+    // 派发路径见到该标记会拒发，除非本轮 turn 显式带来一个能解析的模型——所以顶上来的种子
+    // 绝不会「悄悄替用户换个模型发出去」。会话行本来就没有模型时不算（那是既有的种子语义）。
+    const usedFallback = usedIdentity === 'seed' && !!sessionIdentity;
+
+    // 本轮 turn 压过了会话行的失效身份：把行改正（会话行是真相）。此后 prompt / retry
+    // 的 modelChanged 判定会因 modelKey 已等于 turnKey 而为 false，不会重复写库。
+    if (
+      existingSession &&
+      turnModel &&
+      usedIdentity === 'turn' &&
+      (turnModel.provider !== existingSession.provider || turnModel.modelId !== existingSession.model)
+    ) {
+      await sessionStore.updateSettings(sessionId, {
+        provider: turnModel.provider,
+        model: turnModel.modelId,
+      });
+    }
 
     const thinkingLvl = existingSession?.thinkingLevel || (await lastSelectedThinkingLevel.getValue());
 
@@ -756,6 +836,7 @@ class SessionManager {
       sessionCreated,
       phase: 'idle',
       modelKey: `${resolved.provider}/${resolved.modelId}`,
+      ...(usedFallback ? { modelFallback: true } : {}),
       toolCtx,
       permissionBridge,
       unsubscribeAgent: () => {},
@@ -1116,16 +1197,17 @@ class SessionManager {
    *
    *  `turn` 是页面随本条消息携带的「本次发送所用的模型 / 思考档」——属于该会话
    *  的选择。新会话据它建行；已有会话据它就地刷新活 agent 并落库到会话行（会话
-   *  行是真相）。缺省时回退全局 lastSelectedModel 充当「新对话默认种子」（向后兼容）。 */
+   *  行是真相）。缺省时回退全局 lastSelectedModel 充当「新对话默认种子」（向后兼容）。
+   *
+   *  `slashPrompt` 是本轮携带的斜杠提示词，在 user 消息信封里自成一块，不与用户
+   *  自己敲的话混在一起（见 lib/ai-config/slash-prompt.ts）。 */
   async prompt(
     sessionId: string,
     text: string,
     attachments: Attachment[] = [],
     turn?: TurnSettings,
-    /** 临时诊断：渲染端捕获的 `performance.now()` 锚点；缺省则 BG 自己起锚。
-     *  跨 context 时间线可比性靠它：renderer 与 SW 的 `performance.now()` 起
-     *  点不同，各自起锚会让 Δt 出现负数。 */
     traceT0?: number,
+    slashPrompt?: SlashPrompt,
   ): Promise<void> {
     // 临时诊断：捕获 trace 锚点。`traceT0` 来自 renderer 透传时复用同一锚点；
     // 否则 BG 自己起新锚点（旧客户端 / retry / 非渲染端入口）。
@@ -1153,7 +1235,7 @@ class SessionManager {
         const modelCfg = turn?.model ?? globalModel;
         const thinkingLvl = turn?.thinkingLevel ?? globalThinking;
         if (!modelCfg) {
-          throw new Error('No model selected or model not found');
+          throw new Error(t('errors.modelUnavailable'));
         }
         const trimmed = text.trim();
         const title = trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : '');
@@ -1188,7 +1270,7 @@ class SessionManager {
       }
     }
 
-    const agentSession = await this.getOrCreateAgent(sessionId);
+    const agentSession = await this.getOrCreateAgent(sessionId, turn?.model);
     trace.mark('bg:agent_ready', { modelKey: agentSession.modelKey });
     // 临时诊断：把 trace handle 按 sessionId 暂存，让 `handleAgentEvent` 复用
     // 同一锚点打 `bg:agent_start` 等标记；agent_end 消费完后 `delete` 释放。
@@ -1224,15 +1306,24 @@ class SessionManager {
       return;
     }
 
+    // 会话挂着顶上来的兜底模型（会话行的模型已失效）而本轮没带来任何模型：派发就等于
+    // 「悄悄换个模型替用户发出去」。在改动任何会话字段之前就拒绝（issue #62）。
+    const turnKey = turn?.model
+      ? `${turn.model.provider}/${turn.model.modelId}`
+      : null;
+    if (agentSession.modelFallback && turnKey == null) {
+      throw new Error(t('errors.modelUnavailable'));
+    }
+
     // 模型 / 思考档切换检测：以本轮携带的 turn 为准（而非全局）。model 与
     // thinkingLevel 在协议里各自可选，故分别判断、分别落库——只要任一项变了就刷新活
     // agent 并把变的字段写回会话行（会话行是真相）。turn 缺省（旧客户端不带）时整段
     // 跳过，活 agent 保持会话选择不动。
     if (turn) {
-      const turnKey = turn.model
-        ? `${turn.model.provider}/${turn.model.modelId}`
-        : null;
       const modelChanged = turnKey != null && turnKey !== agentSession.modelKey;
+      // 本轮显式带来了模型 → 兜底状态就此解除。turnKey 恰好等于兜底模型时 modelChanged
+      // 为 false，但那同样是用户的显式选择，一并放行并在下面把会话行改正。
+      const clearedFallback = turnKey != null && agentSession.modelFallback === true;
       if (modelChanged) {
         // 就地刷新活 agent。与 retry 不同，这里没有 resume/cancel 窗口：换字段是同步
         // 赋值，下面正常派发会触发 agent_start，故不进 preparing、不挂 controller。
@@ -1240,7 +1331,7 @@ class SessionManager {
         // baseUrl / openrouter 头一致）。解析失败（模型被删 / 凭据被并行 tab 拔掉）则
         // throw，与 createAgent / retry 三路一致地诚实报错。
         const resolved = await this.resolveSessionModel(turn.model);
-        if (!resolved) throw new Error('No model selected or model not found');
+        if (!resolved) throw new Error(t('errors.modelUnavailable'));
         agentSession.agent.state.model = resolved.model;
         agentSession.modelKey = turnKey!;
       }
@@ -1257,19 +1348,25 @@ class SessionManager {
         agentSession.agent.state.thinkingLevel = nextThinking!;
       }
       // 落库到会话行——会话行是真相来源。只写变了的字段；全都没变则不调 updateSettings。
-      if (agentSession.sessionCreated && (modelChanged || thinkingChanged)) {
+      // `clearedFallback` 也要写：那种情况下会话行还留着失效的旧模型，即便本轮 turn 与
+      // 兜底模型同键（modelChanged=false），也该把行改正成用户此刻选定的模型。
+      const persistModel = modelChanged || clearedFallback;
+      if (agentSession.sessionCreated && (persistModel || thinkingChanged)) {
         await sessionStore.updateSettings(sessionId, {
-          provider: modelChanged ? turn.model!.provider : undefined,
-          model: modelChanged ? turn.model!.modelId : undefined,
+          provider: persistModel ? turn.model!.provider : undefined,
+          model: persistModel ? turn.model!.modelId : undefined,
           thinkingLevel: thinkingChanged ? agentSession.agent.state.thinkingLevel : undefined,
         });
       }
+      // 会话行确实改正之后（或本来就无需改正）才解除兜底标记：落库失败时标记必须留着，
+      // 否则活 agent 变成「无人看守」而行里还写着失效模型。
+      if (clearedFallback) agentSession.modelFallback = false;
     }
 
     // 本轮记忆开关的单一快照：同时喂给 user 消息注入与 system prompt 刷新，
     // 保证一轮内两处读同一个值（原子门控，避免读到两个快照而前后不一致）。
     const memoryEnabled = (await memorySettings.getValue()).enabled;
-    const enriched = await composeUserMessage(text, attachments, memoryEnabled);
+    const enriched = await composeUserMessage(text, attachments, memoryEnabled, slashPrompt);
     const images = extractImages(attachments);
     trace.mark('bg:prompt_composed', { textLen: enriched.length, imgCount: images.length });
 
@@ -1913,7 +2010,9 @@ class SessionManager {
     // synchronous phase check below. JavaScript's microtask semantics
     // guarantee one of them flips phase to 'preparing' before any other
     // awakened microtask reads it — so we don't need a separate mutex.
-    const agentSession = await this.getOrCreateAgent(sessionId);
+    //
+    // 与 prompt 一致地传本轮 turn 的模型：冷建时压过会话行的失效旧模型（issue #62）。
+    const agentSession = await this.getOrCreateAgent(sessionId, turn?.model);
 
     if (agentSession.phase !== 'idle') {
       // Concurrent retry already in flight (`preparing`) or agent currently
@@ -1934,6 +2033,21 @@ class SessionManager {
     let busySnapshot: AgentMessage[] | null = null;
 
     try {
+      // 本轮模型必须先于任何树 / 转录变更就位：解析失败、或会话仍挂着兜底模型时都要在
+      // 回卷之前抛出，否则分支已被改写却没能重跑，留下「回卷了但没生成」的脏状态
+      //（issue #62）。这里只解析不应用——应用点仍在下面树回卷之后，与思考档一起处理。
+      const turnKey = turn?.model
+        ? `${turn.model.provider}/${turn.model.modelId}`
+        : null;
+      const modelChanged = turnKey != null && turnKey !== agentSession.modelKey;
+      const resolved = modelChanged ? await this.resolveSessionModel(turn!.model) : null;
+      if (modelChanged && !resolved) throw new Error(t('errors.modelUnavailable'));
+      // 兜底模型只有被本轮 turn 显式带来的模型解除后才允许重跑，语义同 prompt。
+      const clearedFallback = turnKey != null && agentSession.modelFallback === true;
+      if (agentSession.modelFallback && !clearedFallback) {
+        throw new Error(t('errors.modelUnavailable'));
+      }
+
       const messages = [...agentSession.agent.state.messages];
       // 回卷后的目标转录 truncated 与「树上保留的前缀长度」keepCount：
       // - retry：截到最后一条 user（含），keepCount = truncated.length（全部已落树）；
@@ -2020,12 +2134,7 @@ class SessionManager {
       // agent 当前选择不同时才换并落库；否则保持不动——没有「空闲时改了
       // 全局」需要补读的场景。Tools 由 `refreshAllSessionTools` 保活（MCP 变更），
       // 此处不动。model 与 thinking 各自可选、分别判断、分别落库。
-      const turnKey = turn?.model
-        ? `${turn.model.provider}/${turn.model.modelId}`
-        : null;
-      const modelChanged = turnKey != null && turnKey !== agentSession.modelKey;
-      const resolved = modelChanged ? await this.resolveSessionModel(turn!.model) : null;
-      if (modelChanged && !resolved) throw new Error('No model selected or model not found');
+      // 模型的解析已在本 try 顶部完成（见那里的注释），此处只负责应用与落库。
 
       // Single abort checkpoint — cancel landed during the DB flush or the
       // async settings load, both BEFORE we mutate the agent. Commit an
@@ -2059,14 +2168,18 @@ class SessionManager {
       if (thinkingChanged) {
         agentSession.agent.state.thinkingLevel = nextThinking!;
       }
-      // 落库到会话行——会话行是真相来源。只写变了的字段。
-      if (agentSession.sessionCreated && (modelChanged || thinkingChanged)) {
+      // 落库到会话行——会话行是真相来源。只写变了的字段；`clearedFallback` 同样要写，
+      // 理由见 prompt 中同名分支（行里还留着已失效的旧模型）。
+      const persistModel = modelChanged || clearedFallback;
+      if (agentSession.sessionCreated && (persistModel || thinkingChanged)) {
         await sessionStore.updateSettings(sessionId, {
-          provider: modelChanged ? turn!.model!.provider : undefined,
-          model: modelChanged ? turn!.model!.modelId : undefined,
+          provider: persistModel ? turn!.model!.provider : undefined,
+          model: persistModel ? turn!.model!.modelId : undefined,
           thinkingLevel: thinkingChanged ? agentSession.agent.state.thinkingLevel : undefined,
         });
       }
+      // 与 prompt 同理：会话行改正落库之后才解除兜底标记。
+      if (clearedFallback) agentSession.modelFallback = false;
 
       // Re-broadcast busy. `continue()` is invoked on the very next line and
       // fires `agent_start` on entry, so the agent IS effectively running.

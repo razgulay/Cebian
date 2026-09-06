@@ -12,11 +12,12 @@ import {
   type BroadcastMessage,
   type ClientMessage,
   type ServerMessage,
-  type SessionMeta,
   type SessionSnapshot,
   type TurnSettings,
 } from '@/lib/ipc/protocol';
 import type { Attachment } from '@/lib/agent/attachments';
+import { buildSlashPromptBlock, type SlashPrompt } from '@/lib/ai-config/slash-prompt';
+import { wrapUserRequest } from '@/lib/agent/prompt-envelope';
 import { applyStreamOps } from '@/lib/agent/stream-replica';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { replaceUserText, truncateForRetry } from '@/lib/agent/message-helpers';
@@ -27,6 +28,7 @@ import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
 import { compactionChannel } from '@/lib/agent/compaction-sidepanel-channel';
+import { sessionListChannel } from '@/lib/agent/session-list-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
@@ -98,12 +100,12 @@ const PROMPT_RECONNECT_TIMEOUT_MS = 1_500;
 export interface AgentPortCallbacks {
   onSessionCreated?: (sessionId: string, title: string) => void;
   onSessionLoaded?: (session: SessionSnapshot | null) => void;
+  /** 后台确认会话已删除（响应 `session_delete` 后）。批量形态：一次可能删多个。 */
+  onSessionDeleted?: (sessionId: string) => void;
   /** 重新订阅一个仍有活 agent 的会话时，后台走 `session_state`（带消息但非完整
    *  会话行）。这里把该会话的 provider / model / 思考档单独回传，供上层回填本地的
    *  turn 草稿——与 `onSessionLoaded` 对齐，修复「发消息后进设置再返回模型被重置」。 */
   onSessionSettings?: (provider: string, model: string, thinkingLevel: string) => void;
-  onSessionList?: (sessions: SessionMeta[]) => void;
-  onSessionDeleted?: (sessionId: string) => void;
 }
 
 // ─── Hook ───
@@ -444,17 +446,32 @@ case 'stream_ops':
           break;
 
         case 'session_list_result':
-          callbacksRef.current.onSessionList?.(msg.sessions);
+          sessionListChannel.publishList(msg.sessions);
           break;
 
         case 'session_deleted':
-          pendingDisplayTextRef.current.delete(msg.sessionId);
           // 临时诊断：BG 已销毁会话—— t0 与首 token 哨兵同步释放，避免老
           // 锚点在下一次同 id 复用的会话（罕见但可能：用户删了又立刻再建）
           // 时误命中。
-          pendingTraceT0Ref.current.delete(msg.sessionId);
-          hookFirstTokenSeenRef.current.delete(msg.sessionId);
-          callbacksRef.current.onSessionDeleted?.(msg.sessionId);
+          for (const id of msg.sessionIds) {
+            pendingDisplayTextRef.current.delete(id);
+            pendingTraceT0Ref.current.delete(id);
+            hookFirstTokenSeenRef.current.delete(id);
+            callbacksRef.current.onSessionDeleted?.(id);
+          }
+          sessionListChannel.publishDeleted(msg.sessionIds);
+          break;
+
+        case 'session_write_failed':
+          sessionListChannel.publishWriteFailed(msg.op, msg.sessionIds, msg.error);
+          break;
+
+        case 'session_placement_changed':
+          sessionListChannel.publishPlacement(msg.sessionIds, msg.placement);
+          break;
+
+        case 'session_list_error':
+          sessionListChannel.publishError(msg.error);
           break;
 
         case 'error':
@@ -578,6 +595,7 @@ case 'stream_ops':
           portRef.current = null;
           recorderChannel.setPort(null);
           mcpAppResourceChannel.setPort(null);
+          sessionListChannel.setPort(null);
           setState(prev => ({ ...prev, connected: false }));
         }
         scheduleRetry();
@@ -597,6 +615,10 @@ case 'stream_ops':
         if (sessionToRestore) {
           port.postMessage({ type: 'subscribe', sessionId: sessionToRestore } satisfies ClientMessage);
         }
+        // 会话列表通道：交出端口后 HistoryPanel 才能拉列表 / 删除，不必自己开端口。
+        // 必须放在 hello 之后——它是三个 channel 里唯一会在 setPort 时同步发消息的
+        // （断线重连且面板正开着时会补拉一次列表），先挂上就会抢在 hello 前面。
+        sessionListChannel.setPort(port);
       } catch {
         handleDisconnect();
       }
@@ -615,6 +637,7 @@ case 'stream_ops':
       portRef.current = null;
       recorderChannel.setPort(null);
       mcpAppResourceChannel.setPort(null);
+      sessionListChannel.setPort(null);
     };
   }, []);
 
@@ -646,8 +669,9 @@ case 'stream_ops':
     attachments: Attachment[] | undefined,
     expectedSessionId: string | null,
     turn?: TurnSettings,
-    displayText?: string,
+    slashPrompt?: SlashPrompt,
     t0?: number,
+    displayText?: string,
   ): boolean => {
     if (sessionIdRef.current !== expectedSessionId) return false;
 
@@ -678,6 +702,7 @@ case 'stream_ops':
         sessionId,
         text,
         attachments,
+        slashPrompt,
         model: turn?.model,
         thinkingLevel: turn?.thinkingLevel,
         ...(t0 !== undefined ? { t0 } : {}),
@@ -687,6 +712,7 @@ case 'stream_ops':
         portRef.current = null;
         recorderChannel.setPort(null);
         mcpAppResourceChannel.setPort(null);
+        sessionListChannel.setPort(null);
         setState(prev => ({ ...prev, connected: false }));
         scheduleRetryRef.current?.();
       }
@@ -702,12 +728,17 @@ case 'stream_ops':
     // Optimistically add user message to local state for immediate UI feedback
     const userTimestamp = Date.now();
     setState(prev => {
-      // The backend sends the fully-expanded prompt (e.g. a long template body
-      // for `/writing`), but the user bubble should show what they actually
-      // typed (e.g. just `/writing`). `displayText` is the original user-facing
-      // text; fallback to the expanded text for non-slash-command sends.
-      const bubbleText = (displayText ?? text).trim();
-      const content: any[] = [{ type: 'text' as const, text: bubbleText }];
+      // 乐观消息按后台那套信封的形状拼，与广播回来的真消息逐字节同形——两者解析结果
+      // 一致，切换时不会跳变。
+      //
+      // 请求块**无条件**包：不包的话这条消息是「裸文本」，用户自己打的字里若出现字面量
+      // `<user-request>`，乐观态与广播态会解析出不同的结果。提示词块则在带了提示词时才包，
+      // 否则只挂了提示词、没打字的那一轮会渲染成彻底空白（连气泡都没有），像消息发丢了。
+      const request = wrapUserRequest(text.trim());
+      const optimisticText = slashPrompt
+        ? `${buildSlashPromptBlock(slashPrompt)}\n\n${request}`
+        : request;
+      const content: any[] = [{ type: 'text' as const, text: optimisticText }];
       // Include image attachments in optimistic message for preview
       if (attachments) {
         for (const att of attachments) {
@@ -752,14 +783,15 @@ case 'stream_ops':
     attachments?: Attachment[],
     expectedSessionId: string | null = sessionIdRef.current,
     turn?: TurnSettings,
-    displayText?: string,
+    slashPrompt?: SlashPrompt,
     t0?: number,
   ): Promise<PromptDispatchResult> => {
     const trimmed = text.trim();
-    if (!trimmed) return { status: 'notDispatched', reason: 'empty' };
+    // 挂了斜杠提示词时空文本也算有内容——提示词本身就是这一轮的请求（issue #53）。
+    if (!trimmed && !slashPrompt) return { status: 'notDispatched', reason: 'empty' };
 
     const startedSessionId = expectedSessionId;
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText, t0)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, slashPrompt, t0)) return { status: 'dispatched' };
 
     const connected = await waitForConnected(PROMPT_RECONNECT_TIMEOUT_MS);
     if (!connected || sessionIdRef.current !== startedSessionId) {
@@ -769,7 +801,7 @@ case 'stream_ops':
       return { status: 'notDispatched', reason: 'unavailable' };
     }
 
-    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, displayText, t0)) return { status: 'dispatched' };
+    if (dispatchPrompt(trimmed, attachments, startedSessionId, turn, slashPrompt, t0)) return { status: 'dispatched' };
 
     setState(prev => ({ ...prev, lastError: t('chat.session.notConnected') }));
     return { status: 'notDispatched', reason: 'unavailable' };
@@ -1020,14 +1052,6 @@ case 'stream_ops':
     hookFirstTokenSeenRef.current.clear();
   }, []);
 
-  const listSessions = useCallback(() => {
-    postMessage({ type: 'session_list' });
-  }, [postMessage]);
-
-  const deleteSession = useCallback((sessionId: string) => {
-    postMessage({ type: 'session_delete', sessionId });
-  }, [postMessage]);
-
   /**
    * Fork the current session at the assistant message at
    * `atAssistantIndex`. Background creates a new session seeded with ONLY
@@ -1040,6 +1064,14 @@ case 'stream_ops':
    * hook stays renderer-agnostic). The source session's agent keeps
    * running — fork is a pure copy.
    */
+  const listSessions = useCallback(() => {
+    postMessage({ type: 'session_list' });
+  }, [postMessage]);
+
+  const deleteSession = useCallback((sessionId: string) => {
+    postMessage({ type: 'session_delete', sessionIds: [sessionId] });
+  }, [postMessage]);
+
   const resolveTool = useCallback((toolName: string, response: any) => {
     const sessionId = sessionIdRef.current;
     if (sessionId) {

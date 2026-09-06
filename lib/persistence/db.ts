@@ -40,14 +40,34 @@ export interface SessionRecord extends SessionRecordLike {
   thinkingLevel: string;
   messageCount: number;
   messages: AgentMessage[];
-  /** True iff the user pinned this session in the sidebar. Backed by
-   *  the row itself so listings can read it in the same Dexie query
-   *  that fetches the rest of the metadata. Optional — old rows predate
-   *  the field and read as `undefined` (falsy). */
+  /** True iff the user pinned this session in the sidebar (legacy flag).
+   *  Backed by the row itself so listings can read it in the same Dexie
+   *  query that fetches the rest of the metadata. Optional — old rows
+   *  predate the field and read as `undefined` (falsy). */
   isPinned?: boolean;
+  /** 置顶时间；未置顶时字段不存在。非空即置顶，值用于置顶组内部排序（越新越靠前）。 */
+  pinnedAt?: number;
+  /** 归档时间；未归档时字段不存在。非空即归档，从历史列表的主区域收进「已归档」分组。 */
+  archivedAt?: number;
   /** v1→v2 树化迁移失败的标记：该行的 mutation 日志缺失，原始数据仍在 `messages`
    *  遗留字段，读路径（session-store.open）会懒重试转换。正常行不携带此字段。 */
   treeMigrationFailed?: true;
+}
+
+/**
+ * 会话在历史列表里的位置。三者互斥，故用一个值表达而非两个独立布尔——置顶是「留在
+ * 眼前」、归档是「从眼前拿走」，同一个会话不可能同时是两者，类型上就不给写出矛盾态
+ * 的机会。`null` = 普通（既不置顶也不归档）。
+ *
+ * 行上仍存 `pinnedAt` / `archivedAt` 两个时间戳（置顶组要按时间排序），互斥由唯一的
+ * 写入点 {@link updateSessionPlacement} 保证。
+ */
+export type SessionPlacement = 'pinned' | 'archived' | null;
+
+/** 把一个不可信的值当可选时间戳取：有限数字才认，其余一律返回 undefined（= 没这个
+ *  标记）。目前只有 `toSessionRecord` 用得上，故不外露。 */
+function asTimestamp(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -62,6 +82,8 @@ export function toSessionRecord(input: SessionRecordLike): SessionRecord {
   const s = input as unknown as Record<string, unknown>;
   // `treeMigrationFailed` 有意丢弃：恢复入口拿到的是 v1 messages 形态，写入后会
   // 重新走树化转换，旧库的失败标记不应传染到新库。
+  const pinnedAt = asTimestamp(s.pinnedAt);
+  const archivedAt = asTimestamp(s.archivedAt);
   return {
     id: input.id,
     title: asString(s.title, ''),
@@ -73,6 +95,11 @@ export function toSessionRecord(input: SessionRecordLike): SessionRecord {
     updatedAt: input.updatedAt,
     messages: input.messages as AgentMessage[],
     messageCount: input.messages.length,
+    // 置顶 / 归档：合法时间戳才透传，其余（缺失 / 类型不对 / NaN）当作「没这个标记」
+    // 而整个不写字段——写 `undefined` 会在 Dexie 行里留下一个存在但为空的键。
+    // 互斥兜底：坏备份可能两个都带，此时置顶优先（更「显眼」的那个不至于被藏起来）。
+    ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+    ...(pinnedAt === undefined && archivedAt !== undefined ? { archivedAt } : {}),
   };
 }
 
@@ -301,9 +328,10 @@ export async function renameSession(id: string, title: string): Promise<boolean>
 }
 
 /**
- * Flip the pinned bit on a session row. The flag lives on the row
- * itself rather than a sidecar set so sorting and listing can read it
- * in the same Dexie query that already powers the sidebar.
+ * Flip the pinned bit on a session row (legacy `isPinned` boolean).
+ * The flag lives on the row itself rather than a sidecar set so sorting
+ * and listing can read it in the same Dexie query that already powers
+ * the sidebar. Prefer `updateSessionPlacement` for new code.
  */
 export async function setSessionPinned(id: string, pinned: boolean): Promise<boolean> {
   const updated = await db.sessions.update(id, { isPinned: pinned });
@@ -314,6 +342,35 @@ export async function setSessionPinned(id: string, pinned: boolean): Promise<boo
 export async function getSessionPinned(id: string): Promise<boolean> {
   const row = await db.sessions.get(id);
   return row?.isPinned === true;
+}
+
+/**
+ * 批量设置会话在历史列表里的位置（置顶 / 归档 / 普通）。单条操作 = 长度 1 的数组，
+ * 不为它单开一条路径。这是 `pinnedAt` / `archivedAt` 的**唯一写入点**，两者的互斥
+ * 由这里保证：置顶清掉归档时间，归档清掉置顶时间，`null` 两个都清。
+ *
+ * 刻意**不动** `updatedAt`：历史列表按它排序，而置顶 / 归档改的是「摆在哪」，不是
+ * 「有新内容」——顺手把会话顶到列表最前面会是纯粹的意外。副作用是合并恢复（按
+ * updatedAt 做 LWW）不会把旧备份的位置覆盖回来，这正是想要的。
+ *
+ * Dexie 是 schemaless 的：`pinnedAt` / `archivedAt` 没进 `stores()` 索引声明，因此
+ * 加它们**不需要**升库版本。当前也不需要索引——`listSessions` 本来就是全表扫，会话
+ * 量级下按字段过滤在内存里做即可。
+ */
+export async function updateSessionPlacement(
+  ids: string[],
+  placement: SessionPlacement,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const now = Date.now();
+  // 清除用 `delete` 而非写 undefined：后者会在行里留下一个存在但为空的键，
+  // 让「字段在是不是」这个判断不再可靠。
+  await db.sessions.where('id').anyOf(ids).modify((row) => {
+    delete row.pinnedAt;
+    delete row.archivedAt;
+    if (placement === 'pinned') row.pinnedAt = now;
+    else if (placement === 'archived') row.archivedAt = now;
+  });
 }
 
 // ─── Backup restore (transactional) ───

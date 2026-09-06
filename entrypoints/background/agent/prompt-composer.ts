@@ -13,6 +13,8 @@ import { gatherPageContext } from './page-context';
 import { buildTextPrefix, type Attachment } from '@/lib/agent/attachments';
 import { scanSkillIndex, buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { buildAvailableWorkersBlock } from '@/lib/agent/worker-roles';
+import { buildSlashPromptBlock, SLASH_PROMPT_ONLY_REQUEST, type SlashPrompt } from '@/lib/ai-config/slash-prompt';
+import { wrapUserRequest } from '@/lib/agent/prompt-envelope';
 import { MEMORY_INSTRUCTIONS, memoryLimitationLine } from '@/lib/memory/prompt';
 import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/lib/memory/index-scan';
 import { ragSettings } from '@/lib/rag';
@@ -160,10 +162,15 @@ async function buildMemoriesContext(memoryEnabled: boolean): Promise<string> {
 
 /**
  * 组装本轮要发给 agent 的「结构化用户消息」：reminder 占位段 + 附件文本前缀 +
- * `<context>`（日期 + 页面上下文）+ `<user-request>`（始终置末）。读 page context
- * 是 async，故本函数 async。
+ * `<context>`（日期 + 页面上下文）+ `<slash-prompt>`（可选）+ `<user-request>`（始终
+ * 置末）。读 page context 是 async，故本函数 async。
  */
-async function composeUserMessage(text: string, attachments: Attachment[], memoryEnabled: boolean): Promise<string> {
+async function composeUserMessage(
+  text: string,
+  attachments: Attachment[],
+  memoryEnabled: boolean,
+  slashPrompt?: SlashPrompt,
+): Promise<string> {
   const parts: string[] = [];
 
   // ① Tool/behavior reminders (placeholder)
@@ -187,9 +194,15 @@ async function composeUserMessage(text: string, attachments: Attachment[], memor
   const memoriesBlock = await buildMemoriesContext(memoryEnabled);
   if (memoriesBlock) parts.push(memoriesBlock);
 
-  // ⑤ User request (always last)
+  // ⑤ 斜杠提示词：用户挑中的提示词模板自成一块，不与用户自己敲的话混在一起
+  //（理由见 lib/ai-config/slash-prompt.ts）。
+  if (slashPrompt) parts.push(buildSlashPromptBlock(slashPrompt));
+
+  // ⑥ User request (always last)
   // TODO: user text is NOT sanitized — users are trusted; stripping structural tags would alter their intent.
-  parts.push(`<user-request>\n${text.trim()}\n</user-request>`);
+  // 只挂了提示词、一个字没打时放一句指向上面那块的话——空的请求块会让模型以为这轮没有请求。
+  const request = text.trim() || (slashPrompt ? SLASH_PROMPT_ONLY_REQUEST : '');
+  parts.push(wrapUserRequest(request));
 
   return parts.join('\n\n');
 }
