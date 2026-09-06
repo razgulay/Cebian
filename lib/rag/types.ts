@@ -69,6 +69,84 @@ export interface RagSettings {
    *  Default 0 (no gate). Typical Jina cosine similarity sits in
    *  0.3–0.9 for relevant hits; 0.2–0.4 for off-topic. */
   pinMinScore: number;
+
+  // ─── Retrieval strategy (Subtask 2) ───────────────────────────────
+  // Cebian supports two retrieval modes against the same `rag_chunks`
+  // table:
+  //   • 'vector'  — pure dense (cosine on the HNSW index). Original v1.
+  //   • 'hybrid'  — dense + sparse (BM25 over tsvector) fused via RRF.
+  // Hybrid is the recommended default because it catches keyword/code/
+  // identifier matches that embeddings miss (see plan Subtask 2).
+  //
+  // Per-call callers (`retrieve({ mode })`) can override this; when
+  // `mode` is omitted from `RetrieveOptions`, the retriever falls back
+  // to this setting.
+
+  /** Retrieval strategy used by `retrieve()` when the caller doesn't
+   *  pass an explicit `mode`. `'hybrid'` is the default — better
+   *  recall on keyword/code/identifier queries at the cost of one
+   *  extra tsvector ranking per query. `'vector'` remains available
+   *  for users who prefer pure-embedding behavior. */
+  retrievalMode: 'vector' | 'hybrid';
+
+  // ─── Contextual Retrieval (Subtask 3 — opt-in, off-by-default) ──
+  // Anthropic's recipe (2024-09): for each chunk, ask a cheap LLM to
+  // generate a 40-word context string describing where the chunk sits
+  // in the document. Prepend that prefix to BOTH the embedding input
+  // AND the BM25 token stream (handled by the tsvector generated
+  // expression in `bootstrapSchema` — the `COALESCE` there already
+  // picks up `metadata.context_prefix`). Net effect: a query that
+  // matches the chunk's topic but not its exact words still ranks the
+  // chunk correctly.
+  //
+  // Off by default: each chunk costs one extra LLM call at index
+  // time. For a 1000-chunk reindex that's 1000 LLM calls. Users
+  // flip the toggle in Settings when they want the recall boost.
+
+  /** Master toggle for Contextual Retrieval. When off (default), the
+   *  indexer embeds `chunk.content` directly with no prefix and the
+   *  `metadata.context_prefix` column stays absent on new rows. */
+  contextualRetrievalEnabled: boolean;
+
+  /** Base URL for the OpenAI-compatible `/chat/completions` endpoint
+   *  used to generate context prefixes. Defaults to the embedder's
+   *  base URL (most local proxies expose both). Override per
+   *  preference if the user runs a separate LLM endpoint for cheap
+   *  generation (e.g. local Ollama on a different port). */
+  contextualLlmBaseUrl: string;
+
+  /** Bearer token for the Contextual Retrieval LLM endpoint. Empty
+   *  string = no auth. Empty default — user explicitly fills if
+   *  their LLM endpoint requires it. */
+  contextualLlmApiKey: string;
+
+  /** Chat model id used to generate context prefixes. Cheap models
+   *  only — Anthropic uses Claude Haiku, the OpenAI counterpart is
+   *  `gpt-4o-mini`. Free-form: any model name accepted by the
+   *  configured endpoint. */
+  contextualLlmModel: string;
+
+  // ─── Agentic rag_search (Subtask 4 — opt-in, off-by-default) ────
+  // When enabled, the main agent can call `rag_search` as a tool to
+  // run its own hybrid queries during the conversation, beyond the
+  // top-5 chunks pre-injected at send time. The tool itself lives in
+  // `lib/tools/rag-search.ts`; this flag controls two side effects:
+  //   • `lib/tools/index.ts` conditionally pushes `ragSearchTool`
+  //     into `sharedTools` (off → tool list doesn't include it, so
+  //     the LLM can't pick it).
+  //   • `entrypoints/background/agent/system-prompt.ts` injects the
+  //     tool description into the RAG Workflow section (off → no
+  //     mention in prompt, so the LLM won't hallucinate calls to a
+  //     non-existent tool).
+  // Both sides must agree — if the prompt mentions the tool but no
+  // tool entry exists, the LLM hallucinates; if the tool exists but
+  // the prompt never explains when to use it, the LLM never picks
+  // it. The flag keeps the two in sync.
+
+  /** Master toggle for the agentic `rag_search` tool. Off by
+   *  default: keep the tool list minimal and the system prompt lean
+   *  for users who don't need deeper-than-pre-injected lookups. */
+  ragSearchEnabled: boolean;
 }
 
 /** Per-collection metadata. Lives in `chrome.storage.local` as
@@ -109,8 +187,16 @@ export interface RetrievedChunk {
   sourcePath: string;
   chunkIndex: number;
   content: string;
-  /** Cosine similarity in [-1, 1]; for normalized embeddings, [0, 1]. */
+  /** Cosine similarity in [-1, 1]; for normalized embeddings, [0, 1].
+   *  Hybrid mode uses RRF score instead — roughly [0, 0.033] for k=60. */
   score: number;
+  /** Subtask 3 — Contextual Retrieval prefix. LLM-generated at index
+   *  time when CR was enabled; `null` for chunks indexed before CR or
+   *  when CR was disabled. Surfaced to the LLM/UI verbatim so the
+   *  envelope can render "this chunk is about X" alongside the raw
+   *  text. The BM25 ranking already uses the prefix via `content_tsv`
+   *  (see `bootstrapSchema`) — this field is for display. */
+  contextPrefix: string | null;
 }
 
 /** Default settings — applied when the user first opens the section
@@ -131,4 +217,21 @@ export const DEFAULT_RAG_SETTINGS: RagSettings = {
   rerankModel: 'rerank-english-v3.0',
   rerankTopN: 3,
   pinMinScore: 0,
+  // Hybrid by default — recommended for keyword/code/identifier
+  // queries. Users can flip to 'vector' via the Settings radio.
+  retrievalMode: 'hybrid',
+  // Contextual Retrieval — off by default (opt-in). Each chunk
+  // costs one LLM call at index time; default to the same endpoint
+  // / model as the embedder so users can flip the toggle without
+  // touching the LLM config first.
+  contextualRetrievalEnabled: false,
+  contextualLlmBaseUrl: 'http://localhost:8317/v1',
+  contextualLlmApiKey: '',
+  contextualLlmModel: 'gpt-4o-mini',
+  // Agentic rag_search — off by default. Users opt in when they
+  // want the agent to run hybrid queries mid-conversation (e.g.
+  // for "section 230(c)(1)" lookups that pre-injected top-5
+  // doesn't cover). Enabling adds the tool to the shared tool list
+  // AND injects its description into the system prompt.
+  ragSearchEnabled: false,
 };

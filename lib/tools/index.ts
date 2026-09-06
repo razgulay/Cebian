@@ -17,6 +17,7 @@ import { fsListTool } from './fs-list';
 import { fsSearchTool } from './fs-search';
 import { fsSaveUrlTool } from './fs-save-url';
 import { ragInspectTool } from './rag-inspect';
+import { ragSearchTool } from './rag-search';
 import { createSessionRunSkillTool } from './run-skill';
 import { chromeApiTool } from './chrome-api-tool';
 import { SessionToolContext } from './session-context';
@@ -27,7 +28,14 @@ import { debugLog, withSession } from '@/lib/debug/log';
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
- *  绑定到该 session workspace 的实例，避免 vfs 写入丢失会话上下文。 */
+ *  绑定到该 session workspace 的实例，避免 vfs 写入丢失会话上下文。
+ *
+ *  `ragSearchTool` is intentionally NOT here either — see
+ *  `buildSessionToolArray` which conditionally pushes it based on
+ *  `settings.ragSearchEnabled`. Adding it to `sharedTools` would
+ *  ship it unconditionally, which both slows down tool-selection
+ *  cost AND lets the LLM hallucinate calls when the user has the
+ *  toggle off. */
 const sharedTools: AgentTool<any>[] = [
   executeJsTool, readPageTool, interactTool, inspectTool, tabTool, screenshotTool, pdfTool,
   fsCreateFileTool, fsEditFileTool, fsMkdirTool, fsRenameTool, fsDeleteTool,
@@ -136,6 +144,26 @@ export async function buildSessionToolArray(
       durationMs: Date.now() - delegateTaskStart,
     }, ctx.sessionId));
   base.push(delegateTaskTool);
+
+  // Conditional opt-in: only ship `rag_search` when the user has
+  // flipped the toggle in Settings → Knowledge. Keeping it out of
+  // the tool list when off (rather than shipping it and erroring at
+  // execute time) means the LLM never sees an option it can't
+  // actually use — lower tool-selection latency, smaller prompts.
+  // The execute path also re-checks the flag as a safety net in
+  // case the user toggled the switch mid-session and a stale tool
+  // entry somehow survived.
+  const ragSettingsStart = Date.now();
+  const { ragSettings } = await import('@/lib/rag');
+  const currentRagSettings = await ragSettings.getValue();
+  debugLog.info('tool', 'tool:init:rag-search',
+    withSession({
+      durationMs: Date.now() - ragSettingsStart,
+      enabled: currentRagSettings.ragSearchEnabled,
+    }, ctx.sessionId));
+  if (currentRagSettings.ragSearchEnabled) {
+    base.push(ragSearchTool);
+  }
   return base;
 }
 

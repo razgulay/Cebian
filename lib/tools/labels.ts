@@ -29,6 +29,7 @@ import {
   TOOL_DELEGATE_DOM,
   TOOL_DELEGATE_TASK,
   TOOL_RAG_INSPECT,
+  TOOL_RAG_SEARCH,
 } from '@/lib/tools/names';
 
 /** 记忆根目录的归一形式（/home/user/.cebian/memories），供工具卡标签判定记忆操作。 */
@@ -112,6 +113,8 @@ export function getToolLabel(name: string, args: Record<string, any> = {}): stri
       return `delegate_task · ${typeof args.role === 'string' ? args.role : 'unknown'}: ${truncLabel(typeof args.task === 'string' ? args.task : '')}`;
     case TOOL_RAG_INSPECT:
       return t('tools.ragInspect', [args.collection ?? '']);
+    case TOOL_RAG_SEARCH:
+      return t('tools.ragSearch', [args.collection ?? '', args.query ?? '']);
     default:
       return name;
   }

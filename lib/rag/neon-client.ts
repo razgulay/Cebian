@@ -122,6 +122,55 @@ export async function bootstrapSchema(connectionString: string): Promise<void> {
     connectionString,
     'CREATE INDEX IF NOT EXISTS rag_chunks_coll_idx ON rag_chunks (collection)',
   );
+  // HNSW index on the embedding column — added in Subtask 1 of the
+  // Hybrid RAG plan. Replaces the seq-scan fallback for collections
+  // beyond ~1–2k chunks where the seq-scan cost grows linearly with
+  // row count. We use the cosine distance operator class since
+  // `retrieve()` always queries via `<=>` (cosine distance). Defaults
+  // `m=16`, `ef_construction=64` are pgvector's recommended starting
+  // points and don't need tuning at v1 — user can override per-index
+  // later if a specific collection demands it.
+  //
+  // Idempotent via `IF NOT EXISTS` — re-bootstrap on an already-indexed
+  // table is a no-op. pgvector 0.5.0+ is required for HNSW; Neon's
+  // default pgvector 0.7+ supports it. If a very old Neon plan ships
+  // pgvector <0.5, the CREATE INDEX will fail with a clear error that
+  // surfaces through the existing connection-test flow.
+  await query(
+    connectionString,
+    'CREATE INDEX IF NOT EXISTS rag_chunks_hnsw_idx ON rag_chunks USING hnsw (embedding vector_cosine_ops)',
+  );
+  // tsvector column for BM25 full-text search — added in Subtask 2.
+  // Generated from `content` so we never have to maintain it manually
+  // — Postgres keeps it in sync on every INSERT/UPDATE.
+  //
+  // The expression includes `COALESCE(metadata->>'context_prefix', '')`
+  // deliberately. Contextual Retrieval (Subtask 3) will populate
+  // `metadata.context_prefix` for new chunks; the prefix becomes part
+  // of the BM25 token stream at zero extra cost. Pre-Subtask-3 rows
+  // have `context_prefix` absent → COALESCE returns '' → the column
+  // degrades to plain `to_tsvector('simple', content)`. This forward-
+  // compat avoids a DROP + ADD COLUMN cycle in Subtask 3 (Postgres
+  // will not let us ALTER a generated column's expression in place).
+  //
+  // `to_tsvector('simple', ...)` uses no stemming — CJK-safe (and
+  // fine for English identifiers / code). If a user needs English
+  // stemming later they can swap to `'english'`; we deliberately
+  // pick `simple` to avoid breaking CJK recall in the default.
+  //
+  // GIN index on the tsvector column is what makes BM25 fast — the
+  // tsvector itself is useless without it. Idempotent.
+  await query(
+    connectionString,
+    `ALTER TABLE rag_chunks ADD COLUMN IF NOT EXISTS content_tsv tsvector
+       GENERATED ALWAYS AS (
+         to_tsvector('simple', COALESCE(metadata->>'context_prefix', '') || ' ' || content)
+       ) STORED`,
+  );
+  await query(
+    connectionString,
+    'CREATE INDEX IF NOT EXISTS rag_chunks_tsv_idx ON rag_chunks USING gin (content_tsv)',
+  );
 }
 
 /** Drop all chunks belonging to a collection. Used by the "Delete

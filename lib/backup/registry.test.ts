@@ -332,6 +332,9 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
     neonConnectionString: 'postgres://user:pass@host/db',
     embedderApiKey: 'sk-123',
     rerankApiKey: 'sk-456',
+    // Subtask 3 — Contextual Retrieval LLM 的 API key 同样属密钥，须拆到
+    // credentials 分类（与 embedderApiKey 同形态）。
+    contextualLlmApiKey: 'sk-cr-789',
   };
 
   it('splitSecret 提取 credentials，safe 清空对应字段', () => {
@@ -340,10 +343,12 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
       neonConnectionString: 'postgres://user:pass@host/db',
       embedderApiKey: 'sk-123',
       rerankApiKey: 'sk-456',
+      contextualLlmApiKey: 'sk-cr-789',
     });
     expect(safe.neonConnectionString).toBe('');
     expect(safe.embedderApiKey).toBe('');
     expect(safe.rerankApiKey).toBe('');
+    expect(safe.contextualLlmApiKey).toBe('');
   });
 
   it('safe 中不残留任何明文密钥', () => {
@@ -352,6 +357,7 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
     expect(serialized).not.toContain('postgres://user:pass@host/db');
     expect(serialized).not.toContain('sk-123');
     expect(serialized).not.toContain('sk-456');
+    expect(serialized).not.toContain('sk-cr-789');
   });
 
   it('split 不修改入参、返回的对象不与入参共享引用', () => {
@@ -380,12 +386,14 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
       neonConnectionString: 'postgres://old',
       embedderApiKey: 'old-1',
       rerankApiKey: 'old-2',
+      contextualLlmApiKey: 'old-3',
     };
-    // 全 secret：本地三项全部被覆盖
+    // 全 secret：本地四项全部被覆盖
     const restored = restoreRagSettingsSecrets(local, secret, 'replace');
     expect(restored.neonConnectionString).toBe('postgres://user:pass@host/db');
     expect(restored.embedderApiKey).toBe('sk-123');
     expect(restored.rerankApiKey).toBe('sk-456');
+    expect(restored.contextualLlmApiKey).toBe('sk-cr-789');
 
     // 部分 secret：未包含的字段保留本地——这同时验证
     // 「secret.X === undefined（缺字段）不覆盖 local」。
@@ -394,6 +402,7 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
     expect(restoredPartial.neonConnectionString).toBe('new-conn');
     expect(restoredPartial.embedderApiKey).toBe('old-1');
     expect(restoredPartial.rerankApiKey).toBe('old-2');
+    expect(restoredPartial.contextualLlmApiKey).toBe('old-3');
   });
 
   it('restoreSecret 在 merge 模式下仅补缺（本地有值的密钥保留）', () => {
@@ -403,6 +412,7 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
       neonConnectionString: 'postgres://old',
       embedderApiKey: '',
       rerankApiKey: '',
+      contextualLlmApiKey: '',
     };
     const restored = restoreRagSettingsSecrets(local, secret, 'merge');
     // 本地非空，保留本地
@@ -410,5 +420,6 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
     // 本地空串，使用备份的
     expect(restored.embedderApiKey).toBe('sk-123');
     expect(restored.rerankApiKey).toBe('sk-456');
+    expect(restored.contextualLlmApiKey).toBe('sk-cr-789');
   });
 });

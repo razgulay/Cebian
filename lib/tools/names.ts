@@ -67,3 +67,10 @@ export const TOOL_SUBAGENT_CLICK = 'subagent_click' as const;
  *  reaching for fs_list/fs_search (which only see the virtual filesystem
  *  under /home/user/...). */
 export const TOOL_RAG_INSPECT = 'rag_inspect' as const;
+/** Tool that runs a hybrid (vector + BM25 / RRF) search inside a named
+ *  RAG collection and returns the top-K chunks as a structured text
+ *  block. Off by default — `lib/tools/index.ts` only pushes it into
+ *  `sharedTools` when `settings.ragSearchEnabled === true`, and the
+ *  system-prompt augmentation is gated on the same flag. The two must
+ *  agree so the LLM never hallucinates a call to a non-existent tool. */
+export const TOOL_RAG_SEARCH = 'rag_search' as const;

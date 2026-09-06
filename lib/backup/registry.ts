@@ -248,12 +248,17 @@ export function restoreCustomProviderHeaders(
 
 // ─── RagSettings 的密钥拆分 / 重组 ───
 //
-// RAG 设置中的敏感信息：数据库连接串、Embedder API 密钥、Rerank API 密钥。
+// RAG 设置中的敏感信息：数据库连接串、Embedder API 密钥、Rerank API 密钥、Contextual
+// Retrieval LLM 密钥（Subtask 3，与 embedderApiKey 同形态 —— 用户本地 LLM endpoint 也
+// 可能用 bearer 鉴权，所以同样视为密钥）。
 
 export interface RagSecret {
   neonConnectionString?: string;
   embedderApiKey?: string;
   rerankApiKey?: string;
+  /** Subtask 3 — Contextual Retrieval LLM 用的 bearer token。仅在用户给本地
+   *  proxy 配了鉴权时才非空；为空时跳过（与上方三个 secret 字段同语义）。 */
+  contextualLlmApiKey?: string;
 }
 
 export function splitRagSettings(settings: RagSettings): { safe: RagSettings; secret: RagSecret } {
@@ -261,12 +266,14 @@ export function splitRagSettings(settings: RagSettings): { safe: RagSettings; se
   if (settings.neonConnectionString) secret.neonConnectionString = settings.neonConnectionString;
   if (settings.embedderApiKey) secret.embedderApiKey = settings.embedderApiKey;
   if (settings.rerankApiKey) secret.rerankApiKey = settings.rerankApiKey;
+  if (settings.contextualLlmApiKey) secret.contextualLlmApiKey = settings.contextualLlmApiKey;
 
   const safe: RagSettings = {
     ...settings,
     neonConnectionString: '',
     embedderApiKey: '',
     rerankApiKey: '',
+    contextualLlmApiKey: '',
   };
   return { safe, secret };
 }
@@ -289,6 +296,7 @@ export function restoreRagSettingsSecrets(
     neonConnectionString: pickSecret(local.neonConnectionString, secret.neonConnectionString),
     embedderApiKey: pickSecret(local.embedderApiKey, secret.embedderApiKey),
     rerankApiKey: pickSecret(local.rerankApiKey, secret.rerankApiKey),
+    contextualLlmApiKey: pickSecret(local.contextualLlmApiKey, secret.contextualLlmApiKey),
   };
 }
 

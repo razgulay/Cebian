@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { memorySettings, userInstructions } from '@/lib/persistence/storage';
+import { ragSettings } from '@/lib/rag/settings';
 import { composeSystemPrompt } from './prompt-composer';
 
 // skills 索引扫描要读 VFS（IndexedDB），与本文件要验的「拼接 + 占位符替换」无关，
@@ -112,5 +113,32 @@ describe('composeSystemPrompt', () => {
   it('skills 与用户指令都为空 → 段间不出现三连以上换行', async () => {
     const prompt = await composeSystemPrompt('s', false);
     expect(prompt).not.toMatch(/\n{3,}/);
+  });
+
+  // Subtask 4 — opt-in agentic `rag_search` tool. The two new
+  // placeholders (`{{RAG_SEARCH_TOOL_LINE}}`, `{{RAG_SEARCH_WORKFLOW_STEP}}`)
+  // resolve to empty strings when the toggle is off, so the prompt
+  // must NOT mention `rag_search` at all in that state (otherwise the
+  // LLM hallucinates calls to a tool that isn't in the tool list).
+  // When the toggle is on, the prompt must surface both the Tools
+  // roster bullet AND the RAG Workflow step-5 so the LLM knows when
+  // to reach for `rag_search`.
+  it('ragSearchEnabled 关闭 → prompt 不出现 rag_search 字样（避免 LLM 幻觉调用）', async () => {
+    // 默认值就是关闭（DEFAULT_RAG_SETTINGS.ragSearchEnabled = false）。
+    const prompt = await composeSystemPrompt('s', false);
+    // 工具 roster 段：原本没有这一行
+    expect(prompt).not.toMatch(/^\s*-\s+\*\*rag_search\*\*/m);
+    // Workflow step-5：原本没有这一步
+    expect(prompt).not.toContain('call `rag_search`');
+  });
+
+  it('ragSearchEnabled 开启 → prompt 注入 rag_search 工具条目 + Workflow step-5', async () => {
+    await ragSettings.setValue({ ragSearchEnabled: true } as never);
+    const prompt = await composeSystemPrompt('s', false);
+    // Tools roster bullet
+    expect(prompt).toMatch(/^\s*-\s+\*\*rag_search\*\*/m);
+    // RAG Workflow step-5 — both the trigger keyword and the call site
+    expect(prompt).toContain('call `rag_search`');
+    expect(prompt).toContain('For deeper lookups beyond the pre-injected chunks');
   });
 });

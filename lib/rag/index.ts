@@ -42,7 +42,9 @@ export {
 } from './indexer';
 export type { IndexOptions, IndexProgress, IndexResult } from './indexer';
 export { retrieve } from './retriever';
-export type { RetrieveOptions } from './retriever';
+export type { RetrieveOptions, RetrievalMode } from './retriever';
+export { hybridRagSearch } from './hybrid-search';
+export type { HybridSearchRow } from './hybrid-search';
 export { CohereCompatReranker } from './reranker';
 export type { Reranker, RerankInput, RerankResult } from './reranker';
 

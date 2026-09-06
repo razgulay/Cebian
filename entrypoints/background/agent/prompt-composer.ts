@@ -15,6 +15,7 @@ import { scanSkillIndex, buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { buildAvailableWorkersBlock } from '@/lib/agent/worker-roles';
 import { MEMORY_INSTRUCTIONS, memoryLimitationLine } from '@/lib/memory/prompt';
 import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/lib/memory/index-scan';
+import { ragSettings } from '@/lib/rag';
 
 // ─── build 层（纯拼接） ───
 
@@ -40,6 +41,79 @@ import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/li
  * skills / workers 块都放在 system 顶部贴近 base prompt，整段一同进入缓存
  * 前缀——任一块变才击穿一次。末尾只有 user-instructions 一个断点。
  */
+/**
+ * Compose the two conditional RAG-search placeholders in the system
+ * prompt. Both are empty strings when `settings.ragSearchEnabled` is
+ * false (the default) so the prompt stays byte-identical to pre-
+ * Subtask-4. When the user has the toggle on, we surface the tool
+ * in the Tools roster AND add a step-5 to the RAG Workflow so the
+ * LLM knows when to reach for `rag_search` instead of fabricating
+ * answers from stale pre-injected chunks.
+ *
+ * The two must agree with `lib/tools/index.ts` which only pushes the
+ * tool into the session's tool array when the same flag is on. If
+ * the prompt mentions `rag_search` but the tool isn't in the tool
+ * list, the LLM hallucinates a call; if the tool exists but the
+ * prompt never explains when to use it, the LLM never picks it.
+ * Reading the same `ragSettings` blob here keeps the two sides in
+ * sync within a single `composeSystemPrompt` call.
+ */
+function buildRagSearchToolLine(enabled: boolean): string {
+  // OFF: substitute to empty string. The Subtask-4 placeholder sits
+  // on its own source line between the rag_inspect bullet and the
+  // blank line that precedes "User & skills:". With empty substitution
+  // the surrounding text would render three consecutive newlines,
+  // which trips the prompt-composer test that asserts no `\n{3,}` runs
+  // — and breaks the byte-identical-to-pre-Subtask-4 promise that
+  // Anthropic prompt caching depends on. `composeSystemPrompt` calls
+  // `collapseTripleNewlines()` after substitution to compensate.
+  if (!enabled) return '';
+  return (
+    '- **rag_search** — query a RAG collection with hybrid (vector + keyword) ' +
+    'search. Use for deeper lookups beyond the pre-injected `<attached-rag-context>` ' +
+    'chunks (specific section numbers, function names, code identifiers).'
+  );
+}
+
+function buildRagSearchWorkflowStep(enabled: boolean): string {
+  // OFF: substitute to empty string. See `buildRagSearchToolLine`
+  // above for why; `composeSystemPrompt` collapses the resulting
+  // triple-newline runs so the prompt stays byte-identical to
+  // pre-Subtask-4 when the toggle is off (and Anthropic prompt caching
+  // is preserved).
+  if (!enabled) return '';
+  return (
+    '5. **For deeper lookups beyond the pre-injected chunks, call `rag_search`.** ' +
+    'The pre-injected `<attached-rag-context>` envelope contains the top-5 chunks ' +
+    'at send time. If the user asks a follow-up that requires different chunks ' +
+    '(specific section number, function name, code identifier), call ' +
+    '`rag_search({ collection, query, limit })`. It runs hybrid search ' +
+    '(vector + keyword) and returns a fresh envelope. Do NOT use it for the ' +
+    'initial turn — the pre-injected chunks already cover it.'
+  );
+}
+
+/**
+ * Subtask 4 introduced two `{{KEY}}` placeholders in `DEFAULT_SYSTEM_PROMPT`
+ * (`{{RAG_SEARCH_TOOL_LINE}}`, `{{RAG_SEARCH_WORKFLOW_STEP}}`) that, when
+ * the user hasn't enabled `ragSearchEnabled`, resolve to empty strings.
+ * Their source-line layout then renders as three consecutive newlines
+ * (`\n\n\n`) in the assembled prompt. The pre-Subtask-4 prompt never
+ * contained `\n{3,}` runs, so collapsing them to `\n\n` is a no-op for
+ * that baseline and brings the OFF state back to byte-identical —
+ * preserving Anthropic prompt caching.
+ *
+ * Scope: this runs against the **entire assembled prompt** (not just the
+ * Subtask-4 branches) so a future contributor adding a multi-line block
+ * elsewhere that happens to contain `\n\n\n` would also see it normalized.
+ * Today neither `MEMORY_INSTRUCTIONS` nor `DEFAULT_SYSTEM_PROMPT` contain
+ * such runs; the prompt-composer test `段间不出现三连以上换行` enforces
+ * the invariant that keeps this collapse a no-op in practice.
+ */
+function collapseTripleNewlines(s: string): string {
+  return s.replace(/\n{3,}/g, '\n\n');
+}
+
 function buildSystemPrompt(
   userInstructions: string,
   skillsBlock?: string,
@@ -128,9 +202,10 @@ async function composeUserMessage(text: string, attachments: Attachment[], memor
  * 化」的 diff 逻辑。
  */
 async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): Promise<string> {
-  const [instructions, skillMetas] = await Promise.all([
+  const [instructions, skillMetas, currentRagSettings] = await Promise.all([
     userInstructionsStorage.getValue(),
     scanSkillIndex(),
+    ragSettings.getValue(),
   ]);
   // memoryEnabled 由调用方传入时复用其快照（让同一轮的 system / user 注入读同一个值）；
   // 未传时（如初始建会话路径）自行读取。
@@ -139,11 +214,21 @@ async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): 
   // 「会话域 → 模板变量」的翻译层：本函数是唯一认识 session 概念、并把它映射成
   // 纯装配器 buildSystemPrompt 所需的 `{{KEY}}` 变量表的地方。新增占位符只改这里。
   // 记忆开启时填入指引段（前后加空行作分隔），关闭时为空串（base 逐字节回到原样）。
-  return buildSystemPrompt(instructions || '', skillsBlock, {
-    SESSION_ID: sessionId,
-    MEMORY_LIMITATION: memoryLimitationLine(enabled),
-    MEMORY_SECTION: enabled ? `\n${MEMORY_INSTRUCTIONS}\n` : '',
-  });
+  return collapseTripleNewlines(
+    buildSystemPrompt(instructions || '', skillsBlock, {
+      SESSION_ID: sessionId,
+      MEMORY_LIMITATION: memoryLimitationLine(enabled),
+      MEMORY_SECTION: enabled ? `\n${MEMORY_INSTRUCTIONS}\n` : '',
+      // Subtask 4 — agentic `rag_search` tool. Both placeholders stay
+      // empty when off (prompt byte-identical to pre-Subtask-4). The
+      // gate flag is read here once per `composeSystemPrompt` call;
+      // `buildRagSearchToolLine` / `buildRagSearchWorkflowStep` read
+      // `currentRagSettings` so a flipped toggle is picked up on the
+      // next prompt rebuild (every dispatch — see `factory.ts`).
+      RAG_SEARCH_TOOL_LINE: buildRagSearchToolLine(currentRagSettings.ragSearchEnabled),
+      RAG_SEARCH_WORKFLOW_STEP: buildRagSearchWorkflowStep(currentRagSettings.ragSearchEnabled),
+    }),
+  );
 }
 
 // ─── 公开 API ───

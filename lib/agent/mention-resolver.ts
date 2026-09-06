@@ -259,6 +259,11 @@ export async function resolveMentionToAttachment(
         // to the raw cosine top-K.
         reranker: buildReranker(settings) ?? undefined,
         rerankTopN: settings.rerankTopN,
+        // Subtask 2 of the Hybrid RAG plan: pass the full settings
+        // blob so the retriever can resolve `retrievalMode` (hybrid
+        // / vector). Per-call `mode` still overrides when the caller
+        // cares (e.g. rag_search tool always passes `'hybrid'`).
+        settings,
         // Relevance gate for PINNED RAG only. The retriever filters
         // out chunks below this cosine similarity at the vector stage,
         // so an empty result means "no relevant hit" — the resolver
