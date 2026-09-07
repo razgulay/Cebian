@@ -67,6 +67,7 @@ import { skillRoot, sessionRoot } from '@/lib/agent/path-safety';
 import {
   getRoleConfig,
   getWorkerToolNames,
+  WORKER_TIMEOUT_MS,
   type WorkerRoleConfig,
 } from '@/lib/agent/worker-roles';
 import { TOOL_DELEGATE_DOM, TOOL_DELEGATE_TASK } from '@/lib/tools/names';
@@ -107,20 +108,6 @@ const FORBIDDEN_FOR_WORKERS: ReadonlySet<string> = new Set([
 /** `output_content` 截断上限（~50 KB）。超出则标 truncated，harness UI 显示
  *  「文件过大，截断」并保留下载/打开入口。主代理拿到的不应是整本 PDF。 */
 const MAX_OUTPUT_CONTENT_CHARS = 50_000;
-
-/** Worker 单次 attempt 硬超时（120s = 2 分钟）。超过即视为「模型卡死 / API
- *  没响应」，自动 abort 整个 attempt 并返回 `ok:false, timedOut:true` handoff。
- *  设计依据：实测主代理 485s ghost gap（model 解析后到 agent.prompt settle
- *  之间的静默）表明 LLM 链路可能 hang 数分钟；让 user 干等毫无意义。120s
- *  既能容忍「正常慢响应」(Sonnet / Opus 偶尔 30–60s)，又能在 API 真正 hang
- *  时秒级回退到「请换 model」路径。
- *
- *  常量以 `WORKER_TIMEOUT_MS` 显式命名（AGENTS.md "make the layer visible
- *  when names collide"）—— module 内部其它常量（MAX_OUTPUT_CONTENT_CHARS）
- *  也是同样的「常量集在 module 顶」风格，保持视觉一致。
- *  改这个值 = 改 fail-fast 阈值；如要 user-tunable，留到后续 Subtask 把
- *  `RunWorkerOptions.timeoutMs` 接出来。 */
-const WORKER_TIMEOUT_MS = 120_000;
 
 /** Handoff JSON 契约——worker 回复末尾的 shape。`composePrompt` 把它 append
  *  到 task 末尾（确保每个 worker 都看到一次）；retry 时 `composeRetryPrompt`
@@ -310,6 +297,19 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
     if (args.timedOut) handoff.timedOut = true;
     if (args.attemptDurationMs !== undefined) handoff.attemptDurationMs = args.attemptDurationMs;
     if (args.attempts !== undefined) handoff.attempts = args.attempts;
+    // 修：原来 branch 1（runnerOk=false）一律不 retry——「runner-level 错误
+    // retry 不会让它消失」是正确原则，但 **timeout** 是例外：worker 被硬
+    // abort, 不代表「同一 model + 同一 prompt 再跑 120s 还是会卡」——况且
+    // 如果 worker 已经写了一半 output file, retry 让他接着写完比
+    // fail-fast 更友好。区分三种情况:
+    //   - timeout + file 存在 → retryable:true（mechanical self-heal — file
+    //     是半成品, retry 可能把它写完）
+    //   - timeout + file 不存在 → retryable:false（同样原因, fail-fast）
+    //   - non-timeout（parent abort / exception）→ retryable:false（保持
+    //     原原则, zero regression）
+    if (args.timedOut && args.outputFileExists) {
+      handoff.retryable = true;
+    }
     return handoff;
   }
 
@@ -524,15 +524,17 @@ export function composeRetryPrompt(
 }
 
 /** 是否需要 retry。Pure 谓词，让 test 能钉死 retry 条件而不必起 agent。
- *  - 必须 ok=true（runner 跑完了才有「失败的产物」可言）
  *  - 必须 retryable=true（标记为可自愈的机械失败）
- *  - 必须 attempts !== 2（已 retry 过一次，硬上限为单次自愈） */
+ *  - 必须 attempts !== 2（已 retry 过一次，硬上限为单次自愈）
+ *  - 必须 ok=true（runner 跑完了才有「失败的产物」可言）**或** timedOut=true
+ *    （timeout + 已有部分 output file 是新增的例外——worker 被硬 abort，
+ *    retry 让他接着写完比 fail-fast 友好；assembleHandoff 只在
+ *    timeout+outputFileExists 时才设 retryable，所以这条 OR 不会误开
+ *    别的 runner-level 错误） */
 export function shouldRetry(handoff: WorkerHandoff): boolean {
-  return (
-    handoff.ok === true &&
-    handoff.retryable === true &&
-    handoff.attempts !== 2
-  );
+  if (handoff.retryable !== true) return false;
+  if (handoff.attempts === 2) return false;
+  return handoff.ok === true || handoff.timedOut === true;
 }
 
 // ─── IO helpers (internal; tested via mock of `vfs`) ───
@@ -810,6 +812,16 @@ interface RunWorkerAttemptOptions {
           attempt: attemptNumber,
           elapsedMs: Math.round(performance.now() - attemptStartedAt),
         });
+        // 修：之前 agent.prompt() 收到 composedController.abort() 时不会抛错
+        // （pi-agent-core 把 abort 当 cancel 语义），函数返回时 msgs 里可能只有
+        // 部分 text 或空串，flow 继续往下走到 extractJsonOrRaw → "JSON parse
+        // fail" → 无用的 retry。这里如果 setTimeout 已在 prompt 运行期间 fire,
+        // 主动 throw 让它落进下面的 catch block —— catch 里已经有
+        // `runnerError = timedOut ? 'Worker timed out after ...ms'` 分支,
+        // 于是会正确流进 `runnerOk: false` + `timedOut: true`.
+        if (timedOut) {
+          throw new Error('Worker timed out');
+        }
       } finally {
         unsubscribeStream();
         composedController.signal.removeEventListener('abort', onComposedAbort);
@@ -837,12 +849,16 @@ interface RunWorkerAttemptOptions {
       const { exists, content } = await readOutputIfAny(opts.outputPath);
 
       const attemptDurationMs = Math.round(performance.now() - attemptStartedAt);
+      // 修：原来这里硬写 `timedOut: false`，但 setTimeout 可能在 `agent.prompt()`
+      // 返回前已经 fire（abort 只挂 listener，不抛错），导致 telemetry 报「attempt
+      // 正常结束」而实际上 worker 是被 abort 的——debug log 上一片绿色，定位
+      // bug 极其痛苦。从闭包读回真实值：timer 触发了 → true.
       debugLog.info('sub_agent', 'sub_agent:worker:attempt:done', {
         role: opts.role,
         modelId: opts.model.id,
         attempt: attemptNumber,
         attemptDurationMs,
-        timedOut: false,
+        timedOut,
         outputFileExists: exists,
       });
 
@@ -876,6 +892,27 @@ interface RunWorkerAttemptOptions {
         parentAborted: isAbort && !timedOut,
         error: e instanceof Error ? e.message : String(e),
       });
+      // 修：原来这里 `outputFileExists: false` 写死，导致 timeout path 永远
+      // 看不到「worker 实际已经写了一半文件」的事实——Phase 1.4 的 smart retry
+      // 决策需要知道这一点：file 存在 → retry 让 worker 写完；file 不存在 →
+      // 再跑 120s 也是同样结局，fail-fast。Non-timeout catch（parent abort /
+      // 真 exception）保持 `false`，zero regression——那些路径本来就不该 retry。
+      // 只读 `exists` 标志：branch 1 的 handoff 不携带 output_content（失败
+      // handoff 塞部分内容会改变主代理看到的信息面，超出本次修复范围）。
+      let timeoutOutputExists = false;
+      if (timedOut && opts.outputPath) {
+        try {
+          const r = await readOutputIfAny(opts.outputPath);
+          timeoutOutputExists = r.exists;
+        } catch (readErr) {
+          // VFS read 失败（罕见）→ 保持 false + log，debug 仍有信号
+          debugLog.warn('sub_agent', 'sub_agent:worker:output_read_after_timeout_failed', {
+            role: opts.role,
+            attempt: attemptNumber,
+            error: readErr instanceof Error ? readErr.message : String(readErr),
+          });
+        }
+      }
       result = assembleHandoff({
         runnerOk: false,
         runnerError,
@@ -883,7 +920,7 @@ interface RunWorkerAttemptOptions {
         modelKey: opts.modelKey,
         rawText: '',
         json: null,
-        outputFileExists: false,
+        outputFileExists: timedOut ? timeoutOutputExists : false,
         attempts: opts.attempt,
         attemptDurationMs,
         ...(timedOut ? { timedOut: true } : {}),

@@ -141,6 +141,23 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
 export const WORKER_ROLE_KEYS: readonly WorkerRole[] = Object.keys(WORKER_ROLES) as WorkerRole[];
 
 /**
+ * Worker 单次 attempt 硬超时（120s = 2 分钟）。超过即视为「模型卡死 / API
+ * 没响应」，自动 abort 整个 attempt 并返回 `ok:false, timedOut:true` handoff。
+ * 设计依据：实测主代理 485s ghost gap（model 解析后到 agent.prompt settle
+ * 之间的静默）表明 LLM 链路可能 hang 数分钟；让 user 干等毫无意义。120s
+ * 既能容忍「正常慢响应」(Sonnet / Opus 偶尔 30–60s)，又能在 API 真正 hang
+ * 时秒级回退到「请换 model」路径。
+ *
+ * 放在 `lib/agent/worker-roles.ts`（而非 `entrypoints/background/agent/worker-runner.ts`）
+ * 是因为这个常量被**两个 context** 用到：background runner 用它触发 abort，
+ * sidepanel UI 用它渲染倒计时。如果留在 runner，sidepanel 要从 entrypoint 跨
+ * 边界 import 一个常量（带出 factory + 8 个 tool 模块 → 拖大 bundle），且
+ * 违反 AGENTS.md「按 concept 归档」的语义。改这个值 = 改 fail-fast 阈值；
+ * 如要 user-tunable，留到后续 Subtask 把 `RunWorkerOptions.timeoutMs` 接出来。
+ */
+export const WORKER_TIMEOUT_MS = 120_000;
+
+/**
  * 查一个 role 的 config。**仅**接受 `WorkerRole` 联合里的值；外部拿到可疑
  * 字符串（LLM 误传、用户手填）时抛错，避免 silently 返回 undefined 让 runner
  * 后面再炸出更难读的栈。

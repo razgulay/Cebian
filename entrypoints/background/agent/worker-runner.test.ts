@@ -131,6 +131,50 @@ describe('assembleHandoff', () => {
     expect(h.summary).toBe('Worker run failed');
   });
 
+  // ── Phase 1.4: timeout + output file 区分 retryable / fail-fast ──
+  it('timeout + output file 存在 → retryable:true（mechanical self-heal，retry 接着写完）', () => {
+    // Worker 被 120s hard abort 中途, 但 output file 已存在 → retry
+    // 让他写完比 fail-fast 友好. 这是 Phase 1.4 新加的例外分支.
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker timed out after 120000ms',
+      timedOut: true,
+      outputFileExists: true,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.timedOut).toBe(true);
+    expect(h.retryable).toBe(true);
+    expect(h.status).toBe('failed');
+  });
+
+  it('timeout + output file 不存在 → retryable:false（fail-fast）', () => {
+    // Timeout 但 file 不存在 → 同一 model + prompt 再跑 120s 还会卡,
+    // 不要再 retry. 配 shouldRetry 测 一起钉死「不会再重试」.
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker timed out after 120000ms',
+      timedOut: true,
+      outputFileExists: false,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.timedOut).toBe(true);
+    expect(h.retryable).toBeFalsy();
+  });
+
+  it('non-timeout runner error (parent abort / exception) → retryable:false（zero regression）', () => {
+    // 保持原原则: non-timeout runner-level error 永不
+    // retry (重试不会让它消失). 即便 outputFileExists=true, timedOut=false
+    // → retryable 仍须为 false.
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Aborted',
+      timedOut: undefined,
+      outputFileExists: true,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.retryable).toBeFalsy();
+  });
+
   it('JSON parse 失败（malformed）→ ok:true, status:failed, handoff_notes 放 rawText 截断', () => {
     const raw = 'I am the LLM and I produced prose only, no JSON. '.repeat(20);
     const h = assembleHandoff(
@@ -365,25 +409,43 @@ describe('assembleHandoff', () => {
 
 // ─── assembleHandoff: Fail-Fast (Subtask 1) ───
 //
-// timeout / network / abort 一律走 branch 1（runnerOk=false）。这条
-// 路径**不**设 `retryable`，所以 `shouldRetry(...)` 自然返回 false
-// —— single-pass retry 不会重新撞同一个 hang 的 API。配套断言
-// `attemptDurationMs` 在所有 6 个分支都透传到 handoff，让 caller 看到
-// 真实耗时便于排查「卡了多久」。
+// timeout / network / abort 一律走 branch 1（runnerOk=false）。
+// 原本这条路径一律不设 `retryable`（Subtask 1 时的 hard rule：runner-level
+// 错误不重试），Phase 1.4 为 timeout 路径加了例外：timeout + output file
+// 已有 → retryable:true（worker 被硬 abort 中途但已经写了文件，retry 让
+// 它接着写完比 fail-fast 友好）。其它 runner-level 错误（parent abort /
+// network / exception）保持 retryable 缺失，让 `shouldRetry(...)` 仍
+// 返回 false。配套断言 `attemptDurationMs` 在所有分支都透传到 handoff。
 
 describe('assembleHandoff: Fail-Fast (timeout / abort)', () => {
-  it('runnerOk=false + timedOut:true → handoff.timedOut=true, retryable 缺失（=不重试）', () => {
+  it('runnerOk=false + timedOut:true + file 存在 → retryable:true (Phase 1.4 smart retry)', () => {
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
       runnerError: 'Worker timed out after 120000ms (model "anthropic/claude-opus-4-1" did not respond)',
       timedOut: true,
       attemptDurationMs: 120_000,
+      outputFileExists: true,
     });
     expect(h.ok).toBe(false);
     expect(h.status).toBe('failed');
     expect(h.timedOut).toBe(true);
     expect(h.attemptDurationMs).toBe(120_000);
-    // retryable 故意不设 → shouldRetry 返回 false。Fail-Fast 硬约束。
+    // Phase 1.4: timeout + file 存在 → retryable (mechanical self-heal)
+    expect(h.retryable).toBe(true);
+  });
+
+  it('runnerOk=false + timedOut:true + file 不存在 → retryable 缺失（fail-fast）', () => {
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker timed out after 120000ms (model "anthropic/claude-opus-4-1" did not respond)',
+      timedOut: true,
+      attemptDurationMs: 120_000,
+      outputFileExists: false,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.status).toBe('failed');
+    expect(h.timedOut).toBe(true);
+    // timeout + file 不存在 → fail-fast, retryable 缺失 → shouldRetry 返回 false
     expect(h.retryable).toBeUndefined();
   });
 
@@ -737,8 +799,48 @@ describe('shouldRetry', () => {
     ).toBe(true);
   });
 
-  it('runnerOk=false（ok:false） → false（不重试 model/abort error）', () => {
-    expect(shouldRetry({ ...baseOk, ok: false, attempts: 1 })).toBe(false);
+  it('runnerOk=false（ok:false）但 timedOut=false → false（不重试 model/abort error）', () => {
+    // Phase 1.4: ok=false 仍允许重试**当且仅当** timedOut=true（timeout
+    // 路径). 这里验证 non-timeout 的 ok=false 仍 fail — zero regression.
+    expect(shouldRetry({ ...baseOk, ok: false, timedOut: false, attempts: 1 })).toBe(false);
+  });
+
+  it('runnerOk=false + timedOut=true → true（Phase 1.4 新例外：timeout 自愈）', () => {
+    // New in Phase 1.4. assembleHandoff 只在 timeout+outputFileExists
+    // 时才设 retryable=true, 这里喂一个 retryable:true + ok:false +
+    // timedOut:true, shouldRetry 应该 true. retryable 缺失 → false.
+    expect(
+      shouldRetry({
+        ...baseOk,
+        ok: false,
+        timedOut: true,
+        attempts: 1,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRetry({
+        ...baseOk,
+        ok: false,
+        timedOut: true,
+        retryable: undefined,
+        attempts: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('attempts=2（timeout 路径已自愈过一次） → false（单次自愈硬上限）', () => {
+    // Phase 1.4 新加的 timeout retry 路径仍受 attempts===2 硬上限约束：
+    // 即便 retryable:true + timedOut:true，跑到第二次就不再重试，避免
+    // 反复 timeout 烧 120s。钉死「单次自愈」不变式。
+    expect(
+      shouldRetry({
+        ...baseOk,
+        ok: false,
+        timedOut: true,
+        retryable: true,
+        attempts: 2,
+      }),
+    ).toBe(false);
   });
 
   it('retryable=false（worker 自报 failed，非机械故障） → false', () => {
