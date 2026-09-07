@@ -36,7 +36,10 @@ import { ToolCardWithUI } from '@/components/chat/ToolCardWithUI';
 import { DelegationCard, type DelegationStatus } from '@/components/chat/DelegationCard';
 import { isMcpAppResult } from '@/lib/tools/mcp-tool';
 import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
-import { WORKER_ROLE_KEYS } from '@/lib/agent/worker-roles';
+// WORKER_TIMEOUT_MS 放在 lib/agent/worker-roles.ts（被 background runner 和
+// sidepanel UI 共用的常量），不在 entrypoints 里——避免把 runner 的整条
+// 依赖图（factory + 8 个 tool 模块）拖进 sidepanel bundle。
+import { WORKER_ROLE_KEYS, WORKER_TIMEOUT_MS } from '@/lib/agent/worker-roles';
 import type { WorkerRole } from '@/lib/persistence/storage';
 import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -300,6 +303,18 @@ export function ChatPage({
   // pinned at top" UX. We only want to scroll-to-bottom when the user
   // explicitly switches sessions or opens a new chat.
   const prevSessionIdRef = useRef<string | null>(null);
+
+  // Phase 2.1 live timer 起点缓存：以 toolCallId 为 key 记下第一次见到
+  // status='running' 时的 Date.now()。必须在 useRef 里 —— 写在 render body
+  // 里每次 re-render 都会重新计算并把 DelegationCard 的 useEffect 依赖
+  // 换掉，导致 interval 被清掉、elapsedSec 被重置为 0，倒计时就废了。
+  // 不能挂在 ToolCall/AssistantMessage 上：pi-agent-core 的类型不带
+  // timestamp 字段，tc 上加自有字段在 serialization 路径上也不安全。
+  // tc.id 在 assistant 消息的整个生命周期内稳定（key 也是它），
+  // 所以 Map 不会无限增长 —— status 转出 'running' 时整张卡 unmount，
+  // 但我们不主动清理（条目 ≤ 4 字节/条，跨消息数量级远比 chat 短）。
+  const attemptStartedAtRef = useRef<Map<string, number>>(new Map());
+
   useEffect(() => {
     if (activeSessionId === prevSessionIdRef.current) return;
 
@@ -805,6 +820,23 @@ export function ChatPage({
                       // `content_writer` 图标 + 显示原始字符串，UI 不崩。
                       const safeRole: WorkerRole = roleArg && isWorkerRole(roleArg) ? roleArg : 'content_writer';
 
+                      // Phase 2.1 live timer 起点：tc 不带 timestamp 字段
+                      //（pi-agent-core 的 AssistantMessage 无 createdAt），
+                      // 所以第一次见到该 tool call 处于 running 时把
+                      // Date.now() 存进 ref，后续 re-render 复用同一值——
+                      // 倒计时不会因为父组件刷新而归零。toolResult 一回来
+                      //（status 转出 running）就不再传该 prop，timer 自动停。
+                      let attemptStartedAt: number | undefined;
+                      if (delegationStatus === 'running') {
+                        const cached = attemptStartedAtRef.current.get(tc.id);
+                        if (cached !== undefined) {
+                          attemptStartedAt = cached;
+                        } else {
+                          attemptStartedAt = Date.now();
+                          attemptStartedAtRef.current.set(tc.id, attemptStartedAt);
+                        }
+                      }
+
                       return (
                         <DelegationCard
                           key={`tool-${tc.id}`}
@@ -818,6 +850,8 @@ export function ChatPage({
                           {...(modelKeyText ? { modelKey: modelKeyText } : {})}
                           {...(attemptsNum ? { attempts: attemptsNum } : {})}
                           {...(attemptDurationMsNum !== undefined ? { attemptDurationMs: attemptDurationMsNum } : {})}
+                          {...(attemptStartedAt !== undefined ? { attemptStartedAt } : {})}
+                          timeoutMs={WORKER_TIMEOUT_MS}
                         />
                       );
                     }

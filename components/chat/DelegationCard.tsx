@@ -11,8 +11,20 @@
 // 状态来源：父组件 `chat/index.tsx` 解析 `toolResult.content[].text` 里的 handoff JSON
 // （runner 给的就是 JSON；用 `summarizeHandoffJson` 缩过但仍是合法 JSON）。本组件只
 // 关心结构化字段，不重新解析。
+//
+// Phase 2 visual feedback (delegated-task card 实时反馈):
+//   - 2.1 Live elapsed timer：status='running' 时 header 显示 "Running… Xs / 120s"。
+//     计时起点由 caller 传 `attemptStartedAt`（Date.now()）— 避免 component
+//     re-mount 时 timer 被重置。`WORKER_TIMEOUT_MS` 来自 worker-runner.ts,
+//     保持「UI 显示的上限」与「runner 实际 abort 阈值」single source of truth.
+//   - 2.2 Pulse/shimmer：container 左边一道 warning border + 整卡 animate-pulse
+//     + 跑中时角色图标改 spin。状态变 success/failed 后全部退场——保留
+//     "card 还在动 = 还在跑" 的视觉信号.
+//   - 2.3 Role action badge：status='running' 时 header 额外加 "writing /
+//     coding / researching / reviewing" 的 action label（具体文案见 locales
+//     `chat.delegation.action.*`），让用户一眼看出 "这个 worker 现在在做什么"（不只是 "在跑"）。
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ChevronRight,
   Loader2,
@@ -49,6 +61,17 @@ const ROLE_LABEL_KEYS: Record<WorkerRole, 'chat.workerTeamRoster.role.content_wr
   researcher: 'chat.workerTeamRoster.role.researcher',
 };
 
+/** Phase 2.3 role-action label：4 role 各自对应的「正在做什么」短语，状态
+ *  running 时挂在 header 让用户一眼看出「这个 worker 现在在做什么」。
+ *  English / 中文都双语，硬塞 i18n lookup table（runtime 拼 key 触发 TS
+ *  字面量校验失败，所以走 Record<WorkerRole, literal-key> 这条老路）。 */
+const ROLE_ACTION_LABEL_KEYS: Record<WorkerRole, 'chat.delegation.action.content_writer' | 'chat.delegation.action.frontend_coder' | 'chat.delegation.action.reviewer' | 'chat.delegation.action.researcher'> = {
+  content_writer: 'chat.delegation.action.content_writer',
+  frontend_coder: 'chat.delegation.action.frontend_coder',
+  reviewer: 'chat.delegation.action.reviewer',
+  researcher: 'chat.delegation.action.researcher',
+};
+
 interface DelegationCardProps {
   /** Worker role —— 来自 tool argument `tc.arguments.role`。 */
   role: WorkerRole;
@@ -75,21 +98,48 @@ interface DelegationCardProps {
   /** Attempt 实际耗时（ms）。仅在 timedOut / failed 时显示「跑了 X 秒」，
    *  让用户判断「是真慢还是卡死」。 */
   attemptDurationMs?: number;
+  /** Attempt 开始时间戳（`Date.now()` ms）。caller 在 tool call emit 时记录
+   *  后传进来，让 card 第一次 render 就启动 elapsed timer 而不会因为 React
+   *  re-mount 把 timer 归零。`status === 'running'` 时使用。 */
+  attemptStartedAt?: number;
+  /** Worker runner 的硬上限（ms）。caller 从 `WORKER_TIMEOUT_MS` 传进来，
+   *  保持 "UI 显示的上限" 与 "runner 实际 abort 阈值" 同步—— hard-code
+   *  120_000 会在 runner cap 改的瞬间漂移。`status === 'running'` 时用
+   *  于渲染 "Xs / Ys" 倒计时分母。 */
+  timeoutMs?: number;
 }
 
 interface DelegationStatusBadgeProps {
   status: DelegationStatus;
+  /** Elapsed seconds since attempt started (running state only). Caller
+   *  computes from `attemptStartedAt`; badge shows "(Xs / Ys)" when both
+   *  elapsedSec and timeoutSec are provided, falls back to "Running…" text
+   *  alone when caller doesn't track timing (e.g. older persisted state). */
+  elapsedSec?: number;
+  timeoutSec?: number;
 }
 
-function DelegationStatusBadge({ status }: DelegationStatusBadgeProps) {
+function DelegationStatusBadge({ status, elapsedSec, timeoutSec }: DelegationStatusBadgeProps) {
   switch (status) {
-    case 'running':
+    case 'running': {
+      // 计时显示："Running… (Xs / Ys)" — 用户实时看到「跑了多久 / 还剩多久
+      // 被 abort」。没计时信息时回退到原来的纯文本 "Running…"。
+      const timerText =
+        elapsedSec !== undefined && timeoutSec !== undefined
+          ? ` (${elapsedSec}s / ${timeoutSec}s)`
+          : '';
       return (
         <Badge variant="secondary" className="gap-1 py-0.5">
           <Loader2 className="size-3 animate-spin" />
           {t('chat.delegation.status.running')}
+          {timerText && (
+            <span className="font-mono text-[0.65rem] text-muted-foreground tabular-nums">
+              {timerText}
+            </span>
+          )}
         </Badge>
       );
+    }
     case 'success':
       return (
         <Badge variant="secondary" className="gap-1 py-0.5 text-success">
@@ -151,6 +201,8 @@ export function DelegationCard({
   modelKey,
   attempts,
   attemptDurationMs,
+  attemptStartedAt,
+  timeoutMs,
 }: DelegationCardProps) {
   // 默认展开策略：running / failed / partial / timedOut 一律展开（用户在等结果 /
   // 要看错误 / 要看「换 model」提示），success + 有 output 折叠（点 header 看
@@ -161,6 +213,26 @@ export function DelegationCard({
     status === 'partial' ||
     status === 'timedOut';
   const [open, setOpen] = useState(initiallyOpen);
+
+  // Phase 2.1 live elapsed timer. 跑中每秒重算 elapsedSec；状态转出 running
+  // 后 interval 自动清掉（依赖 `isRunning`），不会泄漏 setInterval。
+  // attemptStartedAt 缺失时退化成 undefined → badge 回落到纯 "Running…" 文本
+  // （兼容老 persisted state / 单元测试场景）。Math.max(0, ...) 兜底时钟漂移。
+  const isRunning = status === 'running';
+  const [elapsedSec, setElapsedSec] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (!isRunning || attemptStartedAt === undefined) {
+      setElapsedSec(undefined);
+      return;
+    }
+    const compute = (): number =>
+      Math.max(0, Math.floor((Date.now() - attemptStartedAt) / 1000));
+    setElapsedSec(compute());
+    const id = setInterval(() => setElapsedSec(compute()), 1000);
+    return () => clearInterval(id);
+  }, [isRunning, attemptStartedAt]);
+  const timeoutSec =
+    timeoutMs !== undefined ? Math.round(timeoutMs / 1000) : undefined;
 
   const RoleIcon = ROLE_ICONS[role] ?? PenLine;
 
@@ -173,23 +245,60 @@ export function DelegationCard({
     : null;
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden text-[0.8rem] min-w-0">
+    // Phase 2.2 pulse/shimmer: while status='running' the whole card border
+    // switches to a warning tint + animate-pulse (2s opacity 1 → 0.5 → 1
+    // cycle). A peripheral-glimpse "the card is still breathing" signal that
+    // tells the user "this is alive, still running". Once the attempt
+    // resolves (success / failed / partial / cancelled / timedOut), the
+    // border falls back to border-border and animate-pulse is removed — the
+    // card visually settles.
+    <div
+      className={
+        isRunning
+          ? 'relative border border-warning/50 border-l-2 border-l-warning rounded-lg overflow-hidden text-[0.8rem] min-w-0 animate-pulse'
+          : 'border border-border rounded-lg overflow-hidden text-[0.8rem] min-w-0'
+      }
+    >
       <button
         type="button"
         className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-card hover:bg-accent/50 transition-colors text-left cursor-pointer"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
       >
-        {/* Role icon — always the role visual mark, decoupled from status */}
-        <RoleIcon className="size-4 text-muted-foreground shrink-0" />
+        {/* Role icon — always the role visual mark, decoupled from status.
+            Phase 2.2: while running, spin the icon so the "this worker is
+            still turning" signal is unmistakable; falls back to static when
+            the attempt resolves. */}
+        <RoleIcon
+          className={
+            isRunning
+              ? 'size-4 text-warning shrink-0 animate-spin'
+              : 'size-4 text-muted-foreground shrink-0'
+          }
+        />
 
         {/* Role label — reuses the i18n key already shipped in Sidebar Team Roster */}
         <span className="text-foreground font-medium">
           {t(ROLE_LABEL_KEYS[role])}
         </span>
 
-        {/* Status badge */}
-        <DelegationStatusBadge status={status} />
+        {/* Phase 2.3 role-action badge: an extra outline pill while running
+            ("writing" / "coding" / "reviewing" / "researching") that lets
+            the user see *what* this worker is doing, not just "running".
+            Hidden once the attempt resolves — the status badge + summary
+            already carry the outcome story at that point. */}
+        {isRunning && (
+          <Badge variant="outline" className="text-[0.65rem] py-0 text-warning border-warning/40">
+            {t(ROLE_ACTION_LABEL_KEYS[role])}
+          </Badge>
+        )}
+
+        {/* Status badge — running state carries the elapsed/timeout countdown. */}
+        <DelegationStatusBadge
+          status={status}
+          elapsedSec={elapsedSec}
+          timeoutSec={timeoutSec}
+        />
 
         {/* Retry badge — runner self-healed once (parse / schema / missing file),
             helps the user understand why attempts > 1. */}

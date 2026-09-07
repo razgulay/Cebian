@@ -989,6 +989,14 @@ chat:
       failed: "失败"
       cancelled: "已取消"
       timedOut: "超时"
+    # Phase 2.3 角色动作 badge：status='running' 时挂在 header 的 outline
+    # badge，让用户一眼看出「这个 worker 现在在做什么」（不只是「在跑」）。
+    # 与 status badge 区分开——状态是「跑成/跑挂」，action 是「正在执行的动作」。
+    action:
+      content_writer: "撰写中"
+      frontend_coder: "编码中"
+      reviewer: "审查中"
+      researcher: "研究中"
     # Fail-Fast 路径（worker-runner.ts 在 120s 后自动 abort）。提示用户
     # "去 Sidebar → Team Roster 换 model 再试"，而不是让用户对着停滞的
     # 卡片干等。两种变体：withModel 带 modelKey，generic 在 modelKey 缺失时用。

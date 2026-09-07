@@ -1015,6 +1015,14 @@ chat:
       failed: "Failed"
       cancelled: "Cancelled"
       timedOut: "Timed out"
+    # Phase 2.3 role-action label：status='running' 时挂在 header 的 outline
+    # badge, 让用户一眼看出「这个 worker 现在在做什么」（不只是「在跑」）。
+    # 与 status badge 区分开—— 状态是「跑成/跑挂」, action 是「正在执行的动作」.
+    action:
+      content_writer: "writing"
+      frontend_coder: "coding"
+      reviewer: "reviewing"
+      researcher: "researching"
     # Fail-Fast path (worker-runner.ts auto-aborts after 120s). Hint tells the
     # user "switch the model on Sidebar → Team Roster and retry" instead of
     # leaving them staring at a stalled card. Two variants: one mentions the
