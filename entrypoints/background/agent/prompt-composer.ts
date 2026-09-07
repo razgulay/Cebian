@@ -7,7 +7,7 @@
 //
 // 造 Agent 实例本身在同目录的 `factory.ts` —— 它只接收本文件产出的成形字符串。
 
-import { userInstructions as userInstructionsStorage, memorySettings } from '@/lib/persistence/storage';
+import { userInstructions as userInstructionsStorage, memorySettings, workerTeamEnabled } from '@/lib/persistence/storage';
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt';
 import { gatherPageContext } from './page-context';
 import { buildTextPrefix, type Attachment } from '@/lib/agent/attachments';
@@ -132,11 +132,16 @@ function buildSystemPrompt(
     parts.push(trimmedSkills);
   }
 
-  // Worker L1 索引：registry 是 4 个固定 role，buildAvailableWorkersBlock 永远
-  // 返回非空字符串（不会因 storage 缺配置而消失——runner 自行处理 "model not
-  // configured"），所以这里**无条件** append。如果哪天 worker 数变 0 才需要
-  // 加空守卫；现在的固定 4 role 数量下空守卫反而引入「有时不出现」的歧义。
-  parts.push(buildAvailableWorkersBlock());
+  // Worker L1 索引：registry 是 4 个固定 role，buildAvailableWorkersBlock 在
+  // OFF 时返回空串（Worker Team 总开关关闭），ON 时返回非空。OFF 时整段
+  // 不注入主代理 system prompt——它既看不到 `<available-workers>` 也拿不到
+  // `delegate_task` 工具，故不必给菜单。两侧必须由同一个 storage flag
+  // (`workerTeamEnabled`) 同步驱动：tool 一侧见 `lib/tools/index.ts` 的
+  // 条件 push，prompt 一侧见此处的 `workerTeamEnabled === 'true'` 判断。
+  // 与 `rag_search` 在 prompt + tool 两边 gate 的模式一致。
+  if (variables.workerTeamEnabled === 'true') {
+    parts.push(buildAvailableWorkersBlock(true));
+  }
 
   const trimmedInstructions = userInstructions.trim();
   if (trimmedInstructions) {
@@ -215,10 +220,11 @@ async function composeUserMessage(
  * 化」的 diff 逻辑。
  */
 async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): Promise<string> {
-  const [instructions, skillMetas, currentRagSettings] = await Promise.all([
+  const [instructions, skillMetas, currentRagSettings, teamEnabled] = await Promise.all([
     userInstructionsStorage.getValue(),
     scanSkillIndex(),
     ragSettings.getValue(),
+    workerTeamEnabled.getValue(),
   ]);
   // memoryEnabled 由调用方传入时复用其快照（让同一轮的 system / user 注入读同一个值）；
   // 未传时（如初始建会话路径）自行读取。
@@ -240,6 +246,13 @@ async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): 
       // next prompt rebuild (every dispatch — see `factory.ts`).
       RAG_SEARCH_TOOL_LINE: buildRagSearchToolLine(currentRagSettings.ragSearchEnabled),
       RAG_SEARCH_WORKFLOW_STEP: buildRagSearchWorkflowStep(currentRagSettings.ragSearchEnabled),
+      // Worker Team 总开关。true 时 buildSystemPrompt 才 push
+      // `<available-workers>` L1 块（与 lib/tools/index.ts 是否 push
+      // `delegate_task` 工具同源），false 时两边都撤，避免 LLM 看到
+      // 工具但不知道何时用，或反之。字符串形态因为本文件用 `Record<string, string>`
+      // ——这里把 boolean 显式 'true' / 'false' 字面化进变量表，buildSystemPrompt
+      // 那边只比对 `=== 'true'` 即可，不引入新分支类型。
+      workerTeamEnabled: String(teamEnabled),
     }),
   );
 }

@@ -225,8 +225,14 @@ export function getWorkerToolNames(role: WorkerRole): readonly string[] {
  * 重新拼一次（≈ 1.5 KB 的字符串拼接，开销可忽略），命中缓存的 system
  * prompt 仍按字节一致——block 跟 registry 同步变化，registry 不变则字节
  * 不变。
- */
-export function buildAvailableWorkersBlock(): string {
+ *
+ * `enabled` 参数：本块的存在与否由主代理的 Worker Team 总开关
+ * (`workerTeamEnabled` storage) 控制——OFF 时返回空串，必须与
+ * `lib/tools/index.ts` 里是否 push `delegate_task` 工具同步（任一缺失
+ * 都会让 LLM 幻觉调用或不知何时该用 worker）。这是 `rag_search` 那个
+ * "tool + prompt must agree" 模式的镜像。 */
+export function buildAvailableWorkersBlock(enabled: boolean = true): string {
+  if (!enabled) return '';
   const entries = WORKER_ROLE_KEYS.map((role) => {
     const meta = WORKER_ROLES[role];
     return `<worker>

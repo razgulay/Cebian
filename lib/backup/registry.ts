@@ -37,6 +37,7 @@ import {
   lastOpenSessionId,
   composerPinnedContexts,
   workerModels,
+  workerTeamEnabled,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -344,6 +345,10 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   // Worker team per-role 模型映射（4 个 worker role 各自的专用模型；同主模型走
   // followMain 时为 null。无密钥）。
   entry({ item: workerModels, storageClass: 'settings' }),
+  // Worker Team 总开关（Fast / Team 模式）。用户偏好，按 settings 分类同步到
+  // 备份里——恢复后无需重新点击 chip。无密钥、无 fillMissing（merge 下保留
+  // 本地偏好，避免恢复旧备份意外覆盖用户当前选择）。
+  entry({ item: workerTeamEnabled, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',

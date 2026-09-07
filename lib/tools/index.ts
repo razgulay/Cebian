@@ -25,6 +25,7 @@ import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
 import { debugLog, withSession } from '@/lib/debug/log';
+import { workerTeamEnabled } from '@/lib/persistence/storage';
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
@@ -100,13 +101,17 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * where the user changes the setting AFTER creating a session: the tool is
  * already in the list, so changes take effect immediately.
  *
- * `delegate_task` follows the same always-include policy: even when no
- * per-role model is configured (Settings → Advanced → Worker Models), the
- * tool stays visible and the runner returns a friendly error at execute
- * time. It is built via a per-session factory (`createDelegateTaskTool({ sessionId })`)
- * because the tool layer needs `sessionId` to gate `output_path` /
- * `input_files` / `skills` paths against the session workspace — unlike
- * `delegate_dom` which is a top-level singleton with no per-session state.
+ * `delegate_task` is gated by the Worker Team master switch
+ * (`workerTeamEnabled` storage): we always import + factory-build the tool
+ * (the per-session factory closes `sessionId` for path validation regardless
+ * of the flag), but only push it into the session's tool array when ON.
+ * When OFF, the corresponding `<available-workers>` L1 block is also omitted
+ * from the system prompt (`prompt-composer.ts`) so the agent neither sees
+ * the tool nor reads about how to call it. This two-sided gate mirrors the
+ * `rag_search` / `ragSearchEnabled` pattern: tool + prompt must agree, or
+ * the LLM hallucinates calls (tool missing) or never picks the tool (prompt
+ * missing). The per-role model config (`workerModels` storage) is checked
+ * at execute time by the worker runner — independent of this on/off gate.
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
@@ -134,16 +139,22 @@ export async function buildSessionToolArray(
       durationMs: Date.now() - delegateStart,
     }, ctx.sessionId));
   base.push(delegateDomTool);
-  // Always include delegate_task — per-session factory closes sessionId in
-  // for path validation; runner checks per-role models at runtime.
+  // `delegate_task` is gated by the Worker Team master switch
+  // (`workerTeamEnabled` storage). Per-session factory runs unconditionally
+  // (closes sessionId for path validation); the resulting tool object is
+  // pushed only when the flag is on. When off, the matching `<available-workers>`
+  // L1 block is also omitted from the system prompt (`prompt-composer.ts`).
   const delegateTaskStart = Date.now();
   const { createDelegateTaskTool } = await import('./delegate-task');
   const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId });
   debugLog.info('tool', 'tool:init:delegate-task',
     withSession({
       durationMs: Date.now() - delegateTaskStart,
+      workerTeamEnabled: await workerTeamEnabled.getValue(),
     }, ctx.sessionId));
-  base.push(delegateTaskTool);
+  if (await workerTeamEnabled.getValue()) {
+    base.push(delegateTaskTool);
+  }
 
   // Conditional opt-in: only ship `rag_search` when the user has
   // flipped the toggle in Settings → Knowledge. Keeping it out of

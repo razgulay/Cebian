@@ -1,4 +1,5 @@
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { ModelSelector } from '@/components/chat/ModelSelector';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import {
@@ -7,6 +8,7 @@ import {
   providerCredentials,
   customProviders as customProvidersStorage,
   workerModels,
+  workerTeamEnabled,
   type ModelIdentity,
   type WorkerRole,
 } from '@/lib/persistence/storage';
@@ -39,6 +41,7 @@ export function AdvancedSection() {
   const [model, setModel] = useStorageItem(compactionModel, null);
   const [domSub, setDomSub] = useStorageItem(domSubAgentModel, null);
   const [workerMap, setWorkerMap] = useStorageItem(workerModels, {});
+  const [teamEnabled, setTeamEnabled] = useStorageItem(workerTeamEnabled, true);
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
 
@@ -128,6 +131,32 @@ export function AdvancedSection() {
         <p className="text-xs text-muted-foreground">
           {t('settings.advanced.workers.hint')}
         </p>
+
+        {/* Master switch: controls whether the main agent delegates via
+            `delegate_task`. When OFF the four role pickers below stay
+            visible (so users can preconfigure role models and flip the
+            switch later) but don't take effect — the tool and system
+            prompt block are both withdrawn in lockstep. This Switch
+            shares its storage key with the ⚡Fast / 👥Team chip next
+            to the composer (`useStorageItem`'s watch keeps both sides
+            in sync). */}
+        <div className="flex items-center justify-between gap-4 pt-2 pb-3 border-b border-border/50">
+          <div className="min-w-0 space-y-1">
+            <Label htmlFor="worker-team-enabled" className="text-sm">
+              {t('settings.advanced.workers.enabled')}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.advanced.workers.enabledHint')}
+            </p>
+          </div>
+          <Switch
+            id="worker-team-enabled"
+            checked={teamEnabled}
+            onCheckedChange={(v) => void setTeamEnabled(v)}
+            className="shrink-0"
+          />
+        </div>
+
         {WORKER_ROLES.map(({ key, labelKey, hintKey }) => {
           const activeModel = workerMap[key] ?? null;
           return (

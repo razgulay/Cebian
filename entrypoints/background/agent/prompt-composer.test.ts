@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { buildSkillsBlock } from '@/lib/ai-config/scanner';
-import { memorySettings, userInstructions } from '@/lib/persistence/storage';
+import { memorySettings, userInstructions, workerTeamEnabled } from '@/lib/persistence/storage';
 import { ragSettings } from '@/lib/rag/settings';
 import { composeSystemPrompt, composeUserMessage } from './prompt-composer';
 
@@ -73,10 +73,11 @@ describe('composeSystemPrompt', () => {
     expect(prompt.indexOf('<skills>')).toBeLessThan(prompt.indexOf('<user-instructions>'));
   });
 
-  it('<available-workers> L1 块始终存在（4 个固定 role，registry 不变则永驻）', async () => {
-    // 与 <skills> 不同：workers registry 永远是 4 个固定 role，runner 在
-    // model 未配置时会自己报错，**不需要**靠 system prompt 缺省来表达
-    // 「当前没 worker 可用」。无 L1 块反而让主代理更难自察觉察能力边界。
+  it('workerTeamEnabled 开启（默认）→ 注入 <available-workers> L1 块', async () => {
+    // workerTeamEnabled storage fallback = true（见 lib/persistence/storage.ts），
+    // 故默认 composeSystemPrompt 应包含 <available-workers> 块。Runner 在某个
+    // role 的 model 未配置时会自己报错，故此处不区分 4 个 role 的 per-model
+    // 配置——只要总开关 ON，4 个 role 都在 L1 菜单中可见。
     const prompt = await composeSystemPrompt('s', false);
     expect(prompt).toContain('<available-workers>');
     // Prescriptive polarity 标记——见 worker-roles.test.ts 同名注释了解为何
@@ -85,6 +86,18 @@ describe('composeSystemPrompt', () => {
     for (const role of ['content_writer', 'frontend_coder', 'reviewer', 'researcher']) {
       expect(prompt).toContain(`<role>${role}</role>`);
     }
+  });
+
+  it('workerTeamEnabled 关闭 → 省略 <available-workers> L1 块（与 tool list 同步撤掉）', async () => {
+    // OFF 时主代理既看不到 `delegate_task` 工具（lib/tools/index.ts 条件 push），
+    // 也读不到 `<available-workers>` 提示块——任一缺失都会让 LLM 幻觉调用或反之
+    // 不知何时该用 worker，故两侧必须同步。
+    await workerTeamEnabled.setValue(false);
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toContain('<available-workers>');
+    // 那条 prescriptive polarity 标记也跟着消失——避免给关了开关的主代理继续灌
+    // "DEFAULT to delegate_task" 的指令，引它去调一个不存在的工具。
+    expect(prompt).not.toContain('DEFAULT to `delegate_task`');
   });
 
   it('<available-workers> 位于 <skills> 之后、<user-instructions> 之前', async () => {
@@ -114,6 +127,16 @@ describe('composeSystemPrompt', () => {
   });
 
   it('skills 与用户指令都为空 → 段间不出现三连以上换行', async () => {
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toMatch(/\n{3,}/);
+  });
+
+  it('workerTeamEnabled 关闭 + skills 非空 + 指令非空 → 段间不出现三连以上换行', async () => {
+    // OFF 时 <available-workers> 段消失，但 prompt 各段间仍必须保持 \n\n 单换行
+    // 不变——否则破坏 Anthropic prompt caching 的字节稳定前提。
+    vi.mocked(buildSkillsBlock).mockReturnValue('<skills>\nfoo\n</skills>');
+    await userInstructions.setValue('bar');
+    await workerTeamEnabled.setValue(false);
     const prompt = await composeSystemPrompt('s', false);
     expect(prompt).not.toMatch(/\n{3,}/);
   });

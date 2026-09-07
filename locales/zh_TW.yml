@@ -219,6 +219,8 @@ settings:
       title: "Worker 模型"
       hint: "為每個 worker role 各配一個模型，主代理透過 `delegate_task` 委派子任務。「與對話模型相同」=繼承。"
       followMain: "與對話模型相同"
+      enabled: "啟用 Worker 團隊"
+      enabledHint: "開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker 子代理。關閉時，主代理直接用原生檔案工具產出。"
       content_writer:
         label: "內容寫手"
         hint: "閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。"
@@ -698,6 +700,10 @@ chat:
     elementPickNavigated: "頁面已跳轉，元素選取已取消"
     imageAlreadyAdded: "此圖片已新增"
     screenshotFailed: "螢幕截圖失敗"
+    workerTeam:
+      fast: "快速"
+      team: "團隊"
+      toggleHint: "切換快速模式（主代理直接產出）與團隊模式（委派給 Worker 子代理）"
     # $1 = 附件上限個數
     maxAttachments: "最多新增 $1 個附件"
     # $1 = 實際新增的檔案數

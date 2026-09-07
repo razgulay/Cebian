@@ -226,6 +226,8 @@ settings:
       title: "Worker models"
       hint: "One model per worker role — the main agent delegates via `delegate_task`. Leave on “Same as conversation model” to inherit."
       followMain: "Same as conversation model"
+      enabled: "Enable worker team"
+      enabledHint: "When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools."
       content_writer:
         label: "Content writer"
         hint: "Reads sources and writes long-form content into a VFS file."
@@ -707,6 +709,10 @@ chat:
     elementPickNavigated: "Element picker cancelled — the page navigated"
     imageAlreadyAdded: "Image already added"
     screenshotFailed: "Screenshot failed"
+    workerTeam:
+      fast: "Fast"
+      team: "Team"
+      toggleHint: "Switch between Fast Mode (main agent writes directly) and Team Mode (delegate to worker sub-agents)"
     # $1 = max attachment count
     maxAttachments: "Up to $1 attachments"
     # $1 = number of files actually added
