@@ -1,14 +1,17 @@
-// chat 域客户端 handler 的订阅豁免窗回归测试 —— 锁定 v1.7.0 引入的「mid-stream
-// subscribe + microtask 错位」竞态被正确压制。
+// chat 域客户端 handler 的订阅 cursor 端到端回归测试 —— 锁定 v1.7.0 引入的
+// 「mid-stream subscribe + microtask 错位」竞态被消费者层 cursor 过滤
+// 正确压制，不再依赖 commit 0822474 的 210ms 时间豁免窗。
 //
 // 场景：agent 在 `subscribe` 期间仍持续 emit；agent 先同步把 partial.content 写进
 // `messages`，再 `await emit` 把 BG handler 排成 microtask。M_BG 在本函数的同步段
 // 返回后才被调度，对应事件就只进了 `session_state` 快照、还没进缓冲——它的
 // trailing 帧照样会把已存在于快照的 delta 重发一遍，导致 UI 端 "ABCC" 重复。
 //
-// 修法见 `client-handlers.ts subscribe` 与 `viewers.ts suppressStreamOpsFor`。
-// 这里直接复用真 viewer / 真 stream-broadcast、mock 掉 sessionManager /
-// sessionStore，端到端断言新 viewer 在豁免窗内不收 `stream_ops`。
+// 修法：消费者（viewers.ts）按端口 cursor 过滤——subscribe post session_state
+// 之前先 seed port 的 cursor 为快照里最后一条 assistant 的各块长度，之后
+// 任何 tail_append 的 endOffset ≤ cursor 即被丢弃。这里直接复用真 viewer /
+// 真 stream-broadcast、mock 掉 sessionManager / sessionStore，端到端断言新
+// viewer 不会被重复 delta 影响。
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
@@ -36,12 +39,8 @@ vi.mock('./session-store', () => ({
 }));
 
 const { chatClientHandlers } = await import('./client-handlers');
-const {
-  queueStreamEvent,
-  dropStreamBroadcast,
-  flushStreamOps,
-  FLUSH_INTERVAL_MS,
-} = await import('./stream-broadcast');
+const { queueStreamEvent, dropStreamBroadcast, flushStreamOps, FLUSH_INTERVAL_MS } =
+  await import('./stream-broadcast');
 
 interface SessionStateMsg {
   type: 'session_state';
@@ -60,20 +59,16 @@ function makePort(): { port: chrome.runtime.Port; sent: ServerMessage[] } {
   return { port, sent };
 }
 
-const SUBSCRIPTION_WINDOW_MS = FLUSH_INTERVAL_MS * 2 + 50;
-
-describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
+describe('chatClientHandlers.subscribe · 流式 cursor 端到端', () => {
   beforeEach(() => {
     fakeBrowser.reset();
     vi.clearAllMocks();
-    // 用 fake timer 才能让 `text_start` 起算的 trailing timer 走 fake 队列
-    // （否则 advanceTimersByTime 不会驱动它，测试会从「无 stream_ops」变成
-    // 「no stream_ops」的空断言——suppression 是否生效无法被验证）。
+    // fake timer 才能让 leading 起算的 trailing timer 走 fake 队列（否则
+    // advanceTimersByTime 不会驱动它，测试无法断言「trailing 真的 fire 了、
+    // 但被 cursor 过滤掉了」）。
     vi.useFakeTimers();
     dropStreamBroadcast(S);
-    // 默认：agent 正在 stream。`getSessionState` 的真实实现会把 streamingMessage
-    // 当作尾消息 append 进 `messages` —— mock 这里直接给最终的产物形态，
-    // 让 session_state 的 `messages.at(-1).content[0].text` 等于 "ABC"。
+    // 默认：agent 正在 stream，session_state 的最后一条 assistant text = "ABC"。
     mocks.getSessionState.mockReturnValue({
       messages: [
         {
@@ -96,7 +91,7 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
     vi.useRealTimers();
   });
 
-  it('豁免窗内新 viewer 不收会与快照重复的 stream_ops，但 session_state 立即到达', async () => {
+  it('新 viewer 不会被「已被快照覆盖」的重复 stream_ops 影响——cursor 端到端过滤', async () => {
     const { port, sent } = makePort();
 
     // 让 BG 缓冲先有一帧旧增量（leading 已发），再 flush 出去——
@@ -115,7 +110,7 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
     } as never);
     flushStreamOps(S);
 
-    // 订阅：handle 在 snapshot 完毕后会立刻进入豁免窗。
+    // 订阅：handle 在 snapshot 完毕后会立刻 seed port 的 cursor（= "ABC".length=3）
     const subscribe = chatClientHandlers.subscribe!;
     await subscribe(port, { sessionId: S } as never);
 
@@ -130,8 +125,9 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
     ).toBe('ABC');
 
     // 2) 模拟 v1.7.0 bug 场景：BG handler 在 subscribe 返回后才把 'C' 推入缓冲
-    // （partial.content 已被 sync 改完、await emit 排在 microtask 队列尾，
+    // （partial.content 已被 sync 改到 'ABC'，await emit 排在 microtask 队列尾，
     //   subscribe 的同步段先于 M_BG 跑完）。这就是会与快照重复的那一帧。
+    partial.content[0].text = 'ABC'; // 模拟 pi 在 emit 之前已同步把 partial 写到 'ABC'
     queueStreamEvent(S, {
       type: 'text_delta',
       contentIndex: 0,
@@ -139,14 +135,12 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
       partial,
     } as never);
 
-    // 让 trailing timer 触发：哪怕加上 setTimeout drift（MV3 SW 实测可漂到
-    // ~50ms），走过整个 `FLUSH_INTERVAL_MS * 2 + 50` 豁免窗也绰绰有余。
-    // fake timer 已在 beforeEach 启用，否则 `text_start` 起的真实 setTimeout
-    // 不会被 advanceTimersByTime 驱动——本次断言就退化成了「trailing 根本没跑」
-    // 的空断言，suppression 是否生效无从验证。
-    vi.advanceTimersByTime(SUBSCRIPTION_WINDOW_MS + 100);
+    // 让 trailing timer 触发。**故意**超过原 210ms 豁免窗——cursor 端到端
+    // 过滤不应受时间影响：trailing 在任意延迟下到达，endOffset=3 ≤
+    // cursor=3 都会被丢弃。
+    vi.advanceTimersByTime(FLUSH_INTERVAL_MS * 10);
 
-    // 3) 关键断言：新 viewer 在豁免窗内**不应**收到带重复 'C' 的 stream_ops。
+    // 3) 关键断言：新 viewer **不应**收到带重复 'C' 的 stream_ops。
     // 这正是 v1.7.0 文本翻倍 bug 的端到端反例。
     const streamOps = sent.filter((m) => m.type === 'stream_ops') as Extract<
       ServerMessage,
@@ -157,33 +151,39 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
         if (op.kind === 'tail_append' && op.field === 'text' && op.blockIndex === 0) {
           expect(
             op.delta,
-            '豁免窗内不应向新 viewer 投递与快照重叠的 delta',
+            '已被快照覆盖的 delta 必须被 cursor 过滤掉',
           ).not.toBe('C');
         }
       }
     }
 
-    // 4) 反向断言：豁免窗内其它消息（session_state 等）必须照发——上面已经
-    // 验证 session_state 到达；这里再确认整个 sent 流里没有意外混入错误类型。
+    // 4) 反向断言：session_state 必须照发
     const allTypes = new Set(sent.map((m) => m.type));
     expect(allTypes.has('session_state')).toBe(true);
   });
 
-  it('豁免窗外新 viewer 正常收 stream_ops（持续流式不被屏蔽）', async () => {
+  it('新 viewer 正常收「超出快照」的 stream_ops（cursor 不会过度屏蔽）', async () => {
     const { port, sent } = makePort();
+    // partial.content[0].text 已是 'X'，subscribe 时会快照成 'X'（长度 1），
+    // 所以 cursor = (msgId, 0, 'text') = 1。
     const partial = {
       role: 'assistant',
       content: [{ type: 'text', text: 'X' }],
       timestamp: 0,
     };
+    mocks.getSessionState.mockReturnValue({
+      messages: [{ role: 'assistant', content: [partial.content[0]], timestamp: 0 }],
+      isRunning: true,
+      isCompacting: false,
+      pendingTools: [],
+      pendingPermissions: [],
+    });
 
     await chatClientHandlers.subscribe!(port, { sessionId: S } as never);
     expect(sent.some((m) => m.type === 'session_state')).toBe(true);
 
-    // 等过豁免窗（fake timer 已在 beforeEach 启用）
-    vi.advanceTimersByTime(SUBSCRIPTION_WINDOW_MS + 100);
-
-    // 在窗外来一帧真实增量
+    // 一帧真正新增的 delta（endOffset=2 > cursor=1）必须透传
+    partial.content[0].text += 'D'; // 模拟 pi 在 emit 前同步把 partial.text 追加到 'XD'（2 字符）
     queueStreamEvent(S, {
       type: 'text_delta',
       contentIndex: 0,
@@ -192,7 +192,6 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
     } as never);
     vi.advanceTimersByTime(FLUSH_INTERVAL_MS + 20);
 
-    // 新 viewer 应收到这一帧（不在豁免窗内）
     const allStreamOps = sent.filter((m) => m.type === 'stream_ops') as Extract<
       ServerMessage,
       { type: 'stream_ops' }
@@ -206,6 +205,72 @@ describe('chatClientHandlers.subscribe · 订阅豁免窗', () => {
           op.delta === 'D',
       ),
     );
-    expect(gotD, '豁免窗外 stream_ops 必须照常投递').toBe(true);
+    expect(gotD, '超出快照长度的 delta 必须正常下发').toBe(true);
+  });
+
+  /**
+   * **Contract test, not production validation.** Test directly injects
+   * `{ type: 'start' }` into `queueStreamEvent` to exercise the messageId-bump
+   * path; the production bridge in `session-manager.ts` only forwards
+   * `message_update` events (not the standalone `start` AssistantMessageEvent
+   * — pi-agent-core converts it into a `message_start` AgentEvent), so this
+   * bump branch never fires in real traffic. The live cross-turn defense is
+   * `tail_replace` reseeding at each new block start (text_start /
+   * thinking_start / toolcall_start all travel through `message_update`).
+   * This test exists to lock in the producer-side bump contract in case the
+   * bridge evolves; the production-scenario regression lives in the
+   * `viewers.test.ts` cross-`messageId` key suite and the live `tail_replace`
+   * path.
+   */
+  it('inter-turn：上一轮 cursor 不会吞掉新轮开头的 delta', async () => {
+    const { port, sent } = makePort();
+    // 第一轮：text="ABCDE"，cursor=5
+    const partial1 = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ABCDE' }],
+      timestamp: 0,
+    };
+    mocks.getSessionState.mockReturnValue({
+      messages: [{ role: 'assistant', content: [partial1.content[0]], timestamp: 0 }],
+      isRunning: true,
+      isCompacting: false,
+      pendingTools: [],
+      pendingPermissions: [],
+    });
+    await chatClientHandlers.subscribe!(port, { sessionId: S } as never);
+
+    // 模拟新一轮 'start'：messageId bump，partial.content[0].text 重置为空。
+    // producer 端的 messageId 从 1 → 2，新轮的 cursor 在 (2, 0, 'text') 下从 0 起步。
+    const partial2 = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '' }],
+      timestamp: 0,
+    };
+    queueStreamEvent(S, { type: 'start', partial: partial2 } as never);
+    partial2.content[0].text += 'XY'; // 模拟 pi 同步写完
+    queueStreamEvent(S, {
+      type: 'text_delta',
+      contentIndex: 0,
+      delta: 'XY',
+      partial: partial2,
+    } as never);
+    vi.advanceTimersByTime(FLUSH_INTERVAL_MS + 20);
+
+    // 关键断言：port 应收到 'XY'（endOffset=2 > 新轮 cursor=0）。如果 cursor
+    // key 没有 messageId，新轮的 (0, text) 会撞上旧轮 cursor=5，'XY' 被错误吞掉。
+    const streamOps = sent.filter((m) => m.type === 'stream_ops') as Extract<
+      ServerMessage,
+      { type: 'stream_ops' }
+    >[];
+    const gotXY = streamOps.some((frame) =>
+      frame.ops.some(
+        (op) =>
+          op.kind === 'tail_append' &&
+          op.field === 'text' &&
+          op.blockIndex === 0 &&
+          op.delta === 'XY',
+      ),
+    );
+    expect(gotXY, '新轮 messageId 自成 cursor key，旧轮 cursor 不影响新轮').toBe(true);
   });
 });

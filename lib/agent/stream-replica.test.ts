@@ -20,8 +20,8 @@ describe('applyStreamOps', () => {
   it('text 增量按序追加，且尾消息之前的元素引用稳定', () => {
     const base = [userMsg('问'), assistantMsg([{ type: 'text', text: 'AB' }])];
     const next = applyStreamOps(base, [
-      { kind: 'tail_append', blockIndex: 0, field: 'text', delta: 'CD' },
-      { kind: 'tail_append', blockIndex: 0, field: 'text', delta: 'EF' },
+      { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'text', delta: 'CD', startOffset: 2, endOffset: 4 },
+      { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'text', delta: 'EF', startOffset: 4, endOffset: 6 },
     ]);
     expect(next).not.toBeNull();
     expect(tailText(next!)).toBe('ABCDEF');
@@ -33,7 +33,7 @@ describe('applyStreamOps', () => {
   it('thinking 增量追加到 thinking 字段', () => {
     const base = [assistantMsg([{ type: 'thinking', thinking: '思' }])];
     const next = applyStreamOps(base, [
-      { kind: 'tail_append', blockIndex: 0, field: 'thinking', delta: '考中' },
+      { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'thinking', delta: '考中', startOffset: 1, endOffset: 3 },
     ]);
     const block = (next![0] as { content: { thinking: string }[] }).content[0];
     expect(block.thinking).toBe('思考中');
@@ -44,10 +44,10 @@ describe('applyStreamOps', () => {
       assistantMsg([{ type: 'toolCall', id: 't1', name: 'write', arguments: {} }]),
     ];
     const half = applyStreamOps(base, [
-      { kind: 'tail_append', blockIndex: 0, field: 'partialJson', delta: '{"path":"a.' },
+      { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'partialJson', delta: '{"path":"a.', startOffset: 0, endOffset: 10 },
     ]);
     const full = applyStreamOps(half!, [
-      { kind: 'tail_append', blockIndex: 0, field: 'partialJson', delta: 'txt","n":1}' },
+      { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'partialJson', delta: 'txt","n":1}', startOffset: 10, endOffset: 22 },
     ]);
     const block = (full![0] as unknown as { content: { arguments: unknown; partialJson: string }[] })
       .content[0];
@@ -72,7 +72,7 @@ describe('applyStreamOps', () => {
   });
 
   describe('副本漂移 → 整帧返回 null', () => {
-    const append: StreamOp = { kind: 'tail_append', blockIndex: 0, field: 'text', delta: 'x' };
+    const append: StreamOp = { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'text', delta: 'x', startOffset: 0, endOffset: 1 };
 
     it('尾消息不是 assistant', () => {
       expect(applyStreamOps([userMsg('问')], [append])).toBeNull();
@@ -82,7 +82,7 @@ describe('applyStreamOps', () => {
     it('块下标越界', () => {
       const base = [assistantMsg([{ type: 'text', text: '' }])];
       expect(
-        applyStreamOps(base, [{ kind: 'tail_append', blockIndex: 3, field: 'text', delta: 'x' }]),
+        applyStreamOps(base, [{ kind: 'tail_append', messageId: 1, blockIndex: 3, field: 'text', delta: 'x', startOffset: 0, endOffset: 1 }]),
       ).toBeNull();
     });
 
@@ -90,7 +90,7 @@ describe('applyStreamOps', () => {
       const base = [assistantMsg([{ type: 'text', text: '' }])];
       expect(
         applyStreamOps(base, [
-          { kind: 'tail_append', blockIndex: 0, field: 'thinking', delta: 'x' },
+          { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'thinking', delta: 'x', startOffset: 0, endOffset: 1 },
         ]),
       ).toBeNull();
     });
@@ -98,8 +98,8 @@ describe('applyStreamOps', () => {
     it('任何一步失败即整帧丢弃（不做部分应用）', () => {
       const base = [assistantMsg([{ type: 'text', text: 'A' }])];
       const result = applyStreamOps(base, [
-        { kind: 'tail_append', blockIndex: 0, field: 'text', delta: 'B' },
-        { kind: 'tail_append', blockIndex: 9, field: 'text', delta: 'C' },
+        { kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'text', delta: 'B', startOffset: 1, endOffset: 2 },
+        { kind: 'tail_append', messageId: 1, blockIndex: 9, field: 'text', delta: 'C', startOffset: 2, endOffset: 3 },
       ]);
       expect(result).toBeNull();
       expect(tailText(base)).toBe('A'); // 原副本未被污染
@@ -138,7 +138,8 @@ describe('applyStreamOps', () => {
       };
 
       // 生产端契约模拟：结构事件 → tail_replace（携带当时的 partial 快照）；
-      // delta → tail_append
+      // delta → tail_append。messageId 用一个常量（性质测试只关心最终一致性，
+      // 不在乎跨消息的 cursor key 隔离，那是 viewers.ts 的责任）。
       const ops: StreamOp[] = [];
       const partial: { type: string; [k: string]: unknown }[] = [];
       const snapshot = () =>
@@ -149,22 +150,31 @@ describe('applyStreamOps', () => {
 
       partial.push({ type: 'thinking', thinking: '' });
       snapshot(); // thinking_start
+      const offsetThinking = { v: 0 };
       for (const d of split(finalThinking)) {
-        ops.push({ kind: 'tail_append', blockIndex: 0, field: 'thinking', delta: d });
+        const startOffset = offsetThinking.v;
+        offsetThinking.v += d.length;
+        ops.push({ kind: 'tail_append', messageId: 1, blockIndex: 0, field: 'thinking', delta: d, startOffset, endOffset: offsetThinking.v });
         (partial[0] as unknown as { thinking: string }).thinking += d;
       }
       snapshot(); // thinking_end
       partial.push({ type: 'text', text: '' });
       snapshot(); // text_start
+      const offsetText = { v: 0 };
       for (const d of split(finalText)) {
-        ops.push({ kind: 'tail_append', blockIndex: 1, field: 'text', delta: d });
+        const startOffset = offsetText.v;
+        offsetText.v += d.length;
+        ops.push({ kind: 'tail_append', messageId: 1, blockIndex: 1, field: 'text', delta: d, startOffset, endOffset: offsetText.v });
         (partial[1] as unknown as { text: string }).text += d;
       }
       snapshot(); // text_end
       partial.push({ type: 'toolCall', id: 't1', name: 'write', arguments: {} });
       snapshot(); // toolcall_start
+      const offsetJson = { v: 0 };
       for (const d of split(finalJson)) {
-        ops.push({ kind: 'tail_append', blockIndex: 2, field: 'partialJson', delta: d });
+        const startOffset = offsetJson.v;
+        offsetJson.v += d.length;
+        ops.push({ kind: 'tail_append', messageId: 1, blockIndex: 2, field: 'partialJson', delta: d, startOffset, endOffset: offsetJson.v });
       }
 
       // 随机分帧应用（模拟合并窗）

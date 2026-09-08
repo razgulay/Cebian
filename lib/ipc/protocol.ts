@@ -221,15 +221,28 @@ export type BroadcastMessage = AgentMessage & { entryId?: string };
  *  lib/agent/stream-replica.ts。副本的任何漂移都会在 message_end / agent_end
  *  的全量 transcript 边界被校正，本操作流只需覆盖两个边界之间的增量。 */
 export type StreamOp =
-  /** 内容块结构变化（块开始/结束等低频事件）：用快照整体替换（或追加）尾消息 */
-  | { kind: 'tail_replace'; message: AgentMessage }
+  /** 内容块结构变化（块开始/结束等低频事件）：用快照整体替换（或追加）尾消息。
+   *  `messageId` 可选——携带时消费者用对应 key 重置 cursor；缺省则整条消息的
+   *  cursor 全部按 0 重新种子（snapshot 本身是权威）。 */
+  | { kind: 'tail_replace'; message: AgentMessage; messageId?: number }
   /** 向尾消息第 blockIndex 个内容块的字段追加文本增量。text / thinking 直接
-   *  追加；partialJson 追加后由应用端重新解析出 toolCall 的 arguments */
+   *  追加；partialJson 追加后由应用端重新解析出 toolCall 的 arguments。
+   *
+   *  `messageId` 是同一会话内的单调递增计数器——producer 每遇到一次 pi-agent-core
+   *  的 `'start'` 事件（新 assistant 消息开始流式）就 +1；消费者把 cursor 限定在
+   *  该 messageId 下，避免上一轮 (0, text) 的 cursor 把新轮开头的 delta 吞掉。
+   *
+   *  `startOffset` / `endOffset` 是该字段在应用此 delta **之前 / 之后** 的字符
+   *  长度（endOffset == startOffset + delta.length）。消费者据此丢弃已被快照
+   *  覆盖的整段 delta，并对部分重叠场景裁掉重叠前缀。 */
   | {
       kind: 'tail_append';
+      messageId: number;
       blockIndex: number;
       field: 'text' | 'thinking' | 'partialJson';
       delta: string;
+      startOffset: number;
+      endOffset: number;
     };
 
 /** 一个分支点的信息（定义与构建见 lib/agent/session-projection.ts 的

@@ -34,8 +34,10 @@ const mocks = vi.hoisted(() => {
     // sessionStore
     scheduleWrite: vi.fn(),
     flush: vi.fn(async () => {}),
-    // broadcastToViewers
+    // broadcastToViewers + session_state 专用出口（commit*Cancel 成功路径
+    // 走 sendSessionStateToAllViewers——seed cursor + post，见 viewers.ts）
     broadcastToViewers: vi.fn(),
+    sendSessionStateToAllViewers: vi.fn(),
     // keep-alive
     acquireKeepAlive: vi.fn(),
     releaseKeepAlive: vi.fn(),
@@ -165,6 +167,7 @@ vi.mock('./session-store', () => ({
 
 vi.mock('./viewers', () => ({
   broadcastToViewers: mocks.broadcastToViewers,
+  sendSessionStateToAllViewers: mocks.sendSessionStateToAllViewers,
 }));
 
 // ─── Test surface ───
@@ -356,6 +359,8 @@ describe('commit*Cancel() race guards — silent exit if session was destroyed',
 
     expect(mocks.scheduleWrite).not.toHaveBeenCalled();
     expect(broadcastToViewers).not.toHaveBeenCalled();
+    // session_state 专用出口同样必须静默（成功路径走它，守卫路径不能漏）
+    expect(mocks.sendSessionStateToAllViewers).not.toHaveBeenCalled();
   });
 
   it('commitRetryCancel: session absent → no persist, no broadcast', async () => {
@@ -372,6 +377,8 @@ describe('commit*Cancel() race guards — silent exit if session was destroyed',
 
     expect(mocks.scheduleWrite).not.toHaveBeenCalled();
     expect(broadcastToViewers).not.toHaveBeenCalled();
+    // session_state 专用出口同样必须静默（成功路径走它，守卫路径不能漏）
+    expect(mocks.sendSessionStateToAllViewers).not.toHaveBeenCalled();
   });
 
   it('commitCompactionCancel: session present → persists + broadcasts (sanity check for the guard)', async () => {
@@ -389,9 +396,10 @@ describe('commit*Cancel() race guards — silent exit if session was destroyed',
     } as any);
 
     // Tree write goes through syncTail (async chain); the externally
-    // observable effect is the session_state broadcast below.
-    expect(mocks.broadcastToViewers).toHaveBeenCalledTimes(1);
-    const [sid, msg] = mocks.broadcastToViewers.mock.calls[0];
+    // observable effect is the session_state broadcast below — it goes
+    // through sendSessionStateToAllViewers (seeds per-port cursor + posts).
+    expect(mocks.sendSessionStateToAllViewers).toHaveBeenCalledTimes(1);
+    const [sid, msg] = mocks.sendSessionStateToAllViewers.mock.calls[0];
     expect(sid).toBe('sess-alive');
     expect(msg.type).toBe('session_state');
     expect(msg.isRunning).toBe(false);

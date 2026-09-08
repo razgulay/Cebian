@@ -86,7 +86,7 @@ import { resolveModel } from '@/lib/providers/resolve-model';
 import { t } from '@/lib/i18n';
 import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
 import { broadcastAll } from '../ipc/port-registry';
-import { broadcastToViewers } from './viewers';
+import { broadcastToViewers, sendSessionStateToAllViewers } from './viewers';
 import { generateSessionTitle } from '@/lib/agent/title-generation';
 import { renameSession } from '@/lib/persistence/db';
 import { vfs } from '@/lib/persistence/vfs';
@@ -351,7 +351,7 @@ class SessionManager {
    * `maybeCompact` delivers an inserted `compactionSummary`.
    */
   private broadcastSessionSnapshot(agentSession: AgentSession): void {
-    broadcastToViewers(agentSession.sessionId, {
+    sendSessionStateToAllViewers(agentSession.sessionId, {
       type: 'session_state',
       sessionId: agentSession.sessionId,
       messages: this.annotate(agentSession, agentSession.agent.state.messages),
@@ -484,7 +484,7 @@ class SessionManager {
     });
     // 广播前再确认：切换真的发生了、且没有新轮接管（接管者的广播才是权威）
     if (!switched || agentSession.phase !== 'idle') return;
-    broadcastToViewers(sessionId, {
+    sendSessionStateToAllViewers(sessionId, {
       type: 'session_state',
       sessionId,
       messages: this.annotate(agentSession, agentSession.agent.state.messages),
@@ -1753,7 +1753,7 @@ class SessionManager {
     // 手动压缩（pendingUserMessage = undefined）不携带「待投递」气泡：广播
     // 直接展开成 pre-compaction 状态，不掺一个幽灵 user 消息。
     const withTrailing = pendingUserMessage ? [...messages, pendingUserMessage] : messages;
-    broadcastToViewers(sessionId, {
+    sendSessionStateToAllViewers(sessionId, {
       type: 'session_state',
       sessionId,
       // 带上待投递的用户消息，压缩期间用户气泡保持可见（前端 session_state 全量
@@ -1852,7 +1852,7 @@ class SessionManager {
             error: err instanceof Error ? err.message : String(err),
           }, sessionId));
         }
-        broadcastToViewers(sessionId, {
+        sendSessionStateToAllViewers(sessionId, {
           type: 'session_state',
           sessionId,
           // 同样带上待投递的用户消息，避免摘要插入后到 agent.prompt() 之间
@@ -1907,7 +1907,7 @@ class SessionManager {
         agentSession.phase = 'idle';
         this.updateKeepAlive();
       }
-      broadcastToViewers(sessionId, {
+      sendSessionStateToAllViewers(sessionId, {
         type: 'session_state',
         sessionId,
         messages: this.annotate(agentSession, agentSession.agent.state.messages),
@@ -1929,7 +1929,7 @@ class SessionManager {
     // 等落树（失败已在链上记录，不阻塞广播——落库落后可恢复，不该把停止按钮卡在界面上）
     await this.syncTail(agentSession).catch(() => undefined);
 
-    broadcastToViewers(sessionId, {
+    sendSessionStateToAllViewers(sessionId, {
       type: 'session_state',
       sessionId,
       messages: this.annotate(agentSession, finalMessages),
@@ -2093,7 +2093,7 @@ class SessionManager {
       // 新文案，误导以 entryId 为键的消费者（分支导航）并翻动 React key。
       // （指定轮重试的 truncated 全部已提交，走普通 annotate。）
       const isEdit = target?.text !== undefined;
-      broadcastToViewers(sessionId, {
+      sendSessionStateToAllViewers(sessionId, {
         type: 'session_state',
         sessionId,
         messages: isEdit
@@ -2184,7 +2184,7 @@ class SessionManager {
       // Re-broadcast busy. `continue()` is invoked on the very next line and
       // fires `agent_start` on entry, so the agent IS effectively running.
       // Broadcasting `false` here would flicker the composer back on.
-      broadcastToViewers(sessionId, {
+      sendSessionStateToAllViewers(sessionId, {
         type: 'session_state',
         sessionId,
         messages: this.annotate(agentSession, truncated),
@@ -2216,7 +2216,7 @@ class SessionManager {
         await this.syncTail(agentSession).catch(() => undefined);
         // 回卷已产生新分支：带上最新分支结构
         const rewoundBranchInfo = await this.getBranchInfo(agentSession.sessionId).catch(() => undefined);
-        broadcastToViewers(agentSession.sessionId, {
+        sendSessionStateToAllViewers(agentSession.sessionId, {
           type: 'session_state',
           sessionId: agentSession.sessionId,
           messages: this.annotate(agentSession, busySnapshot),
@@ -2227,7 +2227,7 @@ class SessionManager {
       } else if (agentSession.phase === 'preparing') {
         // moveLane 之前 / 之中失败：树未回卷，内存保持完整转录。广播全量以撤销
         // 上面已发出的乐观截断帧，避免 viewer 停留在「已截断但没在跑」的假象。
-        broadcastToViewers(agentSession.sessionId, {
+        sendSessionStateToAllViewers(agentSession.sessionId, {
           type: 'session_state',
           sessionId: agentSession.sessionId,
           messages: this.annotate(agentSession, agentSession.agent.state.messages),
@@ -2403,7 +2403,7 @@ class SessionManager {
     // (e.g. disconnected during the recovery attempts) sees a clean
     // idle transcript. The hook's local state is already updated; this
     // is just the BG-side acknowledgement.
-    broadcastToViewers(sessionId, {
+    sendSessionStateToAllViewers(sessionId, {
       type: 'session_state',
       sessionId,
       messages: this.annotate(agentSession, agentSession.agent.state.messages),
@@ -2446,7 +2446,7 @@ class SessionManager {
     await this.syncTail(agentSession).catch(() => undefined);
     // moveLane 已产生新分支（旧轮成为 sibling）：带上最新分支结构
     const branchInfo = await this.getBranchInfo(agentSession.sessionId).catch(() => undefined);
-    broadcastToViewers(agentSession.sessionId, {
+    sendSessionStateToAllViewers(agentSession.sessionId, {
       type: 'session_state',
       sessionId: agentSession.sessionId,
       messages: this.annotate(agentSession, finalMessages),

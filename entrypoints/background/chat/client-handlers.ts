@@ -8,8 +8,8 @@
 import { sessionManager } from './session-manager';
 import { sessionStore, type LoadedSession } from './session-store';
 import type { SessionSnapshot, SessionMeta } from '@/lib/ipc/protocol';
-import { setViewing, stopViewing, hasViewer, suppressStreamOpsFor } from './viewers';
-import { flushStreamOps, FLUSH_INTERVAL_MS } from './stream-broadcast';
+import { setViewing, stopViewing, hasViewer, sendSessionStateToPort } from './viewers';
+import { flushStreamOps } from './stream-broadcast';
 import { registerClientHandlers, type ClientHandlerMap } from '../ipc/client-router';
 import { onPortDisconnect, post, broadcastAll } from '../ipc/port-registry';
 import { vfs } from '@/lib/persistence/vfs';
@@ -103,16 +103,16 @@ const chatClientHandlers: ClientHandlerMap = {
       // 把 partial.content 写进 messages 再 await emit 把 BG handler 排成
       // microtask；若该 microtask 在本函数返回之后才被调度，对应事件就只
       // 进了 snapshot、还没进缓冲——它的 trailing 帧照样会把已存在于快照
-      // 的 delta 重发一遍。flush → 取样之间没有 await 也救不了：事件是
-      // 在更早的 await sessionStore.open / getBranchInfo 期间排队的。
-      // 解法：post 完快照之后，把这一段时间窗内的 stream_ops 帧屏蔽掉。
-      // 屏蔽窗长按 `2 × FLUSH_INTERVAL_MS + 50` 算：FLUSH_INTERVAL_MS 是
-      // 一个 trailing 周期，乘 2 覆盖 subscribe 末尾到下两个 trailing 窗口，
-      // +50ms 是 MV3 service worker 下 setTimeout 的实测漂移上限。
+      // 的 delta 重发一遍。
+      //
+      // 解法：消费者层（viewers.ts）按每个端口的 cursor 端去重——只要在
+      // post session_state 之前 seed 一下 port 的 cursor，后续任何
+      // tail_append 的 endOffset ≤ cursor 都会被丢弃，无论它在什么时刻
+      // 到达。这样就不再依赖固定时长的豁免窗，新 viewer 也不会感知延迟。
       flushStreamOps(msg.sessionId);
       const fresh = sessionManager.getSessionState(msg.sessionId);
       if (fresh) {
-        post(port, {
+        sendSessionStateToPort(port, {
           type: 'session_state',
           sessionId: msg.sessionId,
           title: loaded?.record.title ?? '',
@@ -126,8 +126,6 @@ const chatClientHandlers: ClientHandlerMap = {
           pendingPermissions: fresh.pendingPermissions,
           ...(branchInfo !== undefined ? { branchInfo } : {}),
         });
-        // 屏蔽窗口期内的 stream_ops 帧（其它消息照发）——见上方长注释。
-        suppressStreamOpsFor(port, FLUSH_INTERVAL_MS * 2 + 50);
       } else {
         // Agent finished during the await — fall through to DB-based
         // session_loaded using the snapshot we already loaded.

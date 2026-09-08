@@ -44,6 +44,10 @@ interface StreamState {
   window: { ops: StreamOp[]; timer: ReturnType<typeof setTimeout> } | null;
   /** blockIndex → 当前消息里该 toolCall 块的累计参数 JSON（见文件头）。 */
   argsAccum: Map<number, string>;
+  /** 当前正在流式的 assistant 消息的 messageId。每条新 assistant 消息
+   *  （pi-agent-core 的 `'start'` 事件）bump +1；用于消费者的 cursor key，
+   *  让上轮 (blockIndex, field) 的 cursor 不会吞掉新轮开头的 delta。 */
+  messageId: number;
 }
 
 /** sessionId → 流式生产状态。 */
@@ -52,10 +56,16 @@ const streams = new Map<string, StreamState>();
 function stateFor(sessionId: string): StreamState {
   let state = streams.get(sessionId);
   if (!state) {
-    state = { window: null, argsAccum: new Map() };
+    state = { window: null, argsAccum: new Map(), messageId: 0 };
     streams.set(sessionId, state);
   }
   return state;
+}
+
+/** 读取当前会话正在流式的 assistant 消息的 messageId（用于消费者在 seed cursor
+ *  时锁定到正确的 key）。session 尚未产生过 'start' 事件时返回 0。 */
+function getCurrentMessageId(sessionId: string): number {
+  return streams.get(sessionId)?.messageId ?? 0;
 }
 
 /** 把本模块维护的累计参数 JSON 注入快照（快照须为本模块所有的克隆，会被原地改写）。
@@ -69,31 +79,92 @@ function injectArgsAccum(snapshot: AgentMessage, argsAccum: Map<number, string>)
   }
 }
 
+/** 取 partial 里指定 (contentIndex, field) 的当前字符串长度，作为 delta 应用后
+ *  的「endOffset」。text / thinking 由 pi 同步改 partial.content[i].xxx；
+ *  partialJson 不在 partial 上——由本模块自己的 argsAccum 持有累计 JSON。 */
+function endOffsetOf(
+  partial: AgentMessage,
+  contentIndex: number,
+  field: 'text' | 'thinking' | 'partialJson',
+  argsAccum: Map<number, string>,
+): number {
+  if (field === 'partialJson') {
+    return argsAccum.get(contentIndex)?.length ?? 0;
+  }
+  const content = (partial as { content?: unknown }).content;
+  if (!Array.isArray(content)) return 0;
+  const block = content[contentIndex] as Record<string, unknown> | undefined;
+  if (!block) return 0;
+  const value = block[field];
+  return typeof value === 'string' ? value.length : 0;
+}
+
 /** 把 pi 的流式事件翻译成 StreamOp。delta 三兄弟走字符串增量，其余（块开始/
- *  结束等结构事件）走快照——structuredClone 定格内容并注入累计参数 JSON。 */
-function opForEvent(event: AssistantMessageEvent, argsAccum: Map<number, string>): StreamOp {
+ *  结束等结构事件）走快照——structuredClone 定格内容并注入累计参数 JSON。
+ *  每个 op 都带 `messageId` + `startOffset` + `endOffset`，供消费者按 cursor
+ *  过滤已被快照覆盖的 delta。 */
+function opForEvent(
+  event: AssistantMessageEvent,
+  argsAccum: Map<number, string>,
+  messageId: number,
+): StreamOp {
   switch (event.type) {
-    case 'text_delta':
-      return { kind: 'tail_append', blockIndex: event.contentIndex, field: 'text', delta: event.delta };
-    case 'thinking_delta':
-      return { kind: 'tail_append', blockIndex: event.contentIndex, field: 'thinking', delta: event.delta };
-    case 'toolcall_delta':
-      return { kind: 'tail_append', blockIndex: event.contentIndex, field: 'partialJson', delta: event.delta };
+    case 'text_delta': {
+      const endOffset = endOffsetOf(event.partial, event.contentIndex, 'text', argsAccum);
+      const delta = event.delta;
+      return {
+        kind: 'tail_append',
+        messageId,
+        blockIndex: event.contentIndex,
+        field: 'text',
+        delta,
+        startOffset: endOffset - delta.length,
+        endOffset,
+      };
+    }
+    case 'thinking_delta': {
+      const endOffset = endOffsetOf(event.partial, event.contentIndex, 'thinking', argsAccum);
+      const delta = event.delta;
+      return {
+        kind: 'tail_append',
+        messageId,
+        blockIndex: event.contentIndex,
+        field: 'thinking',
+        delta,
+        startOffset: endOffset - delta.length,
+        endOffset,
+      };
+    }
+    case 'toolcall_delta': {
+      const endOffset = endOffsetOf(event.partial, event.contentIndex, 'partialJson', argsAccum);
+      const delta = event.delta;
+      return {
+        kind: 'tail_append',
+        messageId,
+        blockIndex: event.contentIndex,
+        field: 'partialJson',
+        delta,
+        startOffset: endOffset - delta.length,
+        endOffset,
+      };
+    }
     // done / error 不携带 partial。当前桥接层不会把它们转发进来（pi 直接
     // 走 message_end），这两个分支只为联合类型的完备性兜底
     case 'done':
-      return { kind: 'tail_replace', message: structuredClone(event.message) };
+      return { kind: 'tail_replace', message: structuredClone(event.message), messageId };
     case 'error':
-      return { kind: 'tail_replace', message: structuredClone(event.error) };
+      return { kind: 'tail_replace', message: structuredClone(event.error), messageId };
     default: {
       const snapshot = structuredClone(event.partial);
       injectArgsAccum(snapshot, argsAccum);
-      return { kind: 'tail_replace', message: snapshot };
+      return { kind: 'tail_replace', message: snapshot, messageId };
     }
   }
 }
 
-/** 操作入缓冲：快照吞掉此前全部增量；同块同字段的相邻增量就地拼接。 */
+/** 操作入缓冲：快照吞掉此前全部增量；同块同字段的相邻增量就地拼接。
+ *  相邻拼接时 startOffset / endOffset 需重算（拼接后的 startOffset 是
+ *  前一段的 startOffset，endOffset 是后一段的 endOffset）。 */
 function pushOp(ops: StreamOp[], op: StreamOp): void {
   if (op.kind === 'tail_replace') {
     ops.length = 0;
@@ -101,8 +172,17 @@ function pushOp(ops: StreamOp[], op: StreamOp): void {
     return;
   }
   const last = ops[ops.length - 1];
-  if (last?.kind === 'tail_append' && last.blockIndex === op.blockIndex && last.field === op.field) {
+  if (
+    last?.kind === 'tail_append' &&
+    last.messageId === op.messageId &&
+    last.blockIndex === op.blockIndex &&
+    last.field === op.field
+  ) {
+    // 相邻 delta 的 endOffset 必然递增；拼接后保留前一段的 startOffset 与
+    // 后一段的 endOffset（中间的 endOffset 不再被 op 链上记录，可由
+    // startOffset + delta.length 推回）
     last.delta += op.delta;
+    last.endOffset = op.endOffset;
     return;
   }
   ops.push(op);
@@ -117,13 +197,14 @@ function queueStreamEvent(sessionId: string, event: AssistantMessageEvent): void
   // 保留以防事件桥接演化
   if (event.type === 'start') {
     state.argsAccum.clear();
+    state.messageId += 1;
   } else if (event.type === 'toolcall_delta') {
     state.argsAccum.set(
       event.contentIndex,
       (state.argsAccum.get(event.contentIndex) ?? '') + event.delta,
     );
   }
-  const op = opForEvent(event, state.argsAccum);
+  const op = opForEvent(event, state.argsAccum, state.messageId);
   if (state.window) {
     pushOp(state.window.ops, op);
     return;
@@ -153,8 +234,12 @@ function flushWindow(sessionId: string): void {
  * 立即把缓冲中的增量发给当前 viewers（窗口保持运转）。
  * subscribe 快照取样前必须调用：快照会包含缓冲里这些增量的内容，若不先
  * flush，快照后到期的 trailing 帧会把同一段增量对着快照再应用一遍。
- * 先 flush（老 viewers 正常前进、新 viewer 应用到旧副本上也会被紧随的
- * 快照整体覆盖），再取样，两步之间不得有 await。
+ * 先 flush（老 viewers 正常前进），再取样，两步之间不得有 await。
+ *
+ * 注：消费者层（viewers.ts）按 cursor 端去重，快照后到期的 trailing 帧
+ * 即使内容已存在于快照也会被按 (messageId, blockIndex, field, endOffset)
+ * 丢弃，所以这里仍调用 flushStreamOps 是无害的（老 viewers 正常前进），
+ * 而新 viewer 则会随后收到一个 cursor 已 seed 过的 session_state。
  */
 function flushStreamOps(sessionId: string): void {
   const state = streams.get(sessionId);
@@ -189,4 +274,4 @@ function dropStreamBroadcast(sessionId: string): void {
   streams.delete(sessionId);
 }
 
-export { queueStreamEvent, flushStreamOps, snapshotStreamingTail, dropStreamBroadcast, FLUSH_INTERVAL_MS };
+export { queueStreamEvent, flushStreamOps, snapshotStreamingTail, dropStreamBroadcast, FLUSH_INTERVAL_MS, getCurrentMessageId };

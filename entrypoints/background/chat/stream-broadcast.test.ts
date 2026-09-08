@@ -55,16 +55,30 @@ describe('stream-broadcast 生产端 → stream-replica 应用端（端到端契
     expect(frames).toHaveLength(1); // leading 帧
 
     const pieces = ['流式', '输出', '的', '增量', '合并'];
+    let len = 0;
     for (const p of pieces) {
+      len += p.length;
       partial.content[0].text += p; // provider 原地累积
       queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: p, partial } as never);
     }
     expect(frames).toHaveLength(1); // 窗口未到期，全部还在缓冲
     vi.advanceTimersByTime(80);
     expect(frames).toHaveLength(2); // trailing 帧
-    // 同块相邻 delta 已在缓冲里拼接成单个 op
+    // 同块相邻 delta 已在缓冲里拼接成单个 op。endOffset 是首条 delta 的 startOffset
+    // 加整段 delta 长度（pushOp 拼接时直接取后一段的 endOffset）。
     expect(frames[1].ops).toEqual([
-      { kind: 'tail_append', blockIndex: 0, field: 'text', delta: pieces.join('') },
+      {
+        kind: 'tail_append',
+        // 本测试未排队 'start'（text_start 是首个事件），producer messageId
+        // 保持初始值 0——与生产一致（桥接层不转发 'start'，见 queueStreamEvent 注释）。
+        // messageId 的 bump 行为由下方专用测试「'start' 事件 bump messageId」覆盖。
+        messageId: 0,
+        blockIndex: 0,
+        field: 'text',
+        delta: pieces.join(''),
+        startOffset: 0,
+        endOffset: len,
+      },
     ]);
 
     const replica = replay([]);
@@ -215,7 +229,12 @@ describe('stream-broadcast 生产端 → stream-replica 应用端（端到端契
    *   5. subscribe 的 post session_state 把 "ABC" 发给新 viewer
    *   6. subscribe 返回 → microtask 队列轮到 agent 的 emit 回调
    *   7. pushOp "C" 进入缓冲，80ms 后 trailing 帧把 "C" 单独再发一遍
-   *   8. UI 端：stream_ops AB → session_state ABC → stream_ops C → "ABCC"
+   *
+   * 注：本测试只覆盖**生产端**的发射——模拟 broadcastToViewers 收到的就是
+   * 这两份流式帧。**消费端**的 cursor 过滤是否真的把 trailing 帧
+   * "C" 丢掉，由 entrypoints/background/chat/viewers.test.ts 的回归
+   * 测试覆盖。这里把 "ABCC" 的预期保留，是为了把「生产端仍会发重复帧」
+   * 这一事实锁进契约（消费者是唯一防线，不能默认生产端会主动判重）。
    */
   it('mid-stream subscribe + microtask 错位：trailing 帧与 session_state 重复', () => {
     const partial = makePartial();
@@ -244,8 +263,69 @@ describe('stream-broadcast 生产端 → stream-replica 应用端（端到端契
     queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'C', partial } as never);
     vi.advanceTimersByTime(80);
 
-    // 客户端按序应用：trailing 帧 C 落在快照 ABC 之上，把 C 又加了一遍
+    // 生产端仍发出重复帧（C 的尾帧 endOffset=3 落在已 seed 的 cursor=3 之后，
+    // 但生产端不管 cursor——过滤是消费者的事）；naive 回放得到 ABCC。
     replica = replay(replica, framesBeforeSnapshot);
-    expect(tail(replica).content[0].text).toBe('ABCC'); // ← 重复
+    expect(tail(replica).content[0].text).toBe('ABCC'); // ← 生产端契约：仍重复
+  });
+
+  it("'start' 事件 bump messageId——同一会话内新 assistant 消息自成一个 cursor key", () => {
+    const partialA = makePartial();
+    partialA.content.push({ type: 'text', text: 'AAA' });
+    queueStreamEvent(S, { type: 'start', partial: partialA } as never);
+    // 模拟 pi 在 emit 前同步把 partial.text 追加到 'AAAA'（4 字符），
+    // producer endOffset = 'AAAA'.length = 4。
+    partialA.content[0].text += 'A';
+    queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'A', partial: partialA } as never);
+    vi.advanceTimersByTime(80);
+    expect(frames[0].ops[0]).toMatchObject({ kind: 'tail_replace', messageId: 1 });
+    expect(frames[1].ops[0]).toMatchObject({
+      kind: 'tail_append',
+      messageId: 1,
+      blockIndex: 0,
+      field: 'text',
+      delta: 'A',
+      startOffset: 3,
+      endOffset: 4,
+    });
+
+    // 第二条消息：'start' 应把 messageId 从 1 提到 2。
+    // 注意：消息 A 的 trailing flush 之后窗口仍开着（定时器续期），'start' 会
+    // 被窗口吞掉而不是另起一帧——这里先推进 80ms 让 tail_replace_B 单独成一帧。
+    const partialB = makePartial();
+    partialB.content.push({ type: 'text', text: '' });
+    queueStreamEvent(S, { type: 'start', partial: partialB } as never);
+    vi.advanceTimersByTime(80);
+    // 模拟 pi 在 emit 前同步把 partial.text 追加到 'BB'（2 字符），
+    // producer endOffset = 'BB'.length = 2。
+    partialB.content[0].text += 'BB';
+    queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'BB', partial: partialB } as never);
+    vi.advanceTimersByTime(80);
+    expect(frames[2].ops[0]).toMatchObject({ kind: 'tail_replace', messageId: 2 });
+    expect(frames[3].ops[0]).toMatchObject({
+      kind: 'tail_append',
+      messageId: 2,
+      blockIndex: 0,
+      field: 'text',
+      delta: 'BB',
+      startOffset: 0,
+      endOffset: 2,
+    });
+  });
+
+  it('text_delta 端到端 startOffset / endOffset：delta 应用后长度即为 endOffset', () => {
+    const partial = makePartial();
+    partial.content.push({ type: 'text', text: '0123456789AB' }); // 已 12 字符
+    // 模拟 pi 在 emit 前同步把 partial.text 追加 'X' → 13 字符
+    partial.content[0].text += 'X';
+    queueStreamEvent(S, { type: 'text_delta', contentIndex: 0, delta: 'X', partial } as never);
+    expect(frames[0].ops[0]).toMatchObject({
+      kind: 'tail_append',
+      blockIndex: 0,
+      field: 'text',
+      delta: 'X',
+      startOffset: 12,
+      endOffset: 13,
+    });
   });
 });
