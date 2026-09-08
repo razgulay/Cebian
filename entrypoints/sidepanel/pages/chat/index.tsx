@@ -36,10 +36,13 @@ import { ToolCardWithUI } from '@/components/chat/ToolCardWithUI';
 import { DelegationCard, type DelegationStatus } from '@/components/chat/DelegationCard';
 import { isMcpAppResult } from '@/lib/tools/mcp-tool';
 import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
-// WORKER_TIMEOUT_MS 放在 lib/agent/worker-roles.ts（被 background runner 和
-// sidepanel UI 共用的常量），不在 entrypoints 里——避免把 runner 的整条
-// 依赖图（factory + 8 个 tool 模块）拖进 sidepanel bundle。
-import { WORKER_ROLE_KEYS, WORKER_TIMEOUT_MS } from '@/lib/agent/worker-roles';
+// WORKER_TIMEOUT_MS / resolveWorkerRoleTimeoutMs 放在 lib/agent/worker-roles.ts
+// （被 background runner 和 sidepanel UI 共用的常量），不在 entrypoints 里
+// ——避免把 runner 的整条依赖图（factory + 8 个 tool 模块）拖进 sidepanel bundle。
+import {
+  WORKER_ROLE_KEYS,
+  resolveWorkerRoleTimeoutMs,
+} from '@/lib/agent/worker-roles';
 import type { WorkerRole } from '@/lib/persistence/storage';
 import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -61,7 +64,7 @@ import { ContextUsageBadge } from '@/components/chat/context/ContextUsageBadge';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
+import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, workerRoleTimeouts, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
 import { hasUsableModel } from '@/lib/providers/usable-models';
 import type { Attachment } from '@/lib/agent/attachments';
 import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
@@ -103,6 +106,10 @@ export function ChatPage({
   // 自定义 provider——用户刚在设置里配好就实时反映，这正是 watch 的正当用途。
   const [creds] = useStorageItem(providerCredentials, {});
   const [customs] = useStorageItem(customProviders, []);
+  // 用户在 Settings → Advanced 给每 role 配的超时覆盖。watch live — 用户
+  // 正在跑一个 worker 中途去 Settings 改了，下一次新 attempt 立刻用新值；
+  // in-flight attempt 不变（合理：开始时的 ceiling 已经被 runner 锁住）。
+  const [workerTimeouts] = useStorageItem(workerRoleTimeouts, {});
   const canStartChat = useMemo(() => hasUsableModel(creds, customs), [creds, customs]);
 
   // 新对话：seed 自全局「新对话默认种子」（= 用户上次切到的）。全局种子只是持久化
@@ -851,7 +858,7 @@ export function ChatPage({
                           {...(attemptsNum ? { attempts: attemptsNum } : {})}
                           {...(attemptDurationMsNum !== undefined ? { attemptDurationMs: attemptDurationMsNum } : {})}
                           {...(attemptStartedAt !== undefined ? { attemptStartedAt } : {})}
-                          timeoutMs={WORKER_TIMEOUT_MS}
+                          timeoutMs={resolveWorkerRoleTimeoutMs(safeRole, workerTimeouts)}
                         />
                       );
                     }

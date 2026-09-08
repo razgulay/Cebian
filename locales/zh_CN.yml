@@ -229,10 +229,22 @@ settings:
         hint: "编写 HTML / CSS / JS 到 VFS 文件。不调用浏览器工具。"
       reviewer:
         label: "审查"
-        hint: "读取 worker 产出文件并通过 inspect / execute_js 测试。不修改文件。"
+        # Subtask 8.7：whitelist 已砍掉 execute_js / inspect（SW-background
+        # worker 拿不到 active tab，工具 9/9 errored），hint 同步改成「读 →
+        # 推理 → emit findings」。
+        hint: "最多读取 3 个文件并以文本 handoff 形式输出发现。不修改文件，不调用浏览器工具。"
       researcher:
         label: "研究"
         hint: "检索文件与 RAG 集合，输出结构化摘要。"
+      timeout:
+        label: "超时"
+        # $1 = 最终生效上限（秒；override / registry 默认决议后的值）
+        activeHint: "（上限 $1 秒）"
+        default: "默认"
+        preset60: "60 秒"
+        preset120: "2 分钟"
+        preset300: "5 分钟"
+        preset600: "10 分钟"
   pageInteraction:
     title: "页面交互"
     ball:

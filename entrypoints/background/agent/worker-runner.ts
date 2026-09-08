@@ -46,11 +46,12 @@
 //      只读 path 参数）。
 
 import type { Api, Model, AssistantMessage } from '@earendil-works/pi-ai';
-import type { AgentTool } from '@earendil-works/pi-agent-core';
+import type { AgentEvent, AgentTool } from '@earendil-works/pi-agent-core';
 import type { TSchema } from 'typebox';
 import { parseExpectedSchema, checkSchema } from '@/lib/agent/schema-validate';
 import {
   workerModels,
+  workerRoleTimeouts,
   providerCredentials,
   customProviders,
   type ModelIdentity,
@@ -67,7 +68,11 @@ import { skillRoot, sessionRoot } from '@/lib/agent/path-safety';
 import {
   getRoleConfig,
   getWorkerToolNames,
-  WORKER_TIMEOUT_MS,
+  WORKER_TTFT_MS,
+  WORKER_IDLE_MS,
+  resolveWorkerRoleTimeoutMs,
+  resolvePhaseTimeout,
+  type StreamPhase,
   type WorkerRoleConfig,
 } from '@/lib/agent/worker-roles';
 import { TOOL_DELEGATE_DOM, TOOL_DELEGATE_TASK } from '@/lib/tools/names';
@@ -188,16 +193,31 @@ export interface WorkerHandoff {
    *  锁死成 `1 | 2`：单次自愈的设计就是最多两次；`number` 留着只会让
    *  caller 误传 0 / 3 / undefined 进来 typecheck 通过但语义错。 */
   attempts?: 1 | 2;
-  /** True khi attempt 跑过了 `WORKER_TIMEOUT_MS` 还没结束（vs caller abort /
+  /** True khi attempt 被任一 timer fail-fast 中断（vs caller abort /
    *  model exception）。让 UI / caller 能区分「timeout fail-fast」与「用户取消」，
-   *  配套 actionable hint（「换 model」vs「再试一次」）。Additive —— 老 caller
-   *  不读这字段不会 break。 */
+   *  配套 actionable hint（「换 model」vs「再试一次」）。具体哪一路 timer
+   *  触发由 `failureReason` 区分（`ttft` / `idle` / `timeout` / `ceiling`）。
+   *  Additive —— 老 caller 不读这字段不会 break。 */
   timedOut?: boolean;
   /** Attempt 实际耗时（ms），从 prompt 提交到结果/中断为止。让 log / UI 能
    *  显示「跑了 120000ms 后被 timeout」之类的诊断信息。caller abort / 异常
    *  时也填——任何「没成功结束」的 attempt 都让 caller 看到真实耗时，便于
    *  排查。 */
   attemptDurationMs?: number;
+  /** 区分是哪一种超时机制触发的 fail-fast，让 LLM / 主代理 / UI 给针对性修
+   *  复指引：
+   *  - `'ttft'`   — Time-to-first-token 超 45s，模型端点 hung / 鉴权错，
+   *                retry 同一 model 不会变好（retryable:false）。
+   *  - `'idle'`   — stream 静默 20s（中途 token 全停），可能 tool hang，
+   *                retry + output file 存在时让 worker 接着写完（retryable:true）。
+   *  - `'timeout'`— 兼容旧 world：固定 120s 触发（理论不再 hit，但保留让老
+   *                测试 / debug log 兼容）。
+   *  - `'ceiling'`— 超过 role 的 timeoutMs（90/120/300s 等），兜底 wall-clock
+   *                cap。同 `'idle'` 一样：file 存在 → retryable:true。
+   *  Undefined = 非 timeout 分支（ok:true / abort / exception），与本字段配套
+   *  的 `timedOut` 字段保持正交：`timedOut` 仅 truthy iff `failureReason ∈
+   *  {ttft, idle, timeout, ceiling}`. */
+  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling';
 }
 
 // ─── Pure helpers (exported for unit tests) ───
@@ -250,14 +270,21 @@ export interface AssembleHandoffArgs {
    *  设 1 或 2 让 UI 能区分是否已 retry。锁死成 `1 | 2`——和 `WorkerHandoff`
    *  同步；上层 runner 只发这两个值。 */
   attempts?: 1 | 2;
-  /** True khi attempt 被 `WORKER_TIMEOUT_MS` 中断（setTimeout 触发了 abort）。
+  /** True khi attempt 被 timer 中断（setTimeout 触发了 abort）。
    *  只在 branch 1（runnerOk=false）路径生效——其它分支是 worker 跑完了，
    *  不存在 timeout。透传到 handoff.timedOut 让 UI / caller 能区分「timeout
-   *  fail-fast」vs「用户取消 / 模型异常」，配套 actionable hint 走不同分支。 */
+   *  fail-fast」vs「用户取消 / 模型异常」，配套 actionable hint 走不同分支。
+   *
+   *  配合下面的 `failureReason` 给 timer 来源细化（ttft / idle / ceiling /
+   *  timeout 四种可能），透传到 handoff 字段用于 telemetry + 主代理针对性
+   *  修复（ttft → 换 model；idle + file 已写 → retry；ceiling → 用户上调阈值）。 */
   timedOut?: boolean;
   /** Attempt 实际耗时（ms），从 createCebianAgent 到结果/中断为止。透传到
    *  handoff.attemptDurationMs，让 log / UI 能诊断「跑了 X ms 后失败」。 */
   attemptDurationMs?: number;
+  /** 哪段 timer 触发 fail-fast（与 `timedOut` 同时设）。undefined = branch 1
+   *  但不是 timeout 引起（caller abort / model exception）。 */
+  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling';
 }
 
 /**
@@ -297,17 +324,19 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
     if (args.timedOut) handoff.timedOut = true;
     if (args.attemptDurationMs !== undefined) handoff.attemptDurationMs = args.attemptDurationMs;
     if (args.attempts !== undefined) handoff.attempts = args.attempts;
+    if (args.failureReason) handoff.failureReason = args.failureReason;
     // 修：原来 branch 1（runnerOk=false）一律不 retry——「runner-level 错误
     // retry 不会让它消失」是正确原则，但 **timeout** 是例外：worker 被硬
     // abort, 不代表「同一 model + 同一 prompt 再跑 120s 还是会卡」——况且
     // 如果 worker 已经写了一半 output file, retry 让他接着写完比
     // fail-fast 更友好。区分三种情况:
-    //   - timeout + file 存在 → retryable:true（mechanical self-heal — file
-    //     是半成品, retry 可能把它写完）
-    //   - timeout + file 不存在 → retryable:false（同样原因, fail-fast）
+    //   - ttft / idle / ceiling + file 存在 → retryable:true（self-heal；ttft
+    //     特殊：理论上 endpoint 真挂了 retry 也没用，但若 file 已写一半，
+    //     续写比 fail-fast 友好，行为对齐 Phase 1.4）
+    //   - ttft / idle / ceiling + file 不存在 → retryable:false（fail-fast）
     //   - non-timeout（parent abort / exception）→ retryable:false（保持
     //     原原则, zero regression）
-    if (args.timedOut && args.outputFileExists) {
+    if (args.failureReason && args.outputFileExists) {
       handoff.retryable = true;
     }
     return handoff;
@@ -537,6 +566,66 @@ export function shouldRetry(handoff: WorkerHandoff): boolean {
   return handoff.ok === true || handoff.timedOut === true;
 }
 
+// ─── Silent-write fallback (Subtask 8.8 Fix Y) ──────────────────────────
+//
+// Local OpenAI-compatible proxies (Minimax-M3 via vilao.ai / 9Router 等) 会
+// buffer 整个 tool-call argument 流，最后只发 `toolcall_*` + `done`，不留后续
+// text 块。结果就是 worker 在 `message_end` 时 `rawText` 为空、`json` 为 null，
+// 但声明的 output file 实际已经在 VFS 里——assembleHandoff branch 2 (parse
+// fail) 误判 failed。Retry 同一 model + 同一 prompt 是 deterministic 行为，
+// 100% 重现「写文件 + 不说话」，徒增 attempts=2 后 fail-fast 的 ceiling 风险。
+//
+// Detection（这里）+ decision（assembleHandoff branch 6）分两个函数：detection
+// 决定「要不要合成 handoff」，decision 仍是 assembleHandoff 既有的 success
+// path，零修改、零回归。
+
+/** Silent-write fallback：model 抽不到 text + json parse 失败 + 但 VFS 里的
+ *  output file 已存在 → 合成最小合法 handoff，让 assembleHandoff 走 success
+ *  path。
+ *
+ *  触发条件（all 4 都要满足）：
+ *    - `declaredOutputPath` 已声明（caller 给 runner 钉过产物路径）
+ *    - `outputFileExists === true`（`readOutputIfAny` 在 attempt 末确认）
+ *    - `json === null`（`extractJsonOrRaw` 没抽到 JSON）
+ *    - `rawText.length === 0`（模型完全没说话；rawText 非空 + json null 是另一
+ *      种失败——prose 但忘 JSON shape，应走 retry 让它记得写 JSON shape）
+ *
+ *  Returns `{rawText, json}` if synthesis applies, `null` otherwise.
+ *  Pure function: 无 IO，单元测试可独立覆盖。Runner 调用处拿返回值替换
+ *  `rawText` / `json`，再走 `assembleHandoff`——assembleHandoff 看到 status:
+ *  'success' + outputFileExists=true → branch 6 (success path) → 挂 output_content，
+ *  不触发 retry。
+ *
+ *  Synthesis 出的 summary / handoff_notes 显式标注「runner synthesized」，
+ *  让主代理 LLM / 用户看到这条是兜底产物、不是 model 自己说的——避免掩盖
+ *  proxy 行为异常，也便于 debug log 区分 Fix X 生效 vs Fix Y 兜底。 */
+export function synthesizeSilentWriteHandoff(args: {
+  rawText: string;
+  json: string | null;
+  declaredOutputPath: string | undefined;
+  outputFileExists: boolean;
+}): { rawText: string; json: string } | null {
+  if (!args.declaredOutputPath) return null;
+  if (args.outputFileExists !== true) return null;
+  if (args.json !== null) return null;
+  if (args.rawText.length !== 0) return null;
+  const summary =
+    `Worker emitted no text after fs_create_file; output file present at "${args.declaredOutputPath}".`;
+  const notes =
+    'Runner synthesized this handoff because the worker emitted no text message but the ' +
+    'declared output file exists in VFS. This pattern is common with local OpenAI-compatible ' +
+    'proxies (e.g. Minimax-M3 via vilao.ai, 9Router) that buffer the entire tool-call ' +
+    'argument stream and emit the tool call without a follow-up text message. The output ' +
+    'file is the authoritative artifact — its presence is treated as success.';
+  const json = JSON.stringify({
+    status: 'success',
+    output_file: args.declaredOutputPath,
+    summary,
+    handoff_notes: notes,
+  });
+  return { rawText: json, json };
+}
+
 // ─── IO helpers (internal; tested via mock of `vfs`) ───
 
 /** Read `~/.cebian/skills/<name>/SKILL.md`，剥 frontmatter，截断到 100KB，
@@ -694,43 +783,135 @@ interface RunWorkerAttemptOptions {
  *  assembleHandoff。Keepalive 在 attempt 内 acquire/release（避免 retry
  *  跨 attempt 持锁）。信号 listener 在 finally 内 remove，cleanup 安全。
  *
- *  Fail-Fast (Subtask 1):
- *  - 每次 attempt 有 `WORKER_TIMEOUT_MS`（120s）硬上限——超时自动 abort，
- *    返回 `runnerOk:false, timedOut:true`。
- *  - Composed AbortController：把 caller `opts.signal` 与 timer 合成一个
+ *  Fail-Fast (Subtask 7 — 重构 Phase 1.5 的固定 idle-window):
+ *  - 三段协同 timer + **阶段化 idle-window**，超时走 `runnerOk:false,
+ *    timedOut:true`，并在 `failureReason` 字段区分（`'ttft' | 'idle' |
+ *    'timeout' | 'ceiling'`）：
+ *    • TTFT (`WORKER_TTFT_MS` = 120s)：prompt 提交后无 first token →
+ *      fail-fast。**不可重置**——避免 idle 一直被重新 arm 走偏。
+ *    • **阶段化 Idle window**（核心 Subtask 7 改动）：
+ *      - `emitting` 阶段（模型正在生成 assistant message content）→ idle
+ *        阈值 = per-role ceiling。**关键修复**：本地 OpenAI-compatible 代理
+ *        会 buffer 整个 tool-call argument 流（25–135 KB），期间
+ *        pi-agent-core 看不到任何 `message_update` 事件（只有 `message_start`
+ *        → `message_end`），旧的 180s idle 把这种「正在工作」误判为 hung。
+ *        Kimi K3 的 227s emit gap 就是这种场景——Subtask 7 前 idle 会 fire
+ *        并触发无用 retry。
+ *      - `between_turns` / `tool_running` 阶段（turn 间 / tool 执行中）→
+ *        idle 阈值 = `WORKER_IDLE_MS` (180s)。这两阶段才是真静默期（端点假死
+ *        / 工具卡住 / thinking-model reasoning gap），需要 fail-fast。
+ *      - `before_ttft` 阶段无 idle（TTFT timer 独管）。
+ *      - Phase 转移逻辑见 `enterPhase()` + subscriber 内的 `switch (ev.type)`。
+ *      - 决策函数在 `resolvePhaseTimeout(phase, ceilingMs)` —— 纯函数，测试
+ *        覆盖于 `worker-runner.test.ts`。
+ *    • Per-role ceiling (来自 `WORKER_ROLES[role].timeoutMs`，用户可 override
+ *      via `local:workerRoleTimeouts`)：outer wall-clock cap——emit 阶段 idle
+ *      也用这个值（兜底 buffer 模型），仅在 idle/ttft 全漏（long tool chain
+ *      期间）时 fire。
+ *  - Composed AbortController：把 caller `opts.signal` 与三 timer 合成一个
  *    内部 controller，agent 只听这一个 signal（避免在 pi-agent-core 内部
  *    多 listener 互相打架）。Listener 在 `finally` 内 remove。
- *  - 6 个 instrumentation events (`sub_agent:worker:*`) 让 debug log 能看出
- *    attempt 卡在哪一阶段（model resolve / prompt / stream / handoff
- *    extract / output read）。 */async function runWorkerAttempt(
+ *  - 7 个 instrumentation events (`sub_agent:worker:*`) 让 debug log 能看出
+ *    attempt 卡在哪一阶段（model resolve / prompt / stream / phase / handoff
+ *    extract / output read），并带 `failureReason` 区分哪一路 timer 赢。
+ *    `stream:phase`（Subtask 7 新增）记录阶段转移——比 Subtask 4 的 DIAG
+ *    console.log 更结构化，直接进 debug log JSON，sidepanel 可直接渲染。 */
+async function runWorkerAttempt(
   opts: RunWorkerAttemptOptions,
 ): Promise<WorkerHandoff> {
-  const attemptStartedAt = performance.now();
+  let attemptStartedAt = performance.now();
   const attemptNumber = opts.attempt;
+  // 决议 attempt ceiling：用户 storage override → role registry 默认 → 全局
+  // WORKER_TIMEOUT_MS 兜底（三层优先级在 `resolveWorkerRoleTimeoutMs` JSDoc）。
+  // 这里一次性 resolve——attempt 内部不重读 storage。若 attempt 1 跑完用户
+  // 改了阈值，attempt 2 才看得到（acceptable per plan §4）。
+  // 必须读 storage 而不是传 const：UI 端已经在 `useStorageItem(workerRoleTimeouts, {})`
+  // 订阅，user override 在 runner 这里也必须生效——否则会出现「DelegationCard
+  // 显示 300s 但 runner 实际按 120s abort」的 UI/runtime drift。
+  const overrideTimeouts = await workerRoleTimeouts.getValue();
+  const attemptCeilingMs = resolveWorkerRoleTimeoutMs(opts.role, overrideTimeouts);
 
   debugLog.info('sub_agent', 'sub_agent:worker:attempt:start', {
     role: opts.role,
     modelId: opts.model.id,
     modelKey: opts.modelKey,
     attempt: attemptNumber,
-    timeoutMs: WORKER_TIMEOUT_MS,
+    timeoutMs: attemptCeilingMs,
+    ttftMs: WORKER_TTFT_MS,
+    idleMs: WORKER_IDLE_MS,
   });
 
   let result: WorkerHandoff;
-  let timedOut = false;
-  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-  // Composed controller 把 caller signal 与 timeout timer 合到一起；agent
+  // 哪个 timer 是真正赢的那个（idempotent 检查保证三选一）。闭包读回后给
+  // assembleHandoff 透传到 handoff.failureReason。`timedOut` 函数时 truthy
+  // iff failureReason 已设——catch 分支用同一个标志控制 retryable 与 error 文案。
+  let failureReason: 'ttft' | 'idle' | 'ceiling' | undefined;
+  const timedOut = (): boolean => failureReason !== undefined;
+  let firstTokenEmitted = false;
+  // 3 个独立 timer handle——`finally` 里 clearTimeout 清掉。
+  // `clearTimeout(undefined)` 是 no-op，所以未设置过的 handle 也安全 clear。
+  let ttftHandle: ReturnType<typeof setTimeout> | undefined;
+  let idleHandle: ReturnType<typeof setTimeout> | undefined;
+  let ceilingHandle: ReturnType<typeof setTimeout> | undefined;
+  // Composed controller 把 caller signal 与 3 个 timer 合成一个；agent
   // 只订阅这个内部 signal，避免外部 caller 中途再换 opts.signal。
   const composedController = new AbortController();
   const onParentAbort = (): void => {
     try {
       composedController.abort();
     } catch {
-      /* ignore — composedController 可能已被 timeout 自己 abort 过 */
+      /* ignore — composedController 可能已被 timer 自己 abort 过 */
     }
   };
 
+  // 三个 timer handler 共用 idempotent 规则:
+  //   1. 只在「composedController 尚未 abort」时接管（避免父 caller 已经 abort
+  //      后再 fire 产生 noise）；
+  //   2. 三者只能赢一个——`failureReason` 一旦设过就不覆盖（先到先得）；
+  //   3. abort + 设 failureReason，clean-up 在 finally。阈值由参数传入便于日志。
+  function setFailureReason(
+    reason: 'ttft' | 'idle' | 'ceiling',
+    thresholdMs: number,
+  ): void {
+    if (composedController.signal.aborted) return;
+    failureReason = reason;
+    debugLog.warn('sub_agent', `sub_agent:worker:timeout:${reason}`, {
+      role: opts.role,
+      modelId: opts.model.id,
+      attempt: attemptNumber,
+      elapsedMs: Math.round(performance.now() - attemptStartedAt),
+      thresholdMs,
+    });
+    composedController.abort();
+  }
+
   acquireKeepAlive();
+  // ─── Phase-aware timer state（Subtask 7）───
+  // 声明在 outer try 顶层，让下面的 subscriber 闭包能稳定引用——
+  // 即便 `composedController.signal.aborted` 已经是 true（pre-aborted 早退
+  // 路径），helpers 仍可被引用，`armPhaseTimer` 内的 abort guard 兜底
+  // 不会真正 arm。
+  let phase: StreamPhase = 'before_ttft';
+  const armPhaseTimer = (): void => {
+    if (idleHandle !== undefined) clearTimeout(idleHandle);
+    if (composedController.signal.aborted) return;
+    // before_ttft 阶段不 arm——TTFT timer 单独管。
+    if (phase === 'before_ttft') return;
+    const ms = resolvePhaseTimeout(phase, attemptCeilingMs);
+    idleHandle = setTimeout(() => setFailureReason('idle', ms), ms);
+  };
+  const enterPhase = (next: StreamPhase): void => {
+    phase = next;
+    armPhaseTimer();
+    debugLog.info('sub_agent', 'sub_agent:worker:stream:phase', {
+      role: opts.role,
+      modelId: opts.model.id,
+      attempt: attemptNumber,
+      phase: next,
+      elapsedMs: Math.round(performance.now() - attemptStartedAt),
+    });
+  };
+
   try {
     // 链：opts.signal → composedController → agent.abort()
     if (opts.signal) {
@@ -740,21 +921,29 @@ interface RunWorkerAttemptOptions {
         opts.signal.addEventListener('abort', onParentAbort, { once: true });
       }
     }
-    // 链：timeout → composedController → agent.abort()
+    // 链：3 timer → composedController → agent.abort()
     if (!composedController.signal.aborted) {
-      timeoutHandle = setTimeout(() => {
-        if (!composedController.signal.aborted) {
-          timedOut = true;
-          debugLog.warn('sub_agent', 'sub_agent:worker:timeout:fired', {
-            role: opts.role,
-            modelId: opts.model.id,
-            attempt: attemptNumber,
-            timeoutMs: WORKER_TIMEOUT_MS,
-            elapsedMs: Math.round(performance.now() - attemptStartedAt),
-          });
-          composedController.abort();
-        }
-      }, WORKER_TIMEOUT_MS);
+      // TTFT (Time-to-first-token) ceiling — 不可重置。Stream 一旦出 first
+      // token，下面 subscriber 会把 firstTokenEmitted latch 锁上 + clearTimeout
+      // 掉 ttftHandle；不靠 re-create 新 timer（避免 race）。
+      ttftHandle = setTimeout(
+        () => {
+          if (!firstTokenEmitted) setFailureReason('ttft', WORKER_TTFT_MS);
+        },
+        WORKER_TTFT_MS,
+      );
+
+      // 注（Subtask 7）：此处不调 `armPhaseTimer()`——phase 初始为
+      // `before_ttft`，TTFT timer 单独管这一阶段；idle 由 subscriber 在首个
+      // `message_start` / `message_update` 时通过 `enterPhase('emitting')`
+      // 触发。
+
+      // Outer ceiling — per-role hard cap。兜底 wall-clock safety net。Stream
+      // 真在动时 idle-window 持续 reset；只在极端边界 fire。belt-and-suspenders。
+      ceilingHandle = setTimeout(
+        () => setFailureReason('ceiling', attemptCeilingMs),
+        attemptCeilingMs,
+      );
     }
 
     try {
@@ -777,29 +966,90 @@ interface RunWorkerAttemptOptions {
       };
       composedController.signal.addEventListener('abort', onComposedAbort, { once: true });
 
-      // 2b. Instrumentation subscription：让 debug log 能看到 stream 进
-      //     展——「first token」= 真正开始出活，「每个 tool result」= 在
-      //     调工具的哪个阶段。仅设 firstTokenEmitted latch 防止重复打
-      //     第一个 token 事件。`subscribe` 返回 unsubscribe 函数。
-      let firstTokenEmitted = false;
+      // 2b. Instrumentation subscription + 阶段化 idle re-arming（Subtask 7）。
+      //     旧逻辑只在 message_update / text_delta / tool_result 上 re-arm，
+      //     对「本地 proxy buffer 整个 tool-call argument 流」的场景完全失明
+      //     （Gemini/GPT-5.5/Kimi 实测 140–227s 无任何 message_update，但模型
+      //     其实在生成 25–135 KB 的 fs_create_file 参数）→ 180s idle 误杀。
+      //     新逻辑把 idle 阈值与 stream 阶段绑定：
+      //       message_start(assistant)  → emitting（idle = ceiling）
+      //       message_update            → re-arm 当前阶段
+      //       message_end(assistant)    → between_turns（idle = 180s）
+      //       tool_execution_start      → tool_running（idle = 180s）
+      //       tool_execution_update/end → re-arm
+      //     first token 出现则取消 TTFT timer。Guard 顶部检查 composedController
+      //     避免 abort 后还重新 arm timer。
       const unsubscribeStream = agent.subscribe((event: unknown) => {
-        const ev = event as { type?: string };
-        if (!firstTokenEmitted && (ev.type === 'message_update' || ev.type === 'text_delta')) {
+        if (composedController.signal.aborted) return;
+        const ev = event as AgentEvent;
+
+        // First-token latch：出现即取消 TTFT（clearTimeout 这个 handle），
+        // 后续不再判 TTFT。message_start(assistant) 也算 first token——
+        // proxy buffer 场景下这是 stream 存活的第一个信号。
+        const markFirstToken = (): void => {
+          if (firstTokenEmitted) return;
           firstTokenEmitted = true;
+          if (ttftHandle !== undefined) {
+            clearTimeout(ttftHandle);
+            ttftHandle = undefined;
+          }
           debugLog.info('sub_agent', 'sub_agent:worker:stream:first_token', {
             role: opts.role,
             modelId: opts.model.id,
             attempt: attemptNumber,
             elapsedMs: Math.round(performance.now() - attemptStartedAt),
           });
-        }
-        if (ev.type === 'tool_result') {
-          debugLog.info('sub_agent', 'sub_agent:worker:tool:result', {
-            role: opts.role,
-            modelId: opts.model.id,
-            attempt: attemptNumber,
-            elapsedMs: Math.round(performance.now() - attemptStartedAt),
-          });
+        };
+
+        switch (ev.type) {
+          case 'message_start':
+            if (ev.message.role === 'assistant') {
+              markFirstToken();
+              enterPhase('emitting');
+            } else {
+              // toolResult / user message_start：re-arm 当前阶段，不转移。
+              armPhaseTimer();
+            }
+            break;
+          case 'message_update':
+            markFirstToken();
+            if (phase === 'before_ttft') enterPhase('emitting');
+            else armPhaseTimer();
+            break;
+          case 'message_end':
+            if (ev.message.role === 'assistant') {
+              enterPhase('between_turns');
+            } else {
+              armPhaseTimer();
+            }
+            break;
+          case 'tool_execution_start':
+            debugLog.info('sub_agent', 'sub_agent:worker:tool:start', {
+              role: opts.role,
+              modelId: opts.model.id,
+              attempt: attemptNumber,
+              toolName: ev.toolName,
+              elapsedMs: Math.round(performance.now() - attemptStartedAt),
+            });
+            enterPhase('tool_running');
+            break;
+          case 'tool_execution_update':
+          case 'tool_execution_end':
+            if (ev.type === 'tool_execution_end') {
+              debugLog.info('sub_agent', 'sub_agent:worker:tool:end', {
+                role: opts.role,
+                modelId: opts.model.id,
+                attempt: attemptNumber,
+                toolName: ev.toolName,
+                isError: ev.isError,
+                elapsedMs: Math.round(performance.now() - attemptStartedAt),
+              });
+            }
+            armPhaseTimer();
+            break;
+          // agent_start / agent_end / turn_start / turn_end：不转移 phase、
+          // 不 re-arm——它们是 run/turn 边界信号，真正的存活证据是 message /
+          // tool_execution 事件。
         }
       });
 
@@ -815,11 +1065,11 @@ interface RunWorkerAttemptOptions {
         // 修：之前 agent.prompt() 收到 composedController.abort() 时不会抛错
         // （pi-agent-core 把 abort 当 cancel 语义），函数返回时 msgs 里可能只有
         // 部分 text 或空串，flow 继续往下走到 extractJsonOrRaw → "JSON parse
-        // fail" → 无用的 retry。这里如果 setTimeout 已在 prompt 运行期间 fire,
-        // 主动 throw 让它落进下面的 catch block —— catch 里已经有
-        // `runnerError = timedOut ? 'Worker timed out after ...ms'` 分支,
-        // 于是会正确流进 `runnerOk: false` + `timedOut: true`.
-        if (timedOut) {
+        // fail" → 无用的 retry。这里如果 timer 已在 prompt 运行期间 fire,
+        // 主动 throw 让它落进下面的 catch block —— catch 里已有
+        // `runnerError = timedOut() ? '<reason> timeout...'` 分支，
+        // 会正确流进 `runnerOk: false` + `failureReason` + `timedOut: true`.
+        if (timedOut()) {
           throw new Error('Worker timed out');
         }
       } finally {
@@ -849,25 +1099,55 @@ interface RunWorkerAttemptOptions {
       const { exists, content } = await readOutputIfAny(opts.outputPath);
 
       const attemptDurationMs = Math.round(performance.now() - attemptStartedAt);
-      // 修：原来这里硬写 `timedOut: false`，但 setTimeout 可能在 `agent.prompt()`
+      // 修：原来这里硬写 `timedOut: false`，但 timer 可能在 `agent.prompt()`
       // 返回前已经 fire（abort 只挂 listener，不抛错），导致 telemetry 报「attempt
       // 正常结束」而实际上 worker 是被 abort 的——debug log 上一片绿色，定位
-      // bug 极其痛苦。从闭包读回真实值：timer 触发了 → true.
+      // bug 极其痛苦。从闭包读回真实值：failureReason 已设 → true，并通过
+      // failureReason 把 timer 来源传下去（ttft/idle/ceiling）。
       debugLog.info('sub_agent', 'sub_agent:worker:attempt:done', {
         role: opts.role,
         modelId: opts.model.id,
         attempt: attemptNumber,
         attemptDurationMs,
-        timedOut,
+        timedOut: timedOut(),
+        failureReason,
         outputFileExists: exists,
       });
+
+      // Fix Y（Subtask 8.8）：silent-write fallback。本地 proxy 把 fs_create_file
+      // tool call 一并发完、不发后续 text 时，rawText 为空但 file 已落地——直接
+      // 合成 handoff JSON 让 assembleHandoff 走 success path。Retry 不会让
+      // deterministic 行为变好，徒增 attempts=2 后 fail-fast 的 ceiling 风险。
+      // Detection 在 `synthesizeSilentWriteHandoff`；decision 仍走 assembleHandoff
+      // branch 6 (success path)——零修改 assembleHandoff、零回归。
+      let effectiveRawText = rawText;
+      let effectiveJson = json;
+      const synthesized = synthesizeSilentWriteHandoff({
+        rawText,
+        json,
+        declaredOutputPath: opts.outputPath,
+        outputFileExists: exists,
+      });
+      if (synthesized !== null) {
+        effectiveRawText = synthesized.rawText;
+        effectiveJson = synthesized.json;
+        debugLog.info('sub_agent', 'sub_agent:worker:handoff:synthesized', {
+          role: opts.role,
+          modelId: opts.model.id,
+          attempt: attemptNumber,
+          reason: 'silent_write_with_output_file_present',
+          declaredOutputPath: opts.outputPath,
+          rawTextLength: rawText.length,
+          outputFileExists: exists,
+        });
+      }
 
       result = assembleHandoff({
         runnerOk: true,
         role: opts.role,
         modelKey: opts.modelKey,
-        rawText,
-        json,
+        rawText: effectiveRawText,
+        json: effectiveJson,
         outputFileExists: exists,
         ...(content !== undefined ? { outputContent: content } : {}),
         ...(opts.outputPath ? { declaredOutputPath: opts.outputPath } : {}),
@@ -878,8 +1158,16 @@ interface RunWorkerAttemptOptions {
     } catch (e) {
       const attemptDurationMs = Math.round(performance.now() - attemptStartedAt);
       const isAbort = composedController.signal.aborted;
-      const runnerError = timedOut
-        ? `Worker timed out after ${WORKER_TIMEOUT_MS}ms (model "${opts.modelKey}" did not respond)`
+      // Failure reason 已设 → 给可读的错误文案（含模型 key + 是哪种 timeout）。
+      // 老的「Worker timed out after 120000ms (model did not respond)」对诊断
+      // 不够友好：ttft / idle / ceiling 的修复路径不一样，下面用对应文案。
+      const reason = failureReason;
+      const runnerError = reason
+        ? reason === 'ttft'
+          ? `Worker timed out: no first token within ${WORKER_TTFT_MS}ms (model "${opts.modelKey}" did not respond)`
+          : reason === 'idle'
+          ? `Worker timed out: stream idle for ${WORKER_IDLE_MS}ms (model "${opts.modelKey}" stalled)`
+          : `Worker timed out after ${attemptCeilingMs}ms (model "${opts.modelKey}" did not respond)`
         : isAbort
           ? 'Aborted'
           : e instanceof Error ? e.message : String(e);
@@ -888,19 +1176,19 @@ interface RunWorkerAttemptOptions {
         modelId: opts.model.id,
         attempt: attemptNumber,
         attemptDurationMs,
-        timedOut,
-        parentAborted: isAbort && !timedOut,
+        failureReason: reason,
+        parentAborted: isAbort && reason === undefined,
         error: e instanceof Error ? e.message : String(e),
       });
       // 修：原来这里 `outputFileExists: false` 写死，导致 timeout path 永远
       // 看不到「worker 实际已经写了一半文件」的事实——Phase 1.4 的 smart retry
       // 决策需要知道这一点：file 存在 → retry 让 worker 写完；file 不存在 →
-      // 再跑 120s 也是同样结局，fail-fast。Non-timeout catch（parent abort /
+      // 再跑 ceiling 也是同样结局，fail-fast。Non-timeout catch（parent abort /
       // 真 exception）保持 `false`，zero regression——那些路径本来就不该 retry。
       // 只读 `exists` 标志：branch 1 的 handoff 不携带 output_content（失败
       // handoff 塞部分内容会改变主代理看到的信息面，超出本次修复范围）。
       let timeoutOutputExists = false;
-      if (timedOut && opts.outputPath) {
+      if (reason !== undefined && opts.outputPath) {
         try {
           const r = await readOutputIfAny(opts.outputPath);
           timeoutOutputExists = r.exists;
@@ -920,14 +1208,17 @@ interface RunWorkerAttemptOptions {
         modelKey: opts.modelKey,
         rawText: '',
         json: null,
-        outputFileExists: timedOut ? timeoutOutputExists : false,
+        outputFileExists: reason !== undefined ? timeoutOutputExists : false,
         attempts: opts.attempt,
         attemptDurationMs,
-        ...(timedOut ? { timedOut: true } : {}),
+        ...(timedOut() ? { timedOut: true } : {}),
+        ...(reason !== undefined ? { failureReason: reason } : {}),
       });
     }
   } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    if (ttftHandle !== undefined) clearTimeout(ttftHandle);
+    if (idleHandle !== undefined) clearTimeout(idleHandle);
+    if (ceilingHandle !== undefined) clearTimeout(ceilingHandle);
     if (opts.signal) opts.signal.removeEventListener('abort', onParentAbort);
     releaseKeepAlive();
   }

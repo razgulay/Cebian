@@ -14,10 +14,19 @@ import {
   composeRetryPrompt,
   filterToolsForRole,
   shouldRetry,
+  synthesizeSilentWriteHandoff,
   type AssembleHandoffArgs,
   type PromptContext,
   type WorkerHandoff,
 } from '@/entrypoints/background/agent/worker-runner';
+import {
+  resolveWorkerRoleTimeoutMs,
+  resolvePhaseTimeout,
+  WORKER_IDLE_MS,
+  WORKER_TIMEOUT_MS,
+  WORKER_TTFT_MS,
+} from '@/lib/agent/worker-roles';
+import { extractJsonOrRaw } from '@/lib/agent/json-extract';
 import type { WorkerRole } from '@/lib/persistence/storage';
 
 function stubTool(name: string): AgentTool<any> {
@@ -44,6 +53,54 @@ const UNIVERSE: readonly AgentTool<any>[] = [
   stubTool('delegate_dom'),
 ];
 
+describe('resolveWorkerRoleTimeoutMs (Phase 1.5 per-role ceiling helper)', () => {
+  // Resolution 顺序（高→低）：overrideMap → role registry 默认 → 全局 WORKER_TIMEOUT_MS
+  it('overrideMap 提供 → 用 override', () => {
+    expect(
+      resolveWorkerRoleTimeoutMs('frontend_coder', { frontend_coder: 60_000 }),
+    ).toBe(60_000);
+  });
+
+  it('overrideMap 提供 0 / 负数 → 落到 registry 默认（不能被 0 短路）', () => {
+    // 0 / 负数都不是合法 override（用户 UI 也不允许选 0），应当回退到下一层。
+    // 把这条 case 钉死——helper 内部的 `> 0` 守卫不可绕。
+    expect(
+      resolveWorkerRoleTimeoutMs('frontend_coder', { frontend_coder: 0 }),
+    ).toBe(300_000); // registry default
+    expect(
+      resolveWorkerRoleTimeoutMs('frontend_coder', { frontend_coder: -5 }),
+    ).toBe(300_000);
+  });
+
+  it('overrideMap 提供，但 role 不 match → 用 registry 默认', () => {
+    expect(
+      resolveWorkerRoleTimeoutMs('content_writer', { frontend_coder: 60_000 }),
+    ).toBe(120_000); // content_writer registry default
+  });
+
+  it('overrideMap 不传 → 用 registry 默认', () => {
+    expect(resolveWorkerRoleTimeoutMs('frontend_coder')).toBe(300_000);
+    expect(resolveWorkerRoleTimeoutMs('content_writer')).toBe(120_000);
+    expect(resolveWorkerRoleTimeoutMs('reviewer')).toBe(90_000);
+    expect(resolveWorkerRoleTimeoutMs('researcher')).toBe(90_000);
+  });
+
+  it('overrideMap 不传且 registry 没填（模拟未来扩展 role 没给默认） → 用 WORKER_TIMEOUT_MS', () => {
+    // 用一个 type cast bypass：因为 `WorkerRole` 联合只有 4 个 literal，这
+    // 里临时塞个 'unknown_role' 模拟「role 不在 registry」情况——helper 内
+    // 部用可选链读 timeoutMs，read undefined → fallback WORKER_TIMEOUT_MS。
+    expect(
+      resolveWorkerRoleTimeoutMs('unknown_role' as unknown as WorkerRole),
+    ).toBe(WORKER_TIMEOUT_MS);
+  });
+
+  it('overrideMap 是 partial → 未列出的 role 走各自默认', () => {
+    expect(
+      resolveWorkerRoleTimeoutMs('content_writer', { frontend_coder: 60_000 }),
+    ).toBe(120_000); // content_writer 本 role 的 override 没设，走默认
+  });
+});
+
 describe('filterToolsForRole', () => {
   it('content_writer 拿到 6 个 fs/rag 工具，不含 execute_js / inspect / 禁词', () => {
     const tools = filterToolsForRole(UNIVERSE, 'content_writer');
@@ -63,9 +120,13 @@ describe('filterToolsForRole', () => {
     expect(names).toEqual(['fs_read_file', 'fs_create_file', 'fs_edit_file', 'fs_list']);
   });
 
-  it('reviewer 有 fs_读 + execute_js + inspect，无写工具', () => {
+  it('reviewer 只有 fs_读 + fs_list，无写/无 verify 工具（Subtask 8.7）', () => {
+    // Subtask 8.7：实测 inspect / execute_js 在 reviewer SW-background
+    // worker 上下文里 9/9 次 errored（拿不到 active tab），claude fallback
+    // 多读文件突破 rule 1 "最多 3 次" cap。把两个 verify 工具砍掉后，
+    // reviewer 唯一路径是「读 → 推理 → emit」。
     const names = filterToolsForRole(UNIVERSE, 'reviewer').map((t) => t.name);
-    expect(names).toEqual(['fs_read_file', 'fs_list', 'inspect', 'execute_js']);
+    expect(names).toEqual(['fs_read_file', 'fs_list']);
   });
 
   it('researcher 有 fs_读 + rag_inspect，无浏览器工具', () => {
@@ -131,29 +192,37 @@ describe('assembleHandoff', () => {
     expect(h.summary).toBe('Worker run failed');
   });
 
-  // ── Phase 1.4: timeout + output file 区分 retryable / fail-fast ──
-  it('timeout + output file 存在 → retryable:true（mechanical self-heal，retry 接着写完）', () => {
-    // Worker 被 120s hard abort 中途, 但 output file 已存在 → retry
-    // 让他写完比 fail-fast 友好. 这是 Phase 1.4 新加的例外分支.
+  // ── Phase 1.5: timeout + output file 区分 retryable / fail-fast ──
+  // Phase 1.4 时代的「timeout + file 存在 → retryable:true」逻辑不变，
+  // 但 trigger 从「timedOut:true」改成「failureReason ∈ ttft/idle/timeout/ceiling」
+  // (failureReason 是元数据). 这里两个 case 显式挂 `failureReason: 'timeout'`
+  // (legacy world) 验证老 timer 路径（理论上不再 hit）仍走 self-heal.
+  it('failureReason:timeout + output file 存在 → retryable:true (Phase 1.4 legacy smart retry)', () => {
+    // Worker 被 hard abort 中途, 但 output file 已存在 → retry 让他写完比
+    // fail-fast 友好. legacy 'timeout' 是老 120s hard cap, 现在理论上不会
+    // hit, 但 assembleHandoff 仍按同语义处理（兼容老 debug log / 老 caller).
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
-      runnerError: 'Worker timed out after 120000ms',
+      runnerError: `Worker timed out after ${WORKER_TIMEOUT_MS}ms`,
       timedOut: true,
+      failureReason: 'timeout',
       outputFileExists: true,
     });
     expect(h.ok).toBe(false);
     expect(h.timedOut).toBe(true);
+    expect(h.failureReason).toBe('timeout');
     expect(h.retryable).toBe(true);
     expect(h.status).toBe('failed');
   });
 
-  it('timeout + output file 不存在 → retryable:false（fail-fast）', () => {
-    // Timeout 但 file 不存在 → 同一 model + prompt 再跑 120s 还会卡,
-    // 不要再 retry. 配 shouldRetry 测 一起钉死「不会再重试」.
+  it('failureReason:timeout + output file 不存在 → retryable:false (fail-fast)', () => {
+    // Timeout 但 file 不存在 → 同一 model + prompt 再跑 ceiling 还是空,
+    // 不要再 retry. 配 shouldRetry 测一起钉死「不会再重试」.
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
-      runnerError: 'Worker timed out after 120000ms',
+      runnerError: `Worker timed out after ${WORKER_TIMEOUT_MS}ms`,
       timedOut: true,
+      failureReason: 'timeout',
       outputFileExists: false,
     });
     expect(h.ok).toBe(false);
@@ -164,7 +233,7 @@ describe('assembleHandoff', () => {
   it('non-timeout runner error (parent abort / exception) → retryable:false（zero regression）', () => {
     // 保持原原则: non-timeout runner-level error 永不
     // retry (重试不会让它消失). 即便 outputFileExists=true, timedOut=false
-    // → retryable 仍须为 false.
+    // 且 failureReason 缺失 → retryable 仍须为 false.
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
       runnerError: 'Aborted',
@@ -418,34 +487,98 @@ describe('assembleHandoff', () => {
 // 返回 false。配套断言 `attemptDurationMs` 在所有分支都透传到 handoff。
 
 describe('assembleHandoff: Fail-Fast (timeout / abort)', () => {
-  it('runnerOk=false + timedOut:true + file 存在 → retryable:true (Phase 1.4 smart retry)', () => {
+  it('runnerOk=false + failureReason:ttft + file 存在 → retryable:true + failureReason 透传', () => {
+    // Phase 1.5: 取代 Phase 1.4 的「统一 tim:true + file 存在」。现在细化到
+    // 4 种 timer 来源（ttft/idle/timeout/ceiling），每种路径都共享「file 存
+    // 在 → retryable:true」的 self-heal 语义。
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
-      runnerError: 'Worker timed out after 120000ms (model "anthropic/claude-opus-4-1" did not respond)',
+      runnerError: `Worker timed out: no first token within ${WORKER_TTFT_MS}ms (model "anthropic/claude-opus-4-1" did not respond)`,
       timedOut: true,
-      attemptDurationMs: 120_000,
+      failureReason: 'ttft',
+      attemptDurationMs: 45_000,
       outputFileExists: true,
     });
     expect(h.ok).toBe(false);
     expect(h.status).toBe('failed');
     expect(h.timedOut).toBe(true);
-    expect(h.attemptDurationMs).toBe(120_000);
-    // Phase 1.4: timeout + file 存在 → retryable (mechanical self-heal)
+    expect(h.failureReason).toBe('ttft');
+    expect(h.attemptDurationMs).toBe(45_000);
+    // Phase 1.5: failureReason + file 存在 → retryable (mechanical self-heal)
     expect(h.retryable).toBe(true);
   });
 
-  it('runnerOk=false + timedOut:true + file 不存在 → retryable 缺失（fail-fast）', () => {
+  it('runnerOk=false + failureReason:idle + file 存在 → retryable:true (idle 自愈续写)', () => {
     const h = assembleHandoff({
       ...baseArgs({ runnerOk: false }),
-      runnerError: 'Worker timed out after 120000ms (model "anthropic/claude-opus-4-1" did not respond)',
+      runnerError: `Worker timed out: stream idle for ${WORKER_IDLE_MS}ms (model "anthropic/claude-opus-4-1" stalled)`,
       timedOut: true,
-      attemptDurationMs: 120_000,
+      failureReason: 'idle',
+      attemptDurationMs: 92_000,
+      outputFileExists: true,
+    });
+    expect(h.failureReason).toBe('idle');
+    expect(h.attemptDurationMs).toBe(92_000);
+    expect(h.retryable).toBe(true);
+  });
+
+  it('runnerOk=false + failureReason:ceiling + file 存在 → retryable:true (ceiling 兜底自愈)', () => {
+    // ceiling 替代了 Phase 1.4 的固定 120s wall-clock；是 idle/ttft 漏掉时
+    // 的兜底。retry 行为与 idle 一致——file 存在就让 worker 接着写。
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker timed out after 300000ms (model "anthropic/claude-opus-4-1" did not respond)',
+      timedOut: true,
+      failureReason: 'ceiling',
+      attemptDurationMs: 300_000,
+      outputFileExists: true,
+    });
+    expect(h.failureReason).toBe('ceiling');
+    expect(h.attemptDurationMs).toBe(300_000);
+    expect(h.retryable).toBe(true);
+  });
+
+  it('runnerOk=false + failureReason:ttft + file 不存在 → retryable 缺失（fail-fast；endpoint 真挂了 retry 无意义）', () => {
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: `Worker timed out: no first token within ${WORKER_TTFT_MS}ms (model "anthropic/claude-opus-4-1" did not respond)`,
+      timedOut: true,
+      failureReason: 'ttft',
+      attemptDurationMs: 45_000,
       outputFileExists: false,
     });
-    expect(h.ok).toBe(false);
-    expect(h.status).toBe('failed');
+    expect(h.failureReason).toBe('ttft');
+    // failureReason + file 不存在 → fail-fast（一旦 file 不存在，再跑
+    // 一次 ceiling 大概率还是空，fail-fast 更友好）。
+    expect(h.retryable).toBeUndefined();
+  });
+
+  it('runnerOk=false + failureReason:idle + file 不存在 → retryable 缺失（idle fail-fast）', () => {
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: `Worker timed out: stream idle for ${WORKER_IDLE_MS}ms`,
+      timedOut: true,
+      failureReason: 'idle',
+      attemptDurationMs: 30_000,
+      outputFileExists: false,
+    });
+    expect(h.failureReason).toBe('idle');
+    expect(h.retryable).toBeUndefined();
+  });
+
+  it('runnerOk=false + failureReason 缺失（应不应该挂字段）→ 兼容旧 world', () => {
+    // 旧 caller 没挂 failureReason。assembleHandoff 用 `args.failureReason && ...`
+    // 检查（短路），无字段 → 走「non-timeout」分支 → retryable:false.
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: `Worker timed out after ${WORKER_TIMEOUT_MS}ms`,
+      timedOut: true,
+      attemptDurationMs: 120_000,
+      outputFileExists: true,
+    });
+    // 仅 timedOut:true → 老字段仍透传；没有 failureReason → 不显式挂
     expect(h.timedOut).toBe(true);
-    // timeout + file 不存在 → fail-fast, retryable 缺失 → shouldRetry 返回 false
+    expect(h.failureReason).toBeUndefined();
     expect(h.retryable).toBeUndefined();
   });
 
@@ -805,27 +938,48 @@ describe('shouldRetry', () => {
     expect(shouldRetry({ ...baseOk, ok: false, timedOut: false, attempts: 1 })).toBe(false);
   });
 
-  it('runnerOk=false + timedOut=true → true（Phase 1.4 新例外：timeout 自愈）', () => {
-    // New in Phase 1.4. assembleHandoff 只在 timeout+outputFileExists
-    // 时才设 retryable=true, 这里喂一个 retryable:true + ok:false +
-    // timedOut:true, shouldRetry 应该 true. retryable 缺失 → false.
+  it('runnerOk=false + timedOut=true + failureReason:idle → true（idle 自愈续写）', () => {
+    // Phase 1.5: failureReason 是元数据，不影响 shouldRetry 谓词；assembleHandoff
+    // 在 failureReason + file 存在 时设 retryable=true, 所以这里 retryable
+    // 已 true → shouldRetry 返回 true。failureReason 是给 UI / LLM 看的修复
+    // 指引，不参与 retry 决策本身。
     expect(
       shouldRetry({
         ...baseOk,
         ok: false,
         timedOut: true,
+        failureReason: 'idle',
         attempts: 1,
       }),
     ).toBe(true);
+  });
+
+  it('runnerOk=false + failureReason:ttft + retryable:true + timedOut:true → true（ttft 也可 retry 若 file 存在）', () => {
+    // 旧 comment 说「ttft retry 没用」是过度悲观。endpoint 真挂了 retry 确实
+    // 没用，但 worker 若已经写一半 file, 让 retry 续写比 fail-fast 友好。
+    // assembleHandoff 在 failureReason+file 存在 时设 retryable=true ——
+    // 这个 case 是「模拟 retryable 真被设上」的输入，shouldRetry 应该 true。
     expect(
       shouldRetry({
         ...baseOk,
         ok: false,
         timedOut: true,
-        retryable: undefined,
+        failureReason: 'ttft',
         attempts: 1,
       }),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it('runnerOk=false + failureReason:ceiling + timedOut:true + attempts=1 → true（ceiling 自愈）', () => {
+    expect(
+      shouldRetry({
+        ...baseOk,
+        ok: false,
+        timedOut: true,
+        failureReason: 'ceiling',
+        attempts: 1,
+      }),
+    ).toBe(true);
   });
 
   it('attempts=2（timeout 路径已自愈过一次） → false（单次自愈硬上限）', () => {
@@ -861,5 +1015,176 @@ describe('shouldRetry', () => {
 
   it('attempts 缺失 → 仍按「还没 retry」处理（attempts !== 2 通过）', () => {
     expect(shouldRetry(baseOk)).toBe(true);
+  });
+});
+
+// ─── resolvePhaseTimeout (Subtask 7) ────────────────────────────────────────
+// Pure helper。决定 idle 阈值 = ceiling 还是 WORKER_IDLE_MS。emit 阶段用
+// ceiling 兜底 proxy buffer tool-call 的 silent gap；其它阶段用 180s。决策
+// 表必须钉死——helper 改一个 if 就可能让 Kimi K3 / GPT 5.5 又被 180s idle
+// 误杀。
+describe('resolvePhaseTimeout (Subtask 7 phase-aware idle)', () => {
+  // 用 frontend_coder 默认 ceiling（300s）作为代表。
+  const CEILING = 300_000;
+
+  it('emitting → ceiling（关键修复：buffer proxy 不被 180s 误杀）', () => {
+    expect(resolvePhaseTimeout('emitting', CEILING)).toBe(CEILING);
+  });
+
+  it('emitting 接收 ceiling=180s 时仍返回 180s（不是 0/常量）', () => {
+    // 防回归：万一有人「优化」成 phase==emitting ? WORKER_IDLE_MS : ceiling
+    // （反向映射），所有 emit-phase idle 又变 180s——Subtask 7 直接失效。
+    expect(resolvePhaseTimeout('emitting', 180_000)).toBe(180_000);
+  });
+
+  it('between_turns → WORKER_IDLE_MS (180s)', () => {
+    expect(resolvePhaseTimeout('between_turns', CEILING)).toBe(WORKER_IDLE_MS);
+  });
+
+  it('tool_running → WORKER_IDLE_MS (180s)', () => {
+    expect(resolvePhaseTimeout('tool_running', CEILING)).toBe(WORKER_IDLE_MS);
+  });
+
+  it('before_ttft → WORKER_IDLE_MS (180s)（caller 不该在这一阶段调，兜底返回 180s）', () => {
+    // before_ttft 由 TTFT timer 独管，armPhaseTimer 在 before_ttft 阶段直接
+    // return，不调 resolvePhaseTimeout。但万一误调，也给一个 sane 值，不
+    // 让 phase 进 0 / NaN 这种边界。
+    expect(resolvePhaseTimeout('before_ttft', CEILING)).toBe(WORKER_IDLE_MS);
+  });
+
+  it('ceiling < WORKER_IDLE_MS 时仍按 phase 决策（不强行 clamp）', () => {
+    // 极小 ceiling（如用户 override 到 60s）不会因为 phase 切换而被放大
+    // 到 WORKER_IDLE_MS——决策函数只决定「用 ceiling 还是 IDLE」，不
+    // 强制 ≥180s。callers 应自行 sanity-check。
+    expect(resolvePhaseTimeout('emitting', 60_000)).toBe(60_000);
+    expect(resolvePhaseTimeout('between_turns', 60_000)).toBe(WORKER_IDLE_MS);
+  });
+});
+
+// ─── synthesizeSilentWriteHandoff (Subtask 8.8 Fix Y) ───────────────────────
+//
+// Local-proxy silent-write fallback。Minimax-M3 via vilao.ai 等本地代理会
+// buffer 整个 tool-call argument 流，message_end 时 `rawText` 为空但 VFS 里
+// 实际已写入 output file。Runner 在 assembleHandoff 之前调这个 helper：满足
+// all 4 trigger 就合成最小 handoff，让 assembleHandoff 走 success path。不
+// 满足 → 返回 null，让 assembleHandoff 走既有分支（parse fail / file missing
+// 等），零回归。
+describe('synthesizeSilentWriteHandoff (Subtask 8.8 Fix Y silent-write fallback)', () => {
+  // All 4 triggers met 时返回 synthesized {rawText, json}。这是正常路径。
+  it('rawText="" + json=null + file 存在 + declaredOutputPath 有 → 返回合成 handoff', () => {
+    const r = synthesizeSilentWriteHandoff({
+      rawText: '',
+      json: null,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(r).not.toBeNull();
+    // rawText 等于 json（合成出来的 rawText 直接喂 assembleHandoff）
+    expect(r!.rawText).toBe(r!.json);
+    // JSON 内容断言
+    const parsed = JSON.parse(r!.json);
+    expect(parsed.status).toBe('success');
+    expect(parsed.output_file).toBe('/workspaces/abc/studio.html');
+    expect(parsed.summary.length).toBeGreaterThan(0);
+    expect(parsed.handoff_notes.length).toBeGreaterThan(0);
+    // 显式标注「runner synthesized」——避免掩盖 proxy 行为异常
+    expect(parsed.handoff_notes.toLowerCase()).toContain('synthesized');
+  });
+
+  it('合成 JSON 经 extractJsonOrRaw round-trip 仍可抽到（assembleHandoff branch 2 不会误判）', () => {
+    const r = synthesizeSilentWriteHandoff({
+      rawText: '',
+      json: null,
+      declaredOutputPath: '/workspaces/abc/out.txt',
+      outputFileExists: true,
+    });
+    // 直接拿合成 rawText 喂 extractJsonOrRaw：应当能抽回 json（code-block 形式）
+    const { json: reExtracted } = extractJsonOrRaw(r!.rawText);
+    expect(reExtracted).not.toBeNull();
+    const parsed = JSON.parse(reExtracted!);
+    expect(parsed.status).toBe('success');
+    expect(parsed.output_file).toBe('/workspaces/abc/out.txt');
+  });
+
+  // ── 4 个 no-trigger case：每个都「差一点」就该返回 null，让 assembleHandoff 走既有分支
+
+  it('file 不存在 → null（让 assembleHandoff branch 5 / 2 各走各的）', () => {
+    // 即使 declaredOutputPath 给了 + rawText 空 + json null，文件不在 → 不合
+    // 成。worker 真没写文件就该 fail，不该被 silent-write 兜底。
+    expect(
+      synthesizeSilentWriteHandoff({
+        rawText: '',
+        json: null,
+        declaredOutputPath: '/workspaces/abc/out.txt',
+        outputFileExists: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('declaredOutputPath 缺失 → null（caller 没钉产物路径，无文件语义可谈）', () => {
+    expect(
+      synthesizeSilentWriteHandoff({
+        rawText: '',
+        json: null,
+        declaredOutputPath: undefined,
+        outputFileExists: true,
+      }),
+    ).toBeNull();
+  });
+
+  it('json 已 parse 成功（model 给过有效 handoff）→ null（不要覆盖有效 handoff）', () => {
+    // worker 既写了 file 又出了 valid JSON——正常 success path，不该被 silent
+    // fallback 覆盖。即便 rawText 是空（边界），有 json 就走 branch 6 success。
+    expect(
+      synthesizeSilentWriteHandoff({
+        rawText: '',
+        json: '{"status":"success","output_file":"out.txt"}',
+        declaredOutputPath: '/workspaces/abc/out.txt',
+        outputFileExists: true,
+      }),
+    ).toBeNull();
+  });
+
+  it('rawText 非空但 json=null（model 写了 prose 忘 JSON shape）→ null', () => {
+    // 这是另一种失败模式：模型写了 prose 但忘了 JSON shape。Retry 让它记得
+    // 写 JSON 比 silent-write 合成更有价值（prose 里可能有诊断信息）。保留
+    // 走 assembleHandoff branch 2 (parse fail + retryable)。
+    expect(
+      synthesizeSilentWriteHandoff({
+        rawText: 'I forgot to produce JSON this time.',
+        json: null,
+        declaredOutputPath: '/workspaces/abc/out.txt',
+        outputFileExists: true,
+      }),
+    ).toBeNull();
+  });
+
+  // ── Integration：合成结果喂 assembleHandoff，应得 status:success + 挂 output_content
+
+  it('合成结果 + assembleHandoff round-trip → status:success + output_content 挂载', () => {
+    // 这是端到端验证：Fix Y 真在 runner 里被消费时，assembleHandoff 看到
+    // status: 'success' + outputFileExists=true + declaredOutputPath + outputContent
+    // → 走 branch 6，挂 output_content，no retryable, no error。
+    const r = synthesizeSilentWriteHandoff({
+      rawText: '',
+      json: null,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(r).not.toBeNull();
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: true }),
+      rawText: r!.rawText,
+      json: r!.json,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+      outputContent: '<html><body>Hello</body></html>',
+    });
+    expect(h.ok).toBe(true);
+    expect(h.status).toBe('success');
+    expect(h.output_file).toBe('/workspaces/abc/studio.html');
+    expect(h.output_content).toBe('<html><body>Hello</body></html>');
+    expect(h.retryable).toBeUndefined();
+    expect(h.error).toBeUndefined();
   });
 });

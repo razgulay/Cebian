@@ -236,11 +236,26 @@ settings:
         hint: "Writes HTML / CSS / JS into a VFS file. No browser tools."
       reviewer:
         label: "Reviewer"
-        hint: "Reads the worker's output and tests it via inspect / execute_js."
+        # Subtask 8.7：whitelist 已砍掉 execute_js / inspect（SW-background
+        # worker 拿不到 active tab，工具 9/9 errored），hint 同步改成「读 →
+        # 推理 → emit findings」。
+        hint: "Reads up to 3 files and emits findings as a text handoff. Cannot modify files or invoke browser tools."
       researcher:
         label: "Researcher"
         hint: "Searches files and RAG collections to produce a structured summary."
       # Future: add custom roles here when the feature lands.
+      # Per-role attempt timeout (Phase 1.5) — outer wall-clock cap. Idle window
+      # of 20s still resets on every token / tool result; this only fires if the
+      # stream genuinely stalls past the chosen preset.
+      timeout:
+        label: "Timeout"
+        # $1 = effective ceiling in seconds (resolved from override / registry default)
+        activeHint: "($1s ceiling)"
+        default: "Default"
+        preset60: "60 s"
+        preset120: "2 min"
+        preset300: "5 min"
+        preset600: "10 min"
   pageInteraction:
     title: "Page interaction"
     ball:

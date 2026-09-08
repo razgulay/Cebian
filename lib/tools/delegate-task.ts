@@ -63,12 +63,21 @@ const DelegateTaskParameters = Type.Object({
     Type.Literal('reviewer'),
     Type.Literal('researcher'),
   ], {
+    // Subtask 8.9：在 role schema description 加 Fast Lane routing hint——
+    // HTML / dashboard / interactive-demo deliverable 直接走 `frontend_coder`，
+    // 不经 `content_writer` 文字润色（实测 cebian-debug-20260907-183300.json
+    // 主代理把 161 KB HTML 喂 content_writer 触发 4 次冗余 fs_edit_file、
+    // 26–63s re-deliberation 一次，120s ceiling fire）。与
+    // `<available-workers>` PREAMBLE 同句双布：tool schema 这一层在主代理
+    // 选定具体 worker 时还会再 trigger 一次，defense in depth。reviewer
+    // 描述顺便纠正 Subtask 8.7 之前的旧措辞（"execute_js / inspect"）。
     description:
       'Which fixed worker role to dispatch. Each role has a different tool whitelist and system prompt — ' +
       'pick the one that matches the task type, not a generic "do it" worker. ' +
-      'content_writer: long-form text into VFS (markdown / lesson plans / articles). ' +
+      'content_writer: long-form text into VFS (markdown / lesson plans / articles), NOT for HTML artifacts. ' +
       'frontend_coder: HTML / CSS / JavaScript into VFS, no browser tools. ' +
-      'reviewer: read-only + execute_js / inspect to test code; cannot modify files. ' +
+      'Fast Lane: for HTML / dashboard / interactive-demo deliverables use `frontend_coder` directly. ' +
+      'reviewer: read-only static text audit of generated artifacts (no DOM execution available); ' +
       'researcher: read VFS + query RAG collections; output is structured text or a new VFS file.',
   }),
   model_override: Type.Optional(Type.String({
@@ -113,12 +122,16 @@ const DelegateTaskParameters = Type.Object({
       '"Do not fabricate quotes" beats "be careful with citations".',
   })),
 }, {
+  // Subtask 8.9：在 top-level description 加 Fast Lane routing 提点（一行，
+  // 不展开论证——论证在 role param description 和 PREAMBLE 里），让 LLM 在
+  // 选 role 之前就先记住 HTML → frontend_coder 的硬约束。
   description:
     'Delegate a sub-task to a fixed worker role (content_writer / frontend_coder / reviewer / researcher). ' +
     'The worker runs as an isolated sub-agent and communicates via VFS files, not the chat context. ' +
     'On success returns the handoff JSON + (truncated) output file content. ' +
     'On failure returns the handoff JSON with status="failed" — read `handoff_notes` to decide whether to retry, ' +
-    'refine the task, or escalate to the user.',
+    'refine the task, or escalate to the user. ' +
+    'Fast Lane: HTML / dashboard / interactive-demo deliverables go to `frontend_coder`, NOT `content_writer`.',
 });
 
 // ─── Helpers (internal) ───

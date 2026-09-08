@@ -240,6 +240,21 @@ export const workerTeamEnabled = defineLoggedItem<boolean>(
   { fallback: true },
 );
 
+/** Per-role 超时覆盖（ms）。每个 role 的 runner ceiling 用户可手动调——典型
+ *  用途是给 frontend_coder 提到 5–10 分钟（写 3–5K LOC），给 reviewer / researcher
+ *  收到 60s（他们跑得快）。`undefined` = 该 role 用 registry 默认（见
+ *  `lib/agent/worker-roles.ts` 的 `WORKER_ROLES[role].timeoutMs`）。
+ *  与 `workerModels` 同形态：`Partial<Record<WorkerRole, ...>>`，加新 role
+ *  只需扩 `WorkerRole` 联合类型，UI / storage / 决议 helper 共用一份 schema。
+ *  In-flight：用户在 attempt 跑中调阈值不影响当前 attempt（attempt 启动时
+ *  一次性 resolve 进 composedController），下次 attempt 生效。 */
+export type WorkerTimeoutMap = Partial<Record<WorkerRole, number>>;
+
+export const workerRoleTimeouts = defineLoggedItem<WorkerTimeoutMap>(
+  'local:workerRoleTimeouts',
+  { fallback: {} },
+);
+
 export const customProviders = defineLoggedItem<CustomProviderConfig[]>(
   'local:customProviders',
   { fallback: [] },

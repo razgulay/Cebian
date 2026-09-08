@@ -6,6 +6,8 @@ import { TOOL_DELEGATE_DOM, TOOL_DELEGATE_TASK } from '@/lib/tools/names';
 import {
   WORKER_ROLES,
   WORKER_ROLE_KEYS,
+  WORKER_TTFT_MS,
+  WORKER_IDLE_MS,
   buildAvailableWorkersBlock,
   getRoleConfig,
   getWorkerToolNames,
@@ -138,6 +140,19 @@ describe('getWorkerToolNames', () => {
     expect(tools).not.toContain('fs_mkdir');
     expect(tools).not.toContain('fs_rename');
   });
+
+  it('reviewer 白名单不含 browser-side verify 工具（Subtask 8.7）', () => {
+    // Subtask 8.7：实测 `inspect` / `execute_js` 在 reviewer SW-background
+    // worker 上下文里 9/9 次 errored（无 sidepanel active tab，工具拿不到
+    // `tabs.query({ active: true })`），claude 试了几次发现工具坏了就
+    // fallback 多读文件，把 rule 1 "最多 3 次" cap 也连带突破。把两个工具
+    // 从 reviewer whitelist 砍掉后，reviewer 唯一路径是「读 → 推理 → emit」，
+    // 与角色本意相符。这条测试钉死这条不可逆决策——下次有人把
+    // execute_js / inspect 加回 reviewer whitelist，下面的断言会失败。
+    const tools = getWorkerToolNames('reviewer');
+    expect(tools).not.toContain('execute_js');
+    expect(tools).not.toContain('inspect');
+  });
 });
 
 describe('buildAvailableWorkersBlock', () => {
@@ -234,5 +249,174 @@ describe('buildAvailableWorkersBlock', () => {
     expect(block).not.toContain('claude-opus');
     expect(block).not.toContain('claude-haiku');
     expect(block).not.toContain('Minimax');
+  });
+});
+
+// ─── Subtask 8.9: artifact-rule markers (frontend_coder + reviewer) ─────────
+//
+// Subtask 8.9 把 artifact skill (`skills/artifact/SKILL.md`) 的 hard rules 编进
+// worker systemPrompt。下面这些测试把核心关键词钉在 CI——下次有人改 prompt 时
+// 不小心丢掉任意一条，下面的 expect.toContain 会失败。比让 reviewer 复盘靠
+// 谱。Negative tests（不存在的 substring）同样要钉：Tailwind coupling 和
+// "<30s" hardcode 在 design review 时被明确剔除，必须 absent。
+describe('Subtask 8.9 — artifact-rule markers in worker prompts', () => {
+  describe('frontend_coder.systemPrompt', () => {
+    const prompt = WORKER_ROLES.frontend_coder.systemPrompt;
+
+    it('encodes artifact single-file + no storage APIs + show at rest + color tokens', () => {
+      // Rule (1) inline CSS/JS, https:// libs only
+      expect(prompt).toContain('inline CSS/JS');
+      expect(prompt).toContain('https://');
+      // Rule (2) NO localStorage / sessionStorage / document.cookie (sandbox SecurityError)
+      expect(prompt).toContain('NO localStorage');
+      expect(prompt).toContain('sessionStorage');
+      expect(prompt).toContain('document.cookie');
+      expect(prompt).toContain('SecurityError');
+      // Rule (3) initial DOM shows all content statically
+      expect(prompt).toContain('initial DOM');
+      expect(prompt).toContain('scripts enhance, not construct');
+      // Rule (4) semantic color tokens on :root for light + dark
+      expect(prompt).toContain('color tokens on :root');
+      expect(prompt).toContain('light + dark');
+      // Rule (5) one fs_create_file then handoff
+      expect(prompt).toContain('one fs_create_file then handoff');
+    });
+
+    it('preserves Subtask 8.8 silent-write fallback rule (after fs_create_file emit text)', () => {
+      // Subtask 8.8 fix is still load-bearing — Minimax-M3 silent-write bug is
+      // real and the runner-level fallback only fires if the model emits zero
+      // text. Rule 0 (universal preamble) still in place.
+      expect(prompt).toContain('After fs_create_file emit a short text handoff');
+      expect(prompt).toContain('no text = failure');
+    });
+
+    it('scope qualifier present: non-artifact branch keeps rules 2 + 4 only', () => {
+      // Generic + scope qualifier pattern: frontend_coder is NOT artifact-only.
+      // Multi-file / editing tasks keep storage-API ban + color tokens, relax
+      // the rest. This is the design-feedback Option 1.
+      expect(prompt).toContain('Non-artifact: keep rules 2 + 4');
+      expect(prompt).toContain('relax 1/3/5');
+    });
+
+    it('does NOT couple to Tailwind (design review feedback)', () => {
+      // Design feedback: artifact skill uses semantic color tokens + CSS
+      // variables, framework-agnostic. Tailwind mention in system prompt
+      // would lock the role to one CSS framework. The artifact skill's
+      // own references/design.md does not mandate Tailwind.
+      expect(prompt.toLowerCase()).not.toContain('tailwind');
+    });
+  });
+
+  describe('reviewer.systemPrompt', () => {
+    const prompt = WORKER_ROLES.reviewer.systemPrompt;
+
+    it('encodes 4 sandbox grep audit rules', () => {
+      // Rule (1) NO storage APIs as substrings
+      expect(prompt).toContain('NO localStorage');
+      expect(prompt).toContain('sessionStorage');
+      expect(prompt).toContain('document.cookie');
+      // Rule (2) all CDN use https://
+      expect(prompt).toContain('https://');
+      expect(prompt).toContain('no http://');
+      // Rule (3) :root defines color tokens for light + dark themes
+      expect(prompt).toContain(':root defines color tokens');
+      // Rule (4) layout uses CSS Grid / Flexbox with overflow-x: auto
+      expect(prompt).toContain('CSS Grid / Flexbox');
+      expect(prompt).toContain('overflow-x: auto');
+    });
+
+    it('audit method explicit (grep file content, no DOM execution available)', () => {
+      // Subtask 8.7 stripped execute_js / inspect from whitelist; reviewer is
+      // SW-background, no DOM execution. Prompt must call this out so model
+      // doesn't try to call the deleted tools.
+      expect(prompt).toContain('grepping file content');
+      expect(prompt).toContain('no DOM execution available');
+    });
+
+    it('does NOT have hardcoded "<30s" budget (rely on 90s ceiling per design feedback)', () => {
+      // Design feedback: 30s too tight for 100 KB+ HTML audit; rely on the
+      // per-role 90s ceiling to fail-fast naturally.
+      expect(prompt).not.toContain('<30s');
+      expect(prompt).not.toContain('30 seconds');
+      expect(prompt).not.toContain('30s');
+    });
+
+    it('preserves Subtask 8.6 read cap (≤ 3 files via fs_read_file) and 90s ceiling', () => {
+      // Subtask 8.6's read cap and emit-within-time rules are preserved.
+      expect(prompt).toContain('≤ 3 files via fs_read_file');
+      expect(prompt).toContain('90s ceiling');
+    });
+  });
+});
+
+// ─── Subtask 8.9: Fast Lane routing rule presence in L1 block ──────────────
+//
+// Fast Lane routing lives in 3 places (defense in depth): PREAMBLE,
+// META.content_writer.description, delegate_task tool schema (covered by
+// 8.9b + 8.9c). Tests here pin the L1-block presence + the explicit
+// "not for HTML artifacts" clarification on content_writer.description.
+describe('Subtask 8.9 — Fast Lane routing in buildAvailableWorkersBlock', () => {
+  it('PREAMBLE contains Fast Lane routing rule (HTML / dashboard → frontend_coder)', () => {
+    const block = buildAvailableWorkersBlock();
+    // Substantive markers from the routing rule body
+    expect(block).toContain('Fast Lane routing');
+    expect(block).toContain('HTML / dashboard / interactive-demo');
+    expect(block).toContain('directly to');
+    expect(block).toContain('frontend_coder');
+    // Negative constraint: explicitly forbid content_writer for HTML
+    expect(block).toContain('NOT route generated HTML through');
+    expect(block).toContain('content_writer');
+    // Concrete-number argument (mirror the existing "Why" pattern)
+    expect(block).toContain('100 KB+ HTML');
+  });
+
+  it('Fast Lane rule sits BEFORE "Do it YOURSELF" carve-outs (does not add a 4th bullet)', () => {
+    // Existing test pins exactly 3 carve-out bullets in the "Do it YOURSELF"
+    // section. Fast Lane rule is added BEFORE that section so it doesn't
+    // affect the bullet count. This test asserts positional ordering as
+    // defense against future edits that move the rule into the bullet list.
+    const block = buildAvailableWorkersBlock();
+    const fastLaneIdx = block.indexOf('Fast Lane routing');
+    const doItYourselfIdx = block.indexOf('Do it YOURSELF');
+    expect(fastLaneIdx).toBeGreaterThan(-1);
+    expect(doItYourselfIdx).toBeGreaterThan(-1);
+    expect(fastLaneIdx).toBeLessThan(doItYourselfIdx);
+  });
+
+  it('content_writer <description> clarifies "Not for HTML artifacts" (Fast Lane negative constraint)', () => {
+    // Defense in depth: PREAMBLE says "use frontend_coder for HTML", and
+    // content_writer.description says "NOT for HTML artifacts". Both layers
+    // active; LLM sees the constraint no matter which path it scans first.
+    const block = buildAvailableWorkersBlock();
+    const contentWorker = block.match(
+      /<worker>\s*<role>content_writer<\/role>[\s\S]*?<\/worker>/,
+    );
+    expect(contentWorker, '<worker> for content_worker missing').toBeTruthy();
+    expect(contentWorker![0]).toContain('Not for HTML artifacts');
+    expect(contentWorker![0]).toContain('frontend_coder');
+  });
+});
+
+// ─── Subtask 8.10: timeout constant pinning ─────────────────────────────────
+//
+// 把「plan / CHANGELOG / 运行时 / 测试」四处对齐到同一组字面量。Plan / CHANGELOG
+// 最初记的「TTFT 45s + idle 20s」是 Subtask 8.5 时期的理想值；实测落地后被调成
+// 120s/180s 以兼容 buffering proxy（Kimi K3 emit gap 227s、Minimax-M3 冷启
+// 首字节 30–60s）。这两个 pinning test 锁住真值——任何后续想改这两个常量必须
+// 同一笔 commit 里同步更新：CHANGELOG 双语条目 + 计划文件 + 这两个字面量 +
+// Subtask 8.10 写在 worker-roles.ts 里的 drift-fix docstring。少改一处 CI
+// 会直接 fail（这条 pinning test 就是这个同步强制机制）。
+describe('Subtask 8.10 — worker timeout constants pinned to runtime values', () => {
+  it('WORKER_TTFT_MS === 120_000 (Subtask 8.10 drift fix)', () => {
+    // 锁死真值（runtime tuning 后的值）。Subtask 8.5 plan 写 45_000 是理想值，
+    // 落地后被 runtime 调成 120_000。改这个字面量前请读 worker-roles.ts:287
+    // 上方的 drift-fix docstring，按那里写的同步清单走完整流程。
+    expect(WORKER_TTFT_MS).toBe(120_000);
+  });
+
+  it('WORKER_IDLE_MS === 180_000 (Subtask 8.10 drift fix)', () => {
+    // 锁死真值。Subtask 8.5 plan 写 20_000 是理想值，落地后被 runtime 调成
+    // 180_000。同上：改前请读 worker-roles.ts 上方的 drift-fix docstring。
+    expect(WORKER_IDLE_MS).toBe(180_000);
   });
 });

@@ -38,6 +38,7 @@ import {
   composerPinnedContexts,
   workerModels,
   workerTeamEnabled,
+  workerRoleTimeouts,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
@@ -349,6 +350,10 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   // 备份里——恢复后无需重新点击 chip。无密钥、无 fillMissing（merge 下保留
   // 本地偏好，避免恢复旧备份意外覆盖用户当前选择）。
   entry({ item: workerTeamEnabled, storageClass: 'settings' }),
+  // Worker Team per-role 超时覆盖（用户 UI 调整后存这里）。同 settings 分类：
+  // 是用户偏好而非密钥。无 fillMissing——merge 下保留本地调整，避免旧备份把
+  // 用户精心调过的 ceiling 重置成 role registry 默认。
+  entry({ item: workerRoleTimeouts, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',
