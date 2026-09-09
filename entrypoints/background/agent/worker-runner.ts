@@ -214,10 +214,19 @@ export interface WorkerHandoff {
    *                测试 / debug log 兼容）。
    *  - `'ceiling'`— 超过 role 的 timeoutMs（90/120/300s 等），兜底 wall-clock
    *                cap。同 `'idle'` 一样：file 存在 → retryable:true。
+   *  - `'stuck_loop'`— Subtask 9.0 新增：模型陷入 fs_read_file / fs_list
+   *                loop（同一 path ≥4 次 或 post-write ≥6 consecutive
+   *                read-only tool）被 stuck detector 强制 abort。属 deterministic
+   *                行为（同一 model + 同一 prompt 再跑还是 loop），所以
+   *                **不论 file 是否存在都 retryable:false**——assembleHandoff
+   *                branch 1 已显式排除这个 failureReason。L3 file rescue
+   *                走 synthesizeStuckLoopHandoff 走 success path（runnerOk:true），
+   *                不再走 branch 1。
    *  Undefined = 非 timeout 分支（ok:true / abort / exception），与本字段配套
    *  的 `timedOut` 字段保持正交：`timedOut` 仅 truthy iff `failureReason ∈
-   *  {ttft, idle, timeout, ceiling}`. */
-  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling';
+   *  {ttft, idle, timeout, ceiling}`. `'stuck_loop'` 时 `timedOut` 也为
+   *  true（detector 通过 abort 触发失败，与 timer 触发同姿态）。 */
+  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling' | 'stuck_loop';
   /** Batch result：仅 batch dispatch 时有值。`batch.length === tasks.length`，
    *  顺序与 tasks 一致。每个 item 是独立的 WorkerHandoff（自己的 ok / status /
    *  attempts / failureReason）—— 一个 item 失败不影响 siblings。 */
@@ -332,8 +341,10 @@ export interface AssembleHandoffArgs {
    *  handoff.attemptDurationMs，让 log / UI 能诊断「跑了 X ms 后失败」。 */
   attemptDurationMs?: number;
   /** 哪段 timer 触发 fail-fast（与 `timedOut` 同时设）。undefined = branch 1
-   *  但不是 timeout 引起（caller abort / model exception）。 */
-  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling';
+   *  但不是 timeout 引起（caller abort / model exception）。Subtask 9.0 增加
+   *  `'stuck_loop'` —— 由 stuck detector 主动 abort 触发，行为同 timeout
+   *  路径但**永不 retryable**（deterministic）。 */
+  failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling' | 'stuck_loop';
 }
 
 /**
@@ -385,7 +396,19 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
     //   - ttft / idle / ceiling + file 不存在 → retryable:false（fail-fast）
     //   - non-timeout（parent abort / exception）→ retryable:false（保持
     //     原原则, zero regression）
-    if (args.failureReason && args.outputFileExists) {
+    //
+    // Subtask 9.0: `'stuck_loop'` 显式除外——这是 deterministic 行为
+    // （Minimax-M3 / vilao.ai proxy re-read 同 file 已被 reproduce 验证
+    // 100% 复现, cebian-debug-20260909-163313.json）。不论 file 是否
+    // 存在 retry 都无效，所以两条 case 都 → retryable:false。File 存在
+    // 的 case 在 L3 file rescue path 里走 synthesizeStuckLoopHandoff
+    // 走 success path (runnerOk:true, branch 6), 不进这里 —— branch 1
+    // 只在 file 不存在时 hit。
+    if (
+      args.failureReason &&
+      args.failureReason !== 'stuck_loop' &&
+      args.outputFileExists
+    ) {
       handoff.retryable = true;
     }
     return handoff;
@@ -707,6 +730,170 @@ export function synthesizeSilentWriteHandoff(args: {
   return { rawText: json, json };
 }
 
+// ─── Stuck-loop file rescue (Subtask 9.0 L3) ──────────────────────────
+//
+// Stuck detector (L2) 在 worker re-read 同 file ≥4 次 或 post-write ≥6 次
+// consecutive read-only tool 时强制 abort。Abort 时如果 file output 已经
+// 写好 (pre-write over-read 时可能没写, post-write verify 时通常已写),
+// 不该 fail 整个 attempt —— file 是 worker 在 loop 开始前产出的,
+// deterministic loop 行为 retry 不会变好, 把 file 当 success 给主代理看。
+//
+// Detection 在 subscriber 的 `shouldTriggerStuckLoop` (export); decision
+// 在这里 (synthesizeStuckLoopHandoff) + assembleHandoff branch 1
+// retryable override (file 缺失 case)。与 `synthesizeSilentWriteHandoff`
+// (Subtask 8.8 Fix Y) 分两个 helper 的理由: 单点职责 + summary/notes
+// 文案不同, debug log / 主代理 LLM 能区分 Fix Y 兜底 vs Fix StuckLoop 兜底。
+
+/** Stuck-loop file rescue: stuck detector 已 abort + output file 已写好
+ *  → 合成最小 handoff, 走 assembleHandoff branch 6 success path。
+ *
+ *  与 `synthesizeSilentWriteHandoff` 的区别:
+ *    - silent-write 要求 `rawText.length === 0` (model 完全没说话);
+ *      stuck-loop 不要求 —— model 可能写了大段 prose 但仍被 detector
+ *      强制 abort, rawText 内容不靠谱, **不**复用。
+ *    - silent-write 不要求 `json === null` (model 可能 emit 有效 handoff
+ *      但 silent 流派常 rawText 空); stuck-loop 要求 json 是 null —— 如
+ *      果 worker 已 emit 有效 handoff JSON 就不该被 stuck rescue 覆盖,
+ *      应让 assembleHandoff 走正常 success path。
+ *    - summary / notes 文案明示 "stuck-loop" 而非 "silent write", 区分
+ *      两种兜底路径。
+ *
+ *  Pure function: 无 IO, 单元测试可独立覆盖。Runner 调用处拿返回值替换
+ *  `rawText` / `json` 再走 assembleHandoff branch 6 → status:'success' +
+ *  no retryable (Subtask 9.0 retryable override 只在 branch 1 生效;
+ *  branch 6 永远无 retryable, 无需额外处理)。本 helper 不挂 output_content
+ *  —— output_content 由调用方从 readOutputIfAny 单独捕获后传入, 与
+ *  silent-write fallback 同模式 (assembleHandoff branch 6 收到
+ *  outputContent 才挂 output_content 字段)。
+ *
+ *  Returns `{rawText, json}` if rescue applies, `null` otherwise. */
+export function synthesizeStuckLoopHandoff(args: {
+  declaredOutputPath: string | undefined;
+  outputFileExists: boolean;
+}): { rawText: string; json: string } | null {
+  if (!args.declaredOutputPath) return null;
+  if (args.outputFileExists !== true) return null;
+  const summary =
+    `Worker entered a stuck-loop after fs_create_file; output file present at "${args.declaredOutputPath}".`;
+  const notes =
+    'Runner detected a stuck-loop (same path repeated ≥4 times OR post-write over-read ≥6) and ' +
+    'aborted the attempt. The output file is treated as authoritative since it was written before ' +
+    'the loop started. This is a deterministic model behavior pattern seen with local OpenAI-compatible ' +
+    'proxies (e.g. Minimax-M3 via vilao.ai / 9Router) — retry would not change the outcome.';
+  const json = JSON.stringify({
+    status: 'success',
+    output_file: args.declaredOutputPath,
+    summary,
+    handoff_notes: notes,
+  });
+  return { rawText: json, json };
+}
+
+// ─── Stuck-loop detector (Subtask 9.0 L2) ─────────────────────────────
+//
+// Pure decision helper —— runner subscriber 调一次决定是否触发 abort。
+// 拆成 export pure function 让 unit test 能钉死 threshold, 不必起 agent。
+//
+// Trigger 决策表 (两个 threshold, OR):
+//   A) **same-path ≥4**: 同一 file path 在 `fs_read_file` 连续出现 4 次
+//      (`fs_list` 无 path 不计数, 也不 reset)。防 pre-write over-read
+//      (model 反复读同一 file 永远不写) + post-write over-read (model
+//      反复 verify 自己刚写的 file)。
+//   B) **post-write ≥6**: 已见至少 1 次 write/edit tool, 此后连续
+//      read-only ≥6 次。防「不同 path 也算 loop」场景 (model 写完
+//      后扫全 VFS 想 verify) + 给研究类 role (researcher/reviewer)
+//      留余地: 它们**没有** write tool, hasWritten 永远 false, 这条
+//      永远不触发 → 研究型 multi-file read 是合法的。
+//
+// Write/edit tool (fs_create_file / fs_edit_file) reset 所有 counter
+// (`consecutiveReads` / `samePathRepeats` / `lastReadPath`), 然后
+// `hasWrittenThisAttempt = true` 永久 sticky 直到 attempt 结束。
+
+/** Reason tag for stuck_loop trigger — used in debug log + assert pure
+ *  decision table in test. */
+export type StuckLoopReason = 'same_path_repeat' | 'post_write_over_read';
+
+/** Decide whether the current tool_execution_start event should fire
+ *  stuck_loop abort. Pure helper — no IO, no closure reads. Caller passes
+ *  all state explicitly so unit test can pin threshold boundaries.
+ *
+ *  Return shape: `{ trigger: false, reason: null }` (don't fire) or
+ *  `{ trigger: true, reason: 'same_path_repeat' | 'post_write_over_read' }`
+ *  (fire stuck_loop abort). */
+export function shouldTriggerStuckLoop(args: {
+  toolName: string;
+  toolArgs: unknown;
+  /** Number of consecutive read-only tool calls in this attempt (caller
+   *  tracks; reset to 0 on write/edit tool). */
+  consecutiveReads: number;
+  /** Number of consecutive reads of the same `lastReadPath` (caller
+   *  tracks; reset to 0 on different path or fs_list without path). */
+  samePathRepeats: number;
+  /** Path of the most recent read tool. `undefined` if last call was
+   *  fs_list (no path field). */
+  lastReadPath: string | undefined;
+  /** True iff at least one fs_create_file / fs_edit_file has been seen
+   *  in this attempt. Researcher/reviewer (no write tool) → always false. */
+  hasWrittenThisAttempt: boolean;
+}): { trigger: boolean; reason: StuckLoopReason | null } {
+  const isReadOnly = args.toolName === 'fs_read_file' || args.toolName === 'fs_list';
+  if (!isReadOnly) return { trigger: false, reason: null };
+  // Threshold B first: post-write over-read —— 让 post-write verify loop
+  // (无论同 path 还是不同 path) 都被抓住。Threshold A 在没 write 的情况
+  // 下 backup, 防 pre-write over-read (反复读同一 file 永远不写)。
+  if (args.hasWrittenThisAttempt && args.consecutiveReads >= 6) {
+    return { trigger: true, reason: 'post_write_over_read' };
+  }
+  if (args.samePathRepeats >= 4) {
+    return { trigger: true, reason: 'same_path_repeat' };
+  }
+  return { trigger: false, reason: null };
+}
+
+// ─── buildWorkerRunnerError (Subtask 9.0 Finding #2 follow-up) ──────────────
+//
+// Pure formatter —— catch block 拿到 `failureReason` + abort 标志 + 原始
+// exception 后, 拼出 user-visible runnerError。Decision table:
+//
+//   failureReason=undefined, isAbort=true            → "Aborted"
+//   failureReason=undefined, isAbort=false           → e.message / String(e)
+//   failureReason='ttft'                             → ttft-specific 文案
+//   failureReason='idle'                             → idle-specific 文案
+//   failureReason='stuck_loop'                       → 「Worker aborted: stuck-loop detected」+ duration
+//   failureReason='ceiling' (or other)               → 「Worker timed out after Xms」
+//
+// 为什么 stuck_loop 必须用「aborted」而不是「timed out」: stuck_loop 是
+// detector 主动 abort 的 deterministic loop, 不是等 ceiling 烧满。用
+// 「timed out」会误导 user 去调 ceiling 配置, 但根本原因是 model loop,
+// ceiling 调长也没用。Duration 字段保留方便对比 fix 前 300s 烧满 → 现
+// 在 30–60s abort, 一眼看出 detector 生效。
+export function buildWorkerRunnerError(args: {
+  reason: 'ttft' | 'idle' | 'ceiling' | 'stuck_loop' | undefined;
+  modelKey: string;
+  attemptDurationMs: number;
+  attemptCeilingMs: number;
+  isAbort: boolean;
+  originalError: unknown;
+}): string {
+  const { reason, modelKey, attemptDurationMs, attemptCeilingMs, isAbort, originalError } = args;
+  if (reason) {
+    if (reason === 'ttft') {
+      return `Worker timed out: no first token within ${WORKER_TTFT_MS}ms (model "${modelKey}" did not respond)`;
+    }
+    if (reason === 'idle') {
+      return `Worker timed out: stream idle for ${WORKER_IDLE_MS}ms (model "${modelKey}" stalled)`;
+    }
+    if (reason === 'stuck_loop') {
+      return `Worker aborted: stuck-loop detected (same path read ≥4 times or post-write over-read ≥6) after ${attemptDurationMs}ms — model "${modelKey}" was repeatedly re-reading instead of emitting handoff`;
+    }
+    // 'ceiling' (or any future failureReason)
+    return `Worker timed out after ${attemptCeilingMs}ms (model "${modelKey}" did not respond)`;
+  }
+  // reason === undefined: distinguish parent-abort from genuine exception
+  if (isAbort) return 'Aborted';
+  return originalError instanceof Error ? originalError.message : String(originalError);
+}
+
 // ─── IO helpers (internal; tested via mock of `vfs`) ───
 
 /** Read `~/.cebian/skills/<name>/SKILL.md`，剥 frontmatter，截断到 100KB，
@@ -912,6 +1099,40 @@ async function runWorkerAttempt(
   const overrideTimeouts = await workerRoleTimeouts.getValue();
   const attemptCeilingMs = resolveWorkerRoleTimeoutMs(opts.role, overrideTimeouts);
 
+  // ─── Stuck-loop 诊断 + abort 计数器（debug + abort trigger）───
+  // 目的：捕获 cebian-debug-20260909-154111.json + -163313.json 中观察到
+  // 的 2 个 hypothesis——
+  // A) 模型无法自行结束（停不下来发 `end_turn`）+ C) `fs_read_file` /
+  //    `fs_list` 不限速 → 模型反复读。Subtask 9.0 把 diagnostic 升级成
+  //    abort trigger：两个 threshold (same-path ≥4 / post-write ≥6) 任
+  //    一命中 → composedController.abort() + failureReason='stuck_loop'。
+  //    L3 file rescue 在 catch block 接 (synthesizeStuckLoopHandoff)
+  //    让写好的 file 走 success path。debugLog.warn 既有 stuck_loop:
+  //    reads heartbeat 保留 (信息密度高, 1 entry = 1 read, 比 one-shot
+  //    强), 加新 stuck_loop:trigger event 标 reason + snapshot。状态
+  //    变量都在 `runWorkerAttempt` 闭包里：每次新 attempt 重新从 0 开始。
+  let consecutiveReads = 0;
+  let lastStopReason: string | undefined;
+  // 最近 6 次 read-only tool 的 path ring buffer——日志里一起带上，方便区分
+  // 「反复读同一个文件」（A 嫌疑）和「读不同文件做 research」（合法流程）。
+  const recentReadPaths: string[] = [];
+  // Subtask 9.0 新增: stuck detector state。lastReadPath + samePathRepeats
+  // 给 Threshold A (same-path ≥4); hasWrittenThisAttempt 给 Threshold B
+  // (post-write ≥6)。写工具 (fs_create_file / fs_edit_file) reset 所有
+  // counter 并 sticky set hasWrittenThisAttempt=true 直到 attempt 结束。
+  let lastReadPath: string | undefined;
+  let samePathRepeats = 0;
+  let hasWrittenThisAttempt = false;
+  /** Const helper：把 tool args 压成 "toolName:path" 摘要。fs_list 是
+   *  `{ path, options? }`，fs_read_file 是 `{ path, start_line?, end_line? }`，
+   // 都有 `.path`。其他工具 args 没有 path → 仅返回 toolName。 */
+  const formatToolPath = (toolName: string, args: unknown): string => {
+    if (args && typeof args === 'object' && typeof (args as { path?: unknown }).path === 'string') {
+      return `${toolName}:${(args as { path: string }).path}`;
+    }
+    return toolName;
+  };
+
   debugLog.info('sub_agent', 'sub_agent:worker:attempt:start', {
     role: opts.role,
     modelId: opts.model.id,
@@ -926,7 +1147,7 @@ async function runWorkerAttempt(
   // 哪个 timer 是真正赢的那个（idempotent 检查保证三选一）。闭包读回后给
   // assembleHandoff 透传到 handoff.failureReason。`timedOut` 函数时 truthy
   // iff failureReason 已设——catch 分支用同一个标志控制 retryable 与 error 文案。
-  let failureReason: 'ttft' | 'idle' | 'ceiling' | undefined;
+  let failureReason: 'ttft' | 'idle' | 'ceiling' | 'stuck_loop' | undefined;
   const timedOut = (): boolean => failureReason !== undefined;
   let firstTokenEmitted = false;
   // 3 个独立 timer handle——`finally` 里 clearTimeout 清掉。
@@ -1100,6 +1321,22 @@ async function runWorkerAttempt(
           case 'message_end':
             if (ev.message.role === 'assistant') {
               enterPhase('between_turns');
+              // Site 1（debug-only）：把 stopReason 转发到 debug log，下次
+              // 复现就能验证 hypothesis A（模型停不下来）。StopReason 取值
+              // 范围 = "pending" | "stop" | "length" | "toolUse" | "error"
+              // | "aborted" | "deferred"——如果全是 toolUse、从来不会出现
+              // "stop"，即确认 hypothesis A。`consecutiveReads` 同步带上，
+              // 方便看到发出最后一条 assistant message 时 loop 计数器走到哪。
+              const am = ev.message as AssistantMessage;
+              lastStopReason = am.stopReason;
+              debugLog.warn('sub_agent', 'sub_agent:worker:stream:stop_reason', {
+                role: opts.role,
+                modelId: opts.model.id,
+                attempt: attemptNumber,
+                stopReason: lastStopReason,
+                consecutiveReads,
+                elapsedMs: Math.round(performance.now() - attemptStartedAt),
+              });
             } else {
               armPhaseTimer();
             }
@@ -1113,6 +1350,110 @@ async function runWorkerAttempt(
               elapsedMs: Math.round(performance.now() - attemptStartedAt),
             });
             enterPhase('tool_running');
+            // Site 2（debug + abort trigger）：连续 read-only 检测器。
+            //   - 旧版 (Subtask 诊断阶段) 只发 WARN，不 abort——确认 hypothesis 后
+            //     才升级成 abort。Subtask 9.0 升级成 dual threshold detector：
+            //       Threshold A (same-path ≥4) 抓 pre-write over-read
+            //         (model 反复读同一 file 永远不写)
+            //       Threshold B (post-write ≥6) 抓 post-write verify loop
+            //         (写完再 verify，无论同 path 还是不同 path)
+            //     命中 → composedController.abort() + failureReason='stuck_loop'，
+            //     catch block 走 L3 file rescue (synthesizeStuckLoopHandoff) 让
+            //     写好的 file 走 success path。Debug heartbeat 保留：≥6
+            //     consecutiveReads 后每次 read 都发 stuck_loop:reads WARN (1 entry
+            //     对应 1 read, 信息密度高于 one-shot); 新加 stuck_loop:trigger
+            //     event 标 abort 触发时刻 + reason + snapshot, 便于 export log
+            //     看到 "loop 起点 → 触发点" 全貌。
+            //   - 写工具 (fs_create_file / fs_edit_file) reset 所有 counter 并
+            //     sticky set hasWrittenThisAttempt=true，让 Threshold B 进入
+            //     armed 状态。
+            const isReadOnlyTool =
+              ev.toolName === 'fs_read_file' || ev.toolName === 'fs_list';
+            if (isReadOnlyTool) {
+              consecutiveReads++;
+              const summary = formatToolPath(ev.toolName, ev.args);
+              if (recentReadPaths.length >= 6) recentReadPaths.shift();
+              recentReadPaths.push(summary);
+              // 提取 path 字段 (fs_list 无 path → undefined, 不计数 / 不 reset)
+              // 给 Threshold A 用。Read-only 但无 path 的 fs_list 不进入 same-path
+              // 计数 (researcher 调 fs_list 浏览目录是合法流程, 不该被 Threshold A
+              // 误抓)，但 consecutiveReads 仍累计 (post-write ≥6 不区分 read/list)。
+              const pathOnly =
+                ev.args &&
+                typeof ev.args === 'object' &&
+                typeof (ev.args as { path?: unknown }).path === 'string'
+                  ? (ev.args as { path: string }).path
+                  : undefined;
+              if (pathOnly !== undefined) {
+                samePathRepeats = pathOnly === lastReadPath ? samePathRepeats + 1 : 1;
+                lastReadPath = pathOnly;
+              } else {
+                lastReadPath = undefined;
+                samePathRepeats = 0;
+              }
+              // Subtask 9.0: stuck_loop detector — 两个 threshold 任一命中就
+              // 触发 abort。Decision helper (`shouldTriggerStuckLoop`) 是 pure
+              // function, 所有 state 由 caller 传, unit test 钉死阈值边界。
+              const stuckDecision = shouldTriggerStuckLoop({
+                toolName: ev.toolName,
+                toolArgs: ev.args,
+                consecutiveReads,
+                samePathRepeats,
+                lastReadPath,
+                hasWrittenThisAttempt,
+              });
+              if (stuckDecision.trigger) {
+                failureReason = 'stuck_loop';
+                debugLog.warn(
+                  'sub_agent',
+                  'sub_agent:worker:stuck_loop:trigger',
+                  {
+                    role: opts.role,
+                    modelId: opts.model.id,
+                    attempt: attemptNumber,
+                    triggerReason: stuckDecision.reason,
+                    consecutiveReads,
+                    samePathRepeats,
+                    lastReadPath,
+                    hasWrittenThisAttempt,
+                    elapsedMs: Math.round(performance.now() - attemptStartedAt),
+                  },
+                );
+                composedController.abort();
+                // 不 break —— 让外层 subscriber 自然走完, agent.abort() 在
+                // composedController listener 里 fire, attempt 进 catch block。
+              } else if (consecutiveReads >= 6) {
+                // Debug heartbeat: ≥6 consecutive reads 时每次 tool:start 都
+                // 发一条 WARN (one entry per read) —— 信息密度高于 one-shot,
+                // 让 export log 能看到 loop 长度。threshold = 6 与 Threshold B
+                // 触发线对齐 (consecutiveReads >= 6 → B 必 trigger, 等同于
+                // stuck_loop:trigger 的同一个 step), 但 hasWrittenThisAttempt
+                // 未设时不 trigger (researcher 多 read)。
+                debugLog.warn('sub_agent', 'sub_agent:worker:stuck_loop:reads', {
+                  role: opts.role,
+                  modelId: opts.model.id,
+                  attempt: attemptNumber,
+                  consecutiveReads,
+                  lastReadPaths: recentReadPaths.slice(),
+                  lastStopReason,
+                  elapsedMs: Math.round(performance.now() - attemptStartedAt),
+                });
+              }
+            } else {
+              // Write/edit tool: reset consecutiveReads + same-path tracker.
+              // hasWrittenThisAttempt sticky true until attempt 结束 ——
+              // 一旦写过, 后续任何 ≥6 consecutive read 都触发 Threshold B
+              // (post-write verify loop, 不论同 path 还是不同 path)。
+              consecutiveReads = 0;
+              samePathRepeats = 0;
+              lastReadPath = undefined;
+              if (
+                ev.toolName === 'fs_create_file' ||
+                ev.toolName === 'fs_edit_file'
+              ) {
+                hasWrittenThisAttempt = true;
+              }
+            }
             break;
           case 'tool_execution_update':
           case 'tool_execution_end':
@@ -1241,17 +1582,18 @@ async function runWorkerAttempt(
       const isAbort = composedController.signal.aborted;
       // Failure reason 已设 → 给可读的错误文案（含模型 key + 是哪种 timeout）。
       // 老的「Worker timed out after 120000ms (model did not respond)」对诊断
-      // 不够友好：ttft / idle / ceiling 的修复路径不一样，下面用对应文案。
+      // 不够友好：ttft / idle / ceiling / stuck_loop 的修复路径不一样，下
+      // 面用对应文案。具体 message 构造抽到 `buildWorkerRunnerError` 纯函数
+      // ——测试用, 见 worker-runner.test.ts「buildWorkerRunnerError」describe。
       const reason = failureReason;
-      const runnerError = reason
-        ? reason === 'ttft'
-          ? `Worker timed out: no first token within ${WORKER_TTFT_MS}ms (model "${opts.modelKey}" did not respond)`
-          : reason === 'idle'
-          ? `Worker timed out: stream idle for ${WORKER_IDLE_MS}ms (model "${opts.modelKey}" stalled)`
-          : `Worker timed out after ${attemptCeilingMs}ms (model "${opts.modelKey}" did not respond)`
-        : isAbort
-          ? 'Aborted'
-          : e instanceof Error ? e.message : String(e);
+      const runnerError = buildWorkerRunnerError({
+        reason,
+        modelKey: opts.modelKey,
+        attemptDurationMs,
+        attemptCeilingMs,
+        isAbort,
+        originalError: e,
+      });
       debugLog.warn('sub_agent', 'sub_agent:worker:attempt:error', {
         role: opts.role,
         modelId: opts.model.id,
@@ -1259,20 +1601,34 @@ async function runWorkerAttempt(
         attemptDurationMs,
         failureReason: reason,
         parentAborted: isAbort && reason === undefined,
-        error: e instanceof Error ? e.message : String(e),
+        // Subtask 9.0 Finding #2 follow-up: 用 `runnerError` (已走
+        // buildWorkerRunnerError 的 reason-aware 文案), 不用 `e.message`
+        // raw。否则 stuck_loop case `error` field 会是 "Worker timed out"
+        // (来自 line 1495 generic throw), 与 handoff.error UI 端文案
+        // 不一致 —— debug log grep 时一眼以为是 ceiling 烧满, 实际是
+        // detector 主动 abort (smoke test attempt 8 已 reproduce 这个
+        // split-brain: handoff 报 "aborted: stuck-loop" 但 debug log
+        // `error` 字段还是 "Worker timed out")。
+        error: runnerError,
       });
       // 修：原来这里 `outputFileExists: false` 写死，导致 timeout path 永远
       // 看不到「worker 实际已经写了一半文件」的事实——Phase 1.4 的 smart retry
       // 决策需要知道这一点：file 存在 → retry 让 worker 写完；file 不存在 →
       // 再跑 ceiling 也是同样结局，fail-fast。Non-timeout catch（parent abort /
       // 真 exception）保持 `false`，zero regression——那些路径本来就不该 retry。
-      // 只读 `exists` 标志：branch 1 的 handoff 不携带 output_content（失败
-      // handoff 塞部分内容会改变主代理看到的信息面，超出本次修复范围）。
+      // 同时缓存 `content`：Subtask 9.0 L3 stuck_loop file rescue 需要把 file
+      // 作为 success handoff 走 branch 6, branch 6 会把 content 挂到
+      // `output_content` 让主代理 `--- output_content (...) ---` marker 能渲染
+      // 出 worker 实际写的产物, 与 silent-write fallback 行为对齐。Branch 1
+      // (failure) path 不挂 output_content（失败 handoff 塞部分内容会改变主
+      // 代理看到的信息面, 超出本次修复范围）。
       let timeoutOutputExists = false;
+      let timeoutOutputContent: string | undefined;
       if (reason !== undefined && opts.outputPath) {
         try {
           const r = await readOutputIfAny(opts.outputPath);
           timeoutOutputExists = r.exists;
+          timeoutOutputContent = r.content;
         } catch (readErr) {
           // VFS read 失败（罕见）→ 保持 false + log，debug 仍有信号
           debugLog.warn('sub_agent', 'sub_agent:worker:output_read_after_timeout_failed', {
@@ -1282,19 +1638,84 @@ async function runWorkerAttempt(
           });
         }
       }
-      result = assembleHandoff({
-        runnerOk: false,
-        runnerError,
-        role: opts.role,
-        modelKey: opts.modelKey,
-        rawText: '',
-        json: null,
-        outputFileExists: reason !== undefined ? timeoutOutputExists : false,
-        attempts: opts.attempt,
-        attemptDurationMs,
-        ...(timedOut() ? { timedOut: true } : {}),
-        ...(reason !== undefined ? { failureReason: reason } : {}),
-      });
+      // Subtask 9.0 L3: stuck_loop file rescue。stuck detector 已 abort +
+      // output file 已落地 → 不走 branch 1 failure path, 用
+      // `synthesizeStuckLoopHandoff` 走 success path (branch 6)。File 是
+      // worker 在 loop 开始前产出的, deterministic loop 行为 retry 不会变
+      // 好, 把 file 当 success 给主代理看。File 不存在 → 仍走 branch 1
+      // failure (assembleHandoff 已显式除外 stuck_loop 的 retryable 设位,
+      // 即使 file 存在也不设 — 但 file 存在时根本进不了 branch 1, 因为
+      // 上面 if 分支走了 success path)。
+      if (reason === 'stuck_loop' && timeoutOutputExists) {
+        const stuckSynth = synthesizeStuckLoopHandoff({
+          declaredOutputPath: opts.outputPath,
+          outputFileExists: true,
+        });
+        if (stuckSynth !== null) {
+          debugLog.info('sub_agent', 'sub_agent:worker:handoff:synthesized', {
+            role: opts.role,
+            modelId: opts.model.id,
+            attempt: attemptNumber,
+            reason: 'stuck_loop_with_output_file_present',
+            triggerReason:
+              'stuck_loop_detector_aborted_with_file_rescue',
+            declaredOutputPath: opts.outputPath,
+            outputFileExists: true,
+            attempts: opts.attempt,
+            attemptDurationMs,
+          });
+          // 与 silent-write fallback 对齐：挂 output_content 让主代理 `---
+          // output_content (...) ---` marker 能渲染 worker 实际写的产物,
+          // 与 assembleHandoff branch 6 的内容挂载约定一致。stuck_loop 是
+          // file rescue 语义 (output file authoritative), 不挂 content 等于
+          // 把这份已落地的产物对主代理隐藏, 用户必须再点开 VFS 才能看到。
+          result = assembleHandoff({
+            runnerOk: true,
+            role: opts.role,
+            modelKey: opts.modelKey,
+            rawText: stuckSynth.rawText,
+            json: stuckSynth.json,
+            outputFileExists: true,
+            ...(timeoutOutputContent !== undefined
+              ? { outputContent: timeoutOutputContent }
+              : {}),
+            ...(opts.outputPath ? { declaredOutputPath: opts.outputPath } : {}),
+            attempts: opts.attempt,
+            attemptDurationMs,
+          });
+        } else {
+          // 合成失败 (declaredOutputPath 缺失——不该 hit, 因为
+          // timeoutOutputExists=true 隐含 opts.outputPath 已设) → 走原
+          // branch 1 路径。
+          result = assembleHandoff({
+            runnerOk: false,
+            runnerError,
+            role: opts.role,
+            modelKey: opts.modelKey,
+            rawText: '',
+            json: null,
+            outputFileExists: timeoutOutputExists,
+            attempts: opts.attempt,
+            attemptDurationMs,
+            ...(timedOut() ? { timedOut: true } : {}),
+            ...(reason !== undefined ? { failureReason: reason } : {}),
+          });
+        }
+      } else {
+        result = assembleHandoff({
+          runnerOk: false,
+          runnerError,
+          role: opts.role,
+          modelKey: opts.modelKey,
+          rawText: '',
+          json: null,
+          outputFileExists: reason !== undefined ? timeoutOutputExists : false,
+          attempts: opts.attempt,
+          attemptDurationMs,
+          ...(timedOut() ? { timedOut: true } : {}),
+          ...(reason !== undefined ? { failureReason: reason } : {}),
+        });
+      }
     }
   } finally {
     if (ttftHandle !== undefined) clearTimeout(ttftHandle);

@@ -11,11 +11,14 @@ import {
   aggregateBatchHandoffs,
   buildAntiPatternsBlock,
   buildWorkspaceBlock,
+  buildWorkerRunnerError,
   composePrompt,
   composeRetryPrompt,
   filterToolsForRole,
   shouldRetry,
+  shouldTriggerStuckLoop,
   synthesizeSilentWriteHandoff,
+  synthesizeStuckLoopHandoff,
   type AssembleHandoffArgs,
   type PromptContext,
   type WorkerHandoff,
@@ -1551,5 +1554,535 @@ describe('synthesizeSilentWriteHandoff (Subtask 8.8 Fix Y silent-write fallback)
     expect(h.output_content).toBe('<html><body>Hello</body></html>');
     expect(h.retryable).toBeUndefined();
     expect(h.error).toBeUndefined();
+  });
+});
+
+// ─── shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector) ──────────────────
+//
+// Pure decision helper —— 把 stuck_loop detector 的双 threshold 决策表钉在 CI。
+// 改一个 if 就可能让 researcher / reviewer 多读多 file 的合法流程被误抓
+// (false positive), 或反之让 Minimax-M3 类 proxy 的 loop 漏抓 (false negative),
+// 下面每个 case 都是一条 invariant:
+//
+//   - Threshold A (same-path ≥4): pre-write over-read / post-write 同 path verify
+//   - Threshold B (post-write ≥6): post-write verify, 不论同 path 还是不同 path
+//   - 写工具 (fs_create_file / fs_edit_file) reset 所有 counter, 并 sticky
+//     set hasWrittenThisAttempt=true
+//   - fs_list 无 path → samePathRepeats reset (researcher 浏览目录是合法流程)
+describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
+  // Threshold A: same-path ≥4 trigger
+  it('Threshold A: 同 path 读第 4 次 → trigger reason=same_path_repeat', () => {
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/studio.html' },
+      consecutiveReads: 4,
+      samePathRepeats: 4,
+      lastReadPath: '/workspaces/abc/studio.html',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(true);
+    expect(r.reason).toBe('same_path_repeat');
+  });
+
+  it('Threshold A: 同 path 读第 3 次 → no trigger (boundary)', () => {
+    // boundary pin: 同 path 3 次不 trigger, 4 次 trigger。改一个数字就 silent
+    // regression, 把 ±1 都钉死。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/studio.html' },
+      consecutiveReads: 3,
+      samePathRepeats: 3,
+      lastReadPath: '/workspaces/abc/studio.html',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toBeNull();
+  });
+
+  it('Threshold A: 不同 path 多读 (无 write) → no trigger (researcher 合法流程)', () => {
+    // researcher 调 fs_read_file 读 10 个不同 file 不该被抓。consecutiveReads
+    // 累计 10, 但 samePathRepeats 应该被 caller 端 reset 成 1 (因为 path
+    // 不同)。Pure helper 只看 caller 传的值, 不自己 update —— 这里模拟 caller
+    // 端正确 reset 后的 state。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/file-10.txt' },
+      consecutiveReads: 10,
+      samePathRepeats: 1,
+      lastReadPath: '/workspaces/abc/file-10.txt',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+  });
+
+  // Threshold B: post-write ≥6 trigger
+  it('Threshold B: hasWritten + consecutiveReads=6 → trigger reason=post_write_over_read', () => {
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/studio.html' },
+      consecutiveReads: 6,
+      samePathRepeats: 1,
+      lastReadPath: '/workspaces/abc/studio.html',
+      hasWrittenThisAttempt: true,
+    });
+    expect(r.trigger).toBe(true);
+    expect(r.reason).toBe('post_write_over_read');
+  });
+
+  it('Threshold B: hasWritten + consecutiveReads=5 → no trigger (boundary)', () => {
+    // boundary pin: post-write 5 次不 trigger, 6 次 trigger。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/studio.html' },
+      consecutiveReads: 5,
+      samePathRepeats: 1,
+      lastReadPath: '/workspaces/abc/studio.html',
+      hasWrittenThisAttempt: true,
+    });
+    expect(r.trigger).toBe(false);
+  });
+
+  it('Threshold B: 无 write + 多 consecutive reads → no trigger (researcher multi-read 合法)', () => {
+    // researcher / reviewer 没 write tool, hasWrittenThisAttempt 永远 false。
+    // 即使读 20 个 file 也不应被抓——纯 read-only research 是合法流程。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/file-20.txt' },
+      consecutiveReads: 20,
+      samePathRepeats: 1,
+      lastReadPath: '/workspaces/abc/file-20.txt',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+  });
+
+  it('Threshold B 优先于 A: hasWritten + 同 path ≥4 → reason=post_write_over_read (B 先)', () => {
+    // 命中条件时, decision helper 优先报 B (post_write_over_read)——B 是
+    // 「更确定的 loop 信号」(已写过 + 后续还在读, 不论 path), A 是兜底
+    // 「同 path 4 次」(pre-write 也可能)。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/studio.html' },
+      consecutiveReads: 6,
+      samePathRepeats: 6,
+      lastReadPath: '/workspaces/abc/studio.html',
+      hasWrittenThisAttempt: true,
+    });
+    expect(r.trigger).toBe(true);
+    expect(r.reason).toBe('post_write_over_read');
+  });
+
+  // fs_list (no path) 特殊处理
+  it('fs_list 无 path → no trigger (caller 不该把 fs_list 算进 same-path 计数)', () => {
+    // 这里模拟 caller 正确处理: fs_list 后 samePathRepeats=0, lastReadPath=undefined
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_list',
+      toolArgs: {}, // fs_list 无 path
+      consecutiveReads: 5,
+      samePathRepeats: 0,
+      lastReadPath: undefined,
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+  });
+
+  // 写工具 / 搜索工具: never trigger
+  it('写工具 (fs_create_file) → no trigger (写工具不进入 read-only 检查)', () => {
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_create_file',
+      toolArgs: { path: '/workspaces/abc/out.html' },
+      consecutiveReads: 0,
+      samePathRepeats: 0,
+      lastReadPath: undefined,
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toBeNull();
+  });
+
+  it('fs_edit_file → no trigger (同 fs_create_file: 写工具不进入 read-only 检查)', () => {
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_edit_file',
+      toolArgs: { path: '/workspaces/abc/out.html' },
+      consecutiveReads: 5,
+      samePathRepeats: 3,
+      lastReadPath: '/workspaces/abc/out.html',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+  });
+
+  it('fs_search 不在 read-only 集合 → no trigger', () => {
+    // fs_search 是 read 类 (查 VFS 内容) 但 shouldTriggerStuckLoop 只把
+    // fs_read_file / fs_list 算 read-only。fs_search 不计入, 也不计入 hasWritten
+    // (frontend_coder whitelist 没有 fs_search, 但 researcher / content_writer
+    // 有——防它误抓 multi-search)。
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_search',
+      toolArgs: { pattern: 'foo' },
+      consecutiveReads: 10,
+      samePathRepeats: 1,
+      lastReadPath: '/workspaces/abc/x.txt',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+  });
+});
+
+// ─── synthesizeStuckLoopHandoff (Subtask 9.0 L3 file rescue) ────────────────
+//
+// Stuck detector 已 abort + output file 已落地 → 合成最小 handoff, 让
+// assembleHandoff 走 branch 6 success path。与 synthesizeSilentWriteHandoff
+// (Subtask 8.8 Fix Y) 的区别:
+//   - silent-write 要求 rawText.length === 0 + json === null
+//   - stuck-loop 不要求 rawText (model 可能写了大段 prose), 但要求 json === null
+//     (有 valid JSON 就不该被覆盖) + declaredOutputPath + file 存在
+//
+// Pure helper: 无 IO。Decision table 必须钉死——改一个 if 就可能让 file
+// rescue 误触发覆盖有效 handoff (silent_write path 也怕这个)。
+describe('synthesizeStuckLoopHandoff (Subtask 9.0 L3 file rescue)', () => {
+  it('declaredOutputPath + file 存在 → 返回合成 success handoff', () => {
+    const r = synthesizeStuckLoopHandoff({
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(r).not.toBeNull();
+    expect(r!.rawText).toBe(r!.json);
+    const parsed = JSON.parse(r!.json);
+    expect(parsed.status).toBe('success');
+    expect(parsed.output_file).toBe('/workspaces/abc/studio.html');
+    expect(parsed.summary).toContain('stuck-loop');
+    expect(parsed.handoff_notes).toContain('stuck-loop');
+    // 显式标注 'deterministic' 让主代理 LLM 理解为什么不 retry
+    expect(parsed.handoff_notes.toLowerCase()).toContain('deterministic');
+  });
+
+  it('file 不存在 → null (无 file rescue, 让 assembleHandoff branch 1 走 failure)', () => {
+    expect(
+      synthesizeStuckLoopHandoff({
+        declaredOutputPath: '/workspaces/abc/studio.html',
+        outputFileExists: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('declaredOutputPath 缺失 → null (无产物语义, 不该合成)', () => {
+    expect(
+      synthesizeStuckLoopHandoff({
+        declaredOutputPath: undefined,
+        outputFileExists: true,
+      }),
+    ).toBeNull();
+  });
+
+  it('integration: 合成结果 + assembleHandoff round-trip → status:success + no retryable', () => {
+    // 这是端到端验证: L3 真在 catch block 被消费时, assembleHandoff 看到
+    // status:'success' + outputFileExists=true → branch 6, 挂 output_file,
+    // no retryable (branch 6 永远无 retryable)。verify 这种 round-trip 比
+    // 单测 helper 本身更稳——helper 内部 JSON 改了字段名, 这里立刻 fail。
+    const r = synthesizeStuckLoopHandoff({
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(r).not.toBeNull();
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: true }),
+      rawText: r!.rawText,
+      json: r!.json,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(h.ok).toBe(true);
+    expect(h.status).toBe('success');
+    expect(h.output_file).toBe('/workspaces/abc/studio.html');
+    expect(h.retryable).toBeUndefined();
+    expect(h.error).toBeUndefined();
+    // summary / handoff_notes 显式标注 stuck-loop, 区别于 silent-write
+    // 兜底, debug log 区分 Fix Y vs Fix StuckLoop。
+    expect(h.summary.toLowerCase()).toContain('stuck-loop');
+    expect(h.handoff_notes.toLowerCase()).toContain('stuck-loop');
+  });
+
+  it('integration: caller 传 outputContent → branch 6 挂 output_content (与 silent-write 对齐)', () => {
+    // Code-review finding #1 (Subtask 9.0 follow-up): L3 rescue path 之前
+    // 没传 output_content, silent-write sibling path 传了——两个 fallback
+    // 跑同一个 branch 6 却出现 user-visible 不一致 (主代理 `---
+    // output_content (...) ---` marker 在 stuck_loop case 永远不渲染)。
+    // 修法: caller 从 readOutputIfAny 拿 content 后 spread 进去。
+    // 这个 test 把 invariant 钉死——branch 6 收到 outputContent 就挂
+    // output_content 字段, 防止 silent-write 行为被任何 future refactor
+    // 偷走。
+    const r = synthesizeStuckLoopHandoff({
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(r).not.toBeNull();
+    const fileBody = '<html><body>Rescued from stuck-loop</body></html>';
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: true }),
+      rawText: r!.rawText,
+      json: r!.json,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+      outputContent: fileBody,
+    });
+    expect(h.output_content).toBe(fileBody);
+    expect(h.status).toBe('success');
+    expect(h.retryable).toBeUndefined();
+  });
+
+  it('integration: caller 不传 outputContent → branch 6 不挂 output_content (back-compat)', () => {
+    // 反向 pin: helper 不强制 caller 一定要读 content。如果 caller 跳过
+    // readOutputIfAny, branch 6 也不挂空字段 (与 silent-write 行为一致——
+    // silent-write 同模式下未传 content 也不挂)。这个 invariant 保证未来
+    // 「故意省略 content」(例如 content 太大不跨 IPC) 不会因 helper 改
+    // 行为而 surprise。
+    const r = synthesizeStuckLoopHandoff({
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: true }),
+      rawText: r!.rawText,
+      json: r!.json,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+      // 故意省略 outputContent
+    });
+    expect(h.output_content).toBeUndefined();
+    expect(h.status).toBe('success');
+  });
+
+  it('summary / notes 与 silent-write 不同文案 (防止 debug log 误归类)', () => {
+    // 两个兜底路径 (silent-write + stuck-loop) 各自有自己的 summary
+    // prefix —— debug log grep "synthesized" event 时可区分哪个 fix 生效。
+    const silent = synthesizeSilentWriteHandoff({
+      rawText: '',
+      json: null,
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    const stuck = synthesizeStuckLoopHandoff({
+      declaredOutputPath: '/workspaces/abc/studio.html',
+      outputFileExists: true,
+    });
+    expect(silent).not.toBeNull();
+    expect(stuck).not.toBeNull();
+    // silent-write 的 summary 提 "no text"; stuck-loop 的 summary 提 "stuck-loop"
+    expect(JSON.parse(silent!.json).summary.toLowerCase()).toContain('no text');
+    expect(JSON.parse(stuck!.json).summary.toLowerCase()).toContain('stuck-loop');
+  });
+});
+
+// ─── assembleHandoff stuck_loop retryable override (Subtask 9.0) ─────────────
+//
+// Subtask 9.0 把 stuck_loop 加进 failureReason union, 但显式除外 retryable
+// 设位——deterministic behavior (re-read loop 100% 复现) 不值得 retry, 即
+// 使 output file 已存在。下面 4 个 case 把 2×2 矩阵 (failureReason × file)
+// 全钉死:
+//
+//                  file 存在         file 不存在
+//   ceiling        retryable:true    retryable:undefined  (旧 behavior)
+//   stuck_loop     retryable:undefined (新 override)     retryable:undefined
+//
+// FailureReason 'stuck_loop' + file 存在在 catch block 实际走 L3 file rescue
+// (runnerOk:true), 不会进 branch 1 — 这里测的是「如果 caller 强制走 branch 1
+// 的 retryable 决策」也能拿到正确结果 (defensive contract pin)。
+describe('assembleHandoff: stuck_loop retryable override (Subtask 9.0)', () => {
+  it('failureReason:stuck_loop + file 存在 → retryable:undefined (override)', () => {
+    // Subtask 9.0 override: stuck_loop 永不 retryable, 即使 file 存在
+    // (deterministic behavior retry 无效)。File 存在在 production path
+    // 会走 L3 resource, 这里测的是 branch 1 决策表本身的 invariant。
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker entered a stuck-loop (same path repeated 4 times)',
+      timedOut: true,
+      failureReason: 'stuck_loop',
+      attemptDurationMs: 32_000,
+      outputFileExists: true,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.status).toBe('failed');
+    expect(h.failureReason).toBe('stuck_loop');
+    expect(h.retryable).toBeUndefined(); // override default branch 1 retryable:true
+  });
+
+  it('failureReason:stuck_loop + file 不存在 → retryable:undefined (fail-fast)', () => {
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker entered a stuck-loop',
+      timedOut: true,
+      failureReason: 'stuck_loop',
+      attemptDurationMs: 45_000,
+      outputFileExists: false,
+    });
+    expect(h.ok).toBe(false);
+    expect(h.failureReason).toBe('stuck_loop');
+    expect(h.retryable).toBeUndefined();
+  });
+
+  it('failureReason:ceiling + file 存在 → retryable:true (zero regression)', () => {
+    // 验证 stuck_loop override 没动 ceiling 路径。已有 1 个 ceiling + file
+    // 存在的 test 在上面 assembleHandoff: Fail-Fast block, 这里再放一个
+    // explicit 「与 stuck_loop 对照」的 case, 显式 pin 两路径对照。
+    const h = assembleHandoff({
+      ...baseArgs({ runnerOk: false }),
+      runnerError: 'Worker timed out after 300000ms',
+      timedOut: true,
+      failureReason: 'ceiling',
+      attemptDurationMs: 300_000,
+      outputFileExists: true,
+    });
+    expect(h.retryable).toBe(true);
+  });
+
+  it('failureReason:stuck_loop + ok=true (model 之前 emit 过 valid JSON) → status 仍按 JSON 走', () => {
+    // 边界: worker emit 了 valid JSON handoff 后 stuck_loop 仍 fire (uncommon
+    // 但理论上 possible, 比如 emit JSON 后又 re-read 几次)。assembleHandoff
+    // 看到 runnerOk:true 应该走 branch 6 success path, 不进 branch 1 的
+    // retryable override。
+    const validJson = '{"status":"success","output_file":"out.txt","summary":"ok","handoff_notes":""}';
+    const h = assembleHandoff(
+      baseArgs({
+        json: validJson,
+        rawText: validJson,
+        runnerOk: true,
+        failureReason: 'stuck_loop', // legacy 字段, ok=true path 不应看它
+        outputFileExists: true,
+      }),
+    );
+    expect(h.status).toBe('success');
+    expect(h.retryable).toBeUndefined();
+  });
+});
+
+// ─── buildWorkerRunnerError (Subtask 9.0 Finding #2 follow-up) ──────────────
+//
+// Code-review surfaced misleading message: stuck_loop + no-file case 之前
+// 走 ceiling fallback 报 "Worker timed out after 300000ms" —— 用户看了会
+// 以为是 ceiling 烧满, 实际是 detector 30–60s 就 abort 了 deterministic
+// loop。Decision table 抽成 pure helper, 这里钉死每条 invariant:
+//
+//   - reason='stuck_loop' → 文案必须出现 "aborted" + "stuck-loop", 不许
+//     出现 "timed out" (语义错)
+//   - reason='ttft' / 'idle' → 仍按 Subtask 9.0 之前的文案
+//   - reason='ceiling' → 仍是 "Worker timed out after Xms"
+//   - reason=undefined + isAbort=true → "Aborted"
+//   - reason=undefined + isAbort=false → originalError.message
+//
+// user-visible message 字段 (handoff.error / debug log) 一旦漂错语义,
+// user 看 log 不知道根因是 model loop 还是 timeout, 排查路径全错。
+describe('buildWorkerRunnerError (Subtask 9.0 Finding #2 follow-up)', () => {
+  const baseArgs = {
+    modelKey: 'minimax-m3-via-vilao',
+    attemptDurationMs: 32_000,
+    attemptCeilingMs: 300_000,
+  } as const;
+
+  it('reason=stuck_loop → "aborted: stuck-loop detected" 文案 (语义精确)', () => {
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'stuck_loop',
+      isAbort: true,
+      originalError: new Error('Worker timed out after 300000ms'),
+    });
+    expect(msg).toContain('aborted');
+    expect(msg.toLowerCase()).toContain('stuck-loop');
+    expect(msg).toContain('minimax-m3-via-vilao');
+    expect(msg).toContain('32000'); // duration 显式保留, user 对比 fix 前 300000ms
+    // 反向 pin: 不许出现 "timed out" (会误导 user 去调 ceiling)
+    expect(msg.toLowerCase()).not.toMatch(/timed out/);
+  });
+
+  it('reason=ceiling → "Worker timed out after Xms" (保留 ceiling 文案不变)', () => {
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'ceiling',
+      isAbort: false,
+      originalError: new Error('something'),
+    });
+    expect(msg).toContain('Worker timed out');
+    expect(msg).toContain('300000');
+    expect(msg).toContain('minimax-m3-via-vilao');
+  });
+
+  it('reason=ttft → ttft-specific 文案 (zero regression)', () => {
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'ttft',
+      isAbort: false,
+      originalError: new Error('something'),
+    });
+    expect(msg).toContain('no first token');
+    expect(msg).toContain('minimax-m3-via-vilao');
+  });
+
+  it('reason=idle → idle-specific 文案 (zero regression)', () => {
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'idle',
+      isAbort: false,
+      originalError: new Error('something'),
+    });
+    expect(msg).toContain('stream idle');
+    expect(msg).toContain('minimax-m3-via-vilao');
+  });
+
+  it('reason=undefined + isAbort=true → "Aborted" (parent abort 路径)', () => {
+    // parent abort (user 按 Cancel / 切 session) 时 reason 没设, 文案应
+    // 是简短 "Aborted", 不泄漏底层 exception 文案 (exception 可能含
+    // 内部 path 或 secret)。
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: undefined,
+      isAbort: true,
+      originalError: new Error('Internal: /path/secret/file'),
+    });
+    expect(msg).toBe('Aborted');
+    expect(msg).not.toContain('secret');
+  });
+
+  it('reason=undefined + isAbort=false → 透传 originalError.message', () => {
+    // 真 exception (非 timeout / non-abort) 时透传原始 message 给 debug
+    // log, user 看到的是底层 throw 的真实信息。
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: undefined,
+      isAbort: false,
+      originalError: new Error('VFS write failed: disk full'),
+    });
+    expect(msg).toBe('VFS write failed: disk full');
+  });
+
+  it('reason=undefined + isAbort=false + non-Error original → String(original)', () => {
+    // originalError 不是 Error instance 的 edge case (如 throw 'string')
+    const msg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: undefined,
+      isAbort: false,
+      originalError: 'plain string thrown',
+    });
+    expect(msg).toBe('plain string thrown');
+  });
+
+  it('boundary: stuck_loop 文案 vs ceiling 文案完全不同 (debug log grep 可区分)', () => {
+    // 防止 future refactor 把两条文案 merge 成同一条 (例如都用 "Worker
+    // stopped")——debug log 现在可以 grep "aborted: stuck-loop" vs
+    // "timed out after" 来区分 detector 触发 vs ceiling 烧满。
+    const stuckMsg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'stuck_loop',
+      isAbort: true,
+      originalError: new Error('x'),
+    });
+    const ceilingMsg = buildWorkerRunnerError({
+      ...baseArgs,
+      reason: 'ceiling',
+      isAbort: false,
+      originalError: new Error('x'),
+    });
+    expect(stuckMsg).not.toBe(ceilingMsg);
+    expect(stuckMsg.toLowerCase()).toContain('stuck-loop');
+    expect(ceilingMsg.toLowerCase()).toContain('timed out');
   });
 });

@@ -142,6 +142,18 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
     // cebian-debug-20260907-183300.json 显示主代理曾把 161 KB HTML 喂给
     // content_writer，触发 4 次冗余 fs_edit_file 把 120s ceiling 烧光——
     // 现在主代理有 Fast Lane rule 直接走 frontend_coder（见 PREAMBLE 注释）。
+    // Subtask 9.0: rule (5) cứng hóa chống post-write verify loop。Log
+    // `cebian-debug-20260909-163313.json` 实证 Minimax-M3 / vilao.ai proxy
+    // 在 fs_create_file 后会 re-read 同一 file ≥6 次「自检」, 一直不到
+    // end_turn —— 5 分钟 ceiling 烧光。原版本只说 "one fs_create_file then
+    // handoff" 太软, model 把它读成"再 verify 一下也无妨"。改成 hard stop:
+    // 写完就 emit handoff, **不许**再读或 list 自己刚写的 file。
+    //
+    // Non-artifact 分支同步收严: 之前 "keep rules 2 + 4; relax 1/3/5"
+    // 把 rule 5 (loop guard) 也 relax 了 —— 这是 bug, 非 artifact 任务
+    // 一样会被 re-read loop 烧光 ceiling, 必须 keep 5。Relax 范围从 1/3/5
+    // 缩到 1/3 (inline-CSS / show-at-rest 仍可让 artifact-style 任务自
+    // 由, storage ban + loop guard 不可让)。
     systemPrompt:
       'You are a frontend coder. After fs_create_file emit a short text handoff ' +
       '(runner parses final text, no text = failure). ' +
@@ -150,8 +162,8 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
       '(2) NO localStorage / sessionStorage / document.cookie (sandbox SecurityError); ' +
       '(3) initial DOM shows all content statically (scripts enhance, not construct); ' +
       '(4) semantic color tokens on :root for light + dark; ' +
-      '(5) one fs_create_file then handoff. ' +
-      'Non-artifact: keep rules 2 + 4; relax 1/3/5.',
+      '(5) one fs_create_file then emit handoff and STOP — NEVER re-read or fs_list to verify; the file is final. ' +
+      'Non-artifact: keep rules 2 + 4 + 5; relax 1/3.',
     toolWhitelist: [FS_READ, FS_WRITE, FS_EDIT, FS_LIST],
     displayName: 'Frontend Coder',
     i18nKey: 'chat.workerTeamRoster.role.frontend_coder',

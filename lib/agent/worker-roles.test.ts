@@ -68,10 +68,19 @@ describe('WORKER_ROLES 完整性', () => {
     // —— 不然 schema auto-inject 是空枪。reviewer prompt 必须可读，可读
     // 的成本就是把 15 pattern names + id 列表直接 inline 进 system prompt
     // （比走 skill hydration 节省 1 round-trip VFS read + 可靠）。
+    // Subtask 9.0：cap 从 500 提到 600 —— frontend_coder rule (5) cứng hóa
+    // chống re-read loop 后 prompt 实测 572 char (旧版 479 char, +93 char
+    // 来自 "emit handoff and STOP — NEVER re-read or fs_list to verify; the
+    // file is final" + 非 artifact 分支 keep rule 5)。剩 28 char 缓冲给
+    // 后续 rule hardening (比 500 → 600 的 100 char buffer 紧, 但仍守住
+    // 10% frontend_coder context budget 上限)。如未来 prompt 逼近 600
+    // cap, 应 carve-out frontend_coder 单独 cap (mirror reviewer 2 KB 例外)
+    // 而不是继续 bump global cap —— global cap 是给"通用 role"的预算约束,
+    // per-role carve-out 是给"已确认需要更多 prompt space"的角色开特例。
     for (const role of EXPECTED_ROLES) {
       if (role === 'reviewer') continue; // 例外 —— 见 Subtask 2.1 docstring
       const len = WORKER_ROLES[role].systemPrompt.length;
-      expect(len, `role ${role} systemPrompt too long: ${len}`).toBeLessThanOrEqual(500);
+      expect(len, `role ${role} systemPrompt too long: ${len}`).toBeLessThanOrEqual(600);
     }
   });
 
@@ -290,8 +299,9 @@ describe('Subtask 8.9 — artifact-rule markers in worker prompts', () => {
       // Rule (4) semantic color tokens on :root for light + dark
       expect(prompt).toContain('color tokens on :root');
       expect(prompt).toContain('light + dark');
-      // Rule (5) one fs_create_file then handoff
-      expect(prompt).toContain('one fs_create_file then handoff');
+      // Rule (5) one fs_create_file then emit handoff and STOP — NEVER re-read
+      expect(prompt).toContain('one fs_create_file then emit handoff and STOP');
+      expect(prompt).toContain('NEVER re-read or fs_list to verify');
     });
 
     it('preserves Subtask 8.8 silent-write fallback rule (after fs_create_file emit text)', () => {
@@ -302,12 +312,21 @@ describe('Subtask 8.9 — artifact-rule markers in worker prompts', () => {
       expect(prompt).toContain('no text = failure');
     });
 
-    it('scope qualifier present: non-artifact branch keeps rules 2 + 4 only', () => {
+    it('scope qualifier present: non-artifact branch keeps rules 2 + 4 + 5 (Subtask 9.0)', () => {
       // Generic + scope qualifier pattern: frontend_coder is NOT artifact-only.
-      // Multi-file / editing tasks keep storage-API ban + color tokens, relax
-      // the rest. This is the design-feedback Option 1.
-      expect(prompt).toContain('Non-artifact: keep rules 2 + 4');
-      expect(prompt).toContain('relax 1/3/5');
+      // Multi-file / editing tasks keep storage-API ban + color tokens + loop
+      // guard, relax the rest. This is the design-feedback Option 1.
+      //
+      // Subtask 9.0：rule 5 之前在 "relax 1/3/5" 里被 relax —— 这是 bug, 非
+      // artifact 任务同样会 re-read loop 烧光 ceiling。Cap "keep rules" 范围
+      // 从 2+4 扩到 2+4+5, "relax" 从 1/3/5 缩到 1/3。下面 2 条 expect 把
+      // 这条 invariant 钉死 —— 哪天有人 revert 回原写法, CI 会 fail。
+      expect(prompt).toContain('Non-artifact: keep rules 2 + 4 + 5');
+      expect(prompt).toContain('relax 1/3');
+      // 防未来把规则集写错（如 relax 1/4 或 keep 2/4/5/6）—— 显式 forbid
+      // 旧 substring, 反向 pin 比正向 pin 更鲁棒。
+      expect(prompt).not.toContain('keep rules 2 + 4; relax 1/3/5');
+      expect(prompt).not.toContain('relax 1/3/5');
     });
 
     it('does NOT couple to Tailwind (design review feedback)', () => {
