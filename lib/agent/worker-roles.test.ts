@@ -54,10 +54,22 @@ describe('WORKER_ROLES 完整性', () => {
     }
   });
 
-  it('systemPrompt ≤ 500 字符（worker 上下文预算）', () => {
+  it('systemPrompt ≤ 500 字符（worker 上下文预算，reviewer 例外）', () => {
     // 4-char/byte 估算：英文 + JSON 模板大约 1 token / 4 char。500 char ≈ 125
     // tokens，与 worker 单任务上下文留出的 system prompt 预算相符。
+    //
+    // Subtask 2.1 把 reviewer 的 prompt 从 4 条 grep rule 扩到 15 条
+    // checklist（9 fail + 6 warn），加上「15-item + grep method + 90s
+    // ceiling」三段说明后总长 ~1100 char —— 仍然 ≤ 1.5 KB，约 270 tokens，
+    // 与 reviewer 单任务的 ~5 KB 上下文 budget 相比 < 6%。Subtask 2.2
+    // code-review Finding #1 又加了「Handoff emit shape + 15 个 allowed
+    // item id 列表」段落，prompt 长到 ~1700 char / 425 tokens（仍在 1.5 KB
+    // cap 内）。把 id 列表喂给 LLM 是为了让它能可靠 emit `checklist` 字段
+    // —— 不然 schema auto-inject 是空枪。reviewer prompt 必须可读，可读
+    // 的成本就是把 15 pattern names + id 列表直接 inline 进 system prompt
+    // （比走 skill hydration 节省 1 round-trip VFS read + 可靠）。
     for (const role of EXPECTED_ROLES) {
+      if (role === 'reviewer') continue; // 例外 —— 见 Subtask 2.1 docstring
       const len = WORKER_ROLES[role].systemPrompt.length;
       expect(len, `role ${role} systemPrompt too long: ${len}`).toBeLessThanOrEqual(500);
     }
@@ -310,27 +322,32 @@ describe('Subtask 8.9 — artifact-rule markers in worker prompts', () => {
   describe('reviewer.systemPrompt', () => {
     const prompt = WORKER_ROLES.reviewer.systemPrompt;
 
-    it('encodes 4 sandbox grep audit rules', () => {
-      // Rule (1) NO storage APIs as substrings
-      expect(prompt).toContain('NO localStorage');
+    it('encodes the 4 original sandbox grep audit concerns (now within 14-item checklist)', () => {
+      // Subtask 2.1 把 4 条 sandbox rule 扩展为 14 条 checklist；但原始
+      // 4 条 concern 必须仍然 in scope —— 防 future edit 把 storage API /
+      // https / :root / layout 这些 load-bearing pattern 删掉。这条 pin
+      // 只校验 4 个原始 concern 的关键字存在，不再校验旧 prompt 4 条
+      // 编号格式（Subtask 2.1 改成 1-14 编号）。
+      // Rule (1) NO storage APIs as substrings (现在 item 1-3)
+      expect(prompt).toContain('localStorage');
       expect(prompt).toContain('sessionStorage');
       expect(prompt).toContain('document.cookie');
-      // Rule (2) all CDN use https://
+      // Rule (2) all CDN use https:// (现在 item 5-6)
       expect(prompt).toContain('https://');
-      expect(prompt).toContain('no http://');
-      // Rule (3) :root defines color tokens for light + dark themes
-      expect(prompt).toContain(':root defines color tokens');
-      // Rule (4) layout uses CSS Grid / Flexbox with overflow-x: auto
-      expect(prompt).toContain('CSS Grid / Flexbox');
-      expect(prompt).toContain('overflow-x: auto');
+      // Rule (3) :root defines color tokens (现在 item 7)
+      expect(prompt).toContain(':root');
+      // Rule (4) layout uses CSS Grid / Flexbox (现在 item 9)
+      expect(prompt).toContain('Grid');
+      expect(prompt).toContain('Flexbox');
     });
 
     it('audit method explicit (grep file content, no DOM execution available)', () => {
       // Subtask 8.7 stripped execute_js / inspect from whitelist; reviewer is
       // SW-background, no DOM execution. Prompt must call this out so model
-      // doesn't try to call the deleted tools.
-      expect(prompt).toContain('grepping file content');
-      expect(prompt).toContain('no DOM execution available');
+      // doesn't try to call the deleted tools. Subtask 2.1 扩展 prompt 时不能
+      // 删这段 —— pin 防 drift。
+      expect(prompt).toMatch(/grep(ping)?\s+file\s+content/i);
+      expect(prompt).toMatch(/no\s+DOM\s+execution/i);
     });
 
     it('does NOT have hardcoded "<30s" budget (rely on 90s ceiling per design feedback)', () => {
@@ -346,6 +363,123 @@ describe('Subtask 8.9 — artifact-rule markers in worker prompts', () => {
       expect(prompt).toContain('≤ 3 files via fs_read_file');
       expect(prompt).toContain('90s ceiling');
     });
+  });
+});
+
+// ─── Subtask 2.1: inline 15-item checklist into reviewer systemPrompt ───────
+//
+// 把 15 条 artifact audit checklist（9 fail + 6 warn）直接写进 reviewer
+// `systemPrompt`。为什么不走 skill `cl-review-checklist`：skill hydration
+// 每 call 多 1 轮 VFS read + LLM 还要先消化 skill body 再 grep，inline 让
+// LLM 直接拿到 pattern names 列表。代价是 reviewer prompt 比 500-char 通用
+// cap 长（实测 ~1017 char），所以上方 systemPrompt ≤ 500 char 那条测试
+// 已对 reviewer 例外豁免。
+//
+// 15 条按 1..15 编号（设计上对应 cl-review-checklist skill 的 stable item id）
+// —— 编号也写进 prompt 里让 LLM 在 checklist emit 时按编号引用，Subtask 2.2
+// 的 handoff schema 与 Subtask 2.3 的 DelegationCard mini-table 都用这套
+// id。下面 expect 把每条 item 的关键 substring 钉死（line / pattern 字段
+// 不 pin，否则下次有人调 phrasing 整个 test 失效）。
+describe('Subtask 2.1 — reviewer 15-item checklist inlined into systemPrompt', () => {
+  const prompt = WORKER_ROLES.reviewer.systemPrompt;
+
+  it('包含 15 条 checklist item 编号 (1)..(15)', () => {
+    for (let i = 1; i <= 15; i++) {
+      expect(prompt, `item ${i} missing`).toContain(`(${i})`);
+    }
+  });
+
+  it('fail / warn 标记正确（9 fail + 6 warn, item 14 是 warn per user duyệt）', () => {
+    // Plan 头部写「7 fail + 7 warn」，但实际 item 1-3 + 5 + 7 + 9 + 11 +
+    // 12 + 15 是 fail（9 条），4 + 6 + 8 + 10 + 13 + 14 是 warn（6 条）。
+    // 「7+7」是 plan 早期记错，下面以 prompt 真值为准 —— 配比在 prompt
+    // 改写时是 first-class invariant：15 条全显式标注是给 LLM 的「不要漏
+    // 任何 item」信号，不能让它 fallback 到「默认 fail」混淆 warn 与 fail
+    // 语义。
+    const failCount = (prompt.match(/\(\d+\)\s*fail:/g) || []).length;
+    const warnCount = (prompt.match(/\(\d+\)\s*warn:/g) || []).length;
+    expect(failCount, 'expected 9 fail markers').toBe(9);
+    expect(warnCount, 'expected 6 warn markers').toBe(6);
+  });
+
+  it('item 14 (no-inline-event-handlers) 是 warn 而不是 fail（user duyệt override）', () => {
+    // Item 14 的标 marker 是 `warn:`，rationale 文案里有 prose "keep as warn
+    // not fail" —— 不能直接断言整段不含 `fail`（那是 prose 在解释「为什么不
+    // 判 fail」）。改成断言：(a) marker 是 `warn:` 而非 `fail:`；(b) item 14
+    // body 内（到 item 15 开始前）不该误用 `fail:` 标 marker —— 但 prose 里
+    // 的 "not fail" 单字允许。
+    const item14Match = prompt.match(/\(14\)\s*(fail|warn):/);
+    expect(item14Match, 'item 14 marker missing').toBeTruthy();
+    expect(item14Match![1], 'item 14 marker should be warn, not fail').toBe('warn');
+    const item14Start = prompt.indexOf('(14)');
+    const item15Start = prompt.indexOf('(15)', item14Start + 1);
+    const item14Body = prompt.slice(item14Start, item15Start);
+    expect(item14Body, 'item 14 body should not contain fail: marker').not.toMatch(/\bfail:\s/);
+  });
+
+  it('item 15 (overflow-x auto guard) 在 prompt 中（code-review Subtask 2.1 恢复）', () => {
+    // Code-review phát hiện Subtask 8.9 原 4 条的第 4 句「overflow-x: auto
+    // on wide content」在 14-item 化时漏掉 —— 删了 prompt 也 relax 了 test
+    // pin。User duyệt「Add item 15」恢复 wide-content 兜底：table / pre /
+    // code block 不该撑爆页面触发 horizontal scroll。Item 15 是 prompt 最后
+    // 一条（无 trailing `;`），用 marker `(15) fail:` 起头 + `[\s\S]+?` 截
+    // 到字符串末即可。
+    const item15Match = prompt.match(/\(15\)\s*fail:[\s\S]+/);
+    expect(item15Match, 'item 15 clause missing').toBeTruthy();
+    expect(item15Match![0]).toContain('overflow-x');
+  });
+
+  it('每条 item 含可 grep 的 pattern 名（localStorage / sessionStorage / etc.）', () => {
+    // LLM audit 时需要 grep 这些 token —— prompt 至少要含 pattern literal，
+    // 否则 LLM 不知道要查什么。每个 fail item 必须有 concrete 关键字。
+    const requiredKeywords = [
+      'localStorage',
+      'sessionStorage',
+      'document.cookie',
+      'indexedDB',
+      'https://',
+      ':root',
+      'prefers-color-scheme',
+      'Grid', // Flexbox 也存在；但只校验其一避免重复
+      'viewport',
+      '<title>',
+      'alt',
+      'prefers-reduced-motion',
+      'onclick', // item 14 mention legacy handlers
+      'overflow-x', // item 15 wide-content guard
+    ];
+    for (const kw of requiredKeywords) {
+      expect(prompt, `keyword "${kw}" missing from reviewer prompt`).toContain(kw);
+    }
+  });
+
+  it('audit method 仍说 "grepping file content"（Subtask 8.7 的 anti-revert pin）', () => {
+    // 防 future edit 删掉「no DOM execution」声明 —— reviewer 是 SW 后台，
+    // 不能跑 DOM。删了这段 LLM 会试着调已砍的 execute_js / inspect 然后困惑。
+    // 上方 Subtask 8.9 「audit method explicit」那条已经 pin 了同样两条
+    // substring —— 这里跳过重复断言，避免 future edit 改 wording 时两
+    // 处 test 同时 fail 噪音。
+    expect(prompt).toMatch(/grep(ping)?\s+file\s+content/i);
+    expect(prompt).toMatch(/no\s+DOM\s+execution/i);
+  });
+
+  it('保留 read cap (≤ 3 files) + 90s ceiling（Subtask 8.6 load-bearing）', () => {
+    // Subtask 8.6 read cap 与 90s ceiling 是 load-bearing —— Subtask 2.1
+    // 扩展 prompt 时不能删。
+    expect(prompt).toMatch(/≤\s*3\s+files/);
+    expect(prompt).toContain('90s');
+  });
+
+  it('reviewer prompt ≤ 2 KB（reviewer 单任务上下文预算 guard）', () => {
+    // 4-char/byte 估算：2 KB ≈ 500 tokens。Reviewer ~5 KB 上下文 budget 下
+    // systemPrompt 占 < 10% —— 给 LLM 留足 file content + reasoning 空间。
+    // 这是把 reviewer 从通用 ≤ 500 char cap 切到独立 cap 的依据。Subtask 2.2
+    // code-review Finding #1 fix 把「Handoff emit shape + 15 个 allowed item
+    // id 列表」段落加进 prompt（约 +600 char），1.5 KB cap 不再够用。Cap 提到
+    // 2 KB 仍守住 reviewer context budget 的 10% 上限，同时给 emit-shape 段
+    // 留余地。如果将来 prompt 逼近 2 KB，下面 expect 会立刻 fail 提醒
+    // reviewer context contention —— 该拆走 skill hydration 而不是继续 inline。
+    expect(prompt.length).toBeLessThanOrEqual(2048);
   });
 });
 
@@ -418,5 +552,56 @@ describe('Subtask 8.10 — worker timeout constants pinned to runtime values', (
     // 锁死真值。Subtask 8.5 plan 写 20_000 是理想值，落地后被 runtime 调成
     // 180_000。同上：改前请读 worker-roles.ts 上方的 drift-fix docstring。
     expect(WORKER_IDLE_MS).toBe(180_000);
+  });
+});
+
+// ─── Subtask 1.4: PREAMBLE batch shape + tool schema description ─────────
+//
+// Subtask 1.1–1.3 在 tool schema 加了 `tasks: [...]`（最多 4 个 INDEPENDENT
+// items 并行 dispatch），handler 加了 mutual exclusion + batch dispatch。
+// 这条 PREAMBLE 章节是 LLM 在主代理 system prompt 里最早看到的「能不能
+// batch / 怎么 batch / 什么不能 batch」的契约 —— defense in depth 第二层
+// （第一层是 tool schema description，已经在 8.9 + Subtask 1.2 加过）。下面
+// 的 pin 把关键 substring 钉死：batch 入口、`Promise.allSettled`、
+// 「仅独立 task」、与 top-level `task`/`role` 互斥。下次有人精简 PREAMBLE
+// 把 batch 段删掉，下面 expect.toContain 会失败 —— 不会有「主代理不知道
+// 可以 batch」silently regression。
+describe('Subtask 1.4 — PREAMBLE batch shape marker', () => {
+  it('PREAMBLE 解释 batch 入口 + 上限 + 独立 task 约束 + 互斥', () => {
+    const block = buildAvailableWorkersBlock();
+    // 段落标题 —— 与 "Fast Lane routing" 同样用 `**...**` 包裹的 ASCII 风格
+    expect(block).toContain('Parallel batch');
+    expect(block).toContain('INDEPENDENT');
+    // 上限字面量（与 schema maxItems=4 同步）
+    expect(block).toContain('up to 4 items');
+    // 并发机制 —— 让 LLM 知道「1 个 item 失败不会取消 siblings」
+    expect(block).toContain('Promise.allSettled');
+    // 反例：依赖链场景必须显式提到，否则 LLM 容易把所有 task 都塞进
+    // batch。Pin 两个反例 token，避免有人精简 PREAMBLE 时把「依赖链要
+    // 拆多 call」这条规则一并删掉（这条比 maxItems 更脆弱，因为它是
+    // 「不要做什么」型指令，删了不会让 schema 报错，只会让主代理把
+    // content_writer → frontend_coder 链塞进同一个 batch）。
+    expect(block).toContain('worker B may fs_read_file');
+    expect(block).toContain('worker A writes the file');
+    // 互斥契约 —— batch vs single-task 不能混用。case-insensitive 让
+    // 大小写微调（"are mutually exclusive" ↔ "Mutually exclusive"）不会
+    // 把 pin 弄假阳性；对齐 Subtask 1.2 schema description pin（也是 /i）。
+    expect(block).toMatch(/mutually exclusive/i);
+    expect(block).toContain('pick one shape, not both');
+  });
+
+  it('PREAMBLE batch 段落在 "Do it YOURSELF" 之后（positioning pin）', () => {
+    // 防 future edit 把 batch 段塞进 YOURSELF carve-out 子弹列表 —— 那会
+    // 加一个第 4 颗子弹，破坏上方 line 177-182 的 3 颗子弹 pin。Batch
+    // 段落必须在 "Do it YOURSELF" 之后、</available-workers> 之前。
+    const block = buildAvailableWorkersBlock();
+    const doItYourselfIdx = block.indexOf('Do it YOURSELF');
+    const batchIdx = block.indexOf('Parallel batch');
+    const closeIdx = block.lastIndexOf('</available-workers>');
+    expect(doItYourselfIdx).toBeGreaterThan(-1);
+    expect(batchIdx).toBeGreaterThan(-1);
+    expect(closeIdx).toBeGreaterThan(-1);
+    expect(batchIdx).toBeGreaterThan(doItYourselfIdx);
+    expect(batchIdx).toBeLessThan(closeIdx);
   });
 });

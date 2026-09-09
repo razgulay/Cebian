@@ -34,30 +34,118 @@ import {
   resolveSessionPath,
   skillRoot,
 } from '@/lib/agent/path-safety';
+import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 import type { ModelIdentity, WorkerRole } from '@/lib/persistence/storage';
+import type { WorkerHandoff } from '@/entrypoints/background/agent/worker-runner';
 
 // ─── Parameters schema ───
 
+// REVIEWER_HANDOFF_SCHEMA 是 `as const` literal object，runner 的 `expectedSchema`
+// 字段要 string —— 预先 stringify 一次让 per-item resolver 复用，避免每个
+// reviewer call 都重新 JSON.stringify 同一份 literal（cheap 但语义更清晰：
+// "this is the canonical string contract"，不是临时 object）。
+// `JSON.stringify` on plain object with no functions / undefined values 永远
+// 不会 throw。
+const REVIEWER_HANDOFF_SCHEMA_STRING = JSON.stringify(REVIEWER_HANDOFF_SCHEMA);
+
+/** Reviewer role 的 expected_schema auto-inject（Subtask 2.2）。
+ *  当 caller 没传 `expected_schema` 且 role 是 'reviewer' 时，自动注入
+ *  `REVIEWER_HANDOFF_SCHEMA` —— 让 reviewer 第二轮（schema-fail retry）按
+ *  结构化 15 条 checklist 重 emit，不用 caller 每次都重复声明 schema。
+ *
+ *  Caller 显式传的 `expected_schema` 优先级最高 —— auto-inject 只在 caller
+ *  没传时兜底，避免覆盖 caller 自己的 schema（如部分 caller 想让 reviewer
+ *  emit 更精简的 shape）。
+ *
+ *  Empty string（trim 后）按 undefined 处理（Subtask 2.2 code-review
+ *  Finding #8）：call site 可能把 setting 默认值 '' 透传过来，空串 → 让
+ *  parseExpectedSchema 抛「not valid JSON」runner error 是 UX 灾难，等同
+ *  没传即可。 */
+function defaultExpectedSchemaForRole(role: WorkerRole, explicit?: string): string | undefined {
+  if (explicit !== undefined && explicit.trim() !== '') return explicit;
+  if (role === 'reviewer') return REVIEWER_HANDOFF_SCHEMA_STRING;
+  return undefined;
+}
+
+/** 单个 batch item 形态 —— mirror top-level 8 字段（task / role / model_override
+ *  / input_files / output_path / expected_schema / skills / anti_patterns），
+ *  让 caller 在一个 `delegate_task` call 里串 N 个独立 task 并行跑。
+ *  任务**必须独立**——不能 task B 读 task A 的产物。依赖链（A → B）要分
+ *  多 delegate_task 串行调用，否则 B 会在 A 写文件之前 race。 */
+const DelegateTaskItem = Type.Object({
+  task: Type.String({
+    description: 'Natural-language task for this batch item. Same semantics as the top-level `task` parameter.',
+  }),
+  role: Type.Union([
+    Type.Literal('content_writer'),
+    Type.Literal('frontend_coder'),
+    Type.Literal('reviewer'),
+    Type.Literal('researcher'),
+  ], {
+    description:
+      'Worker role for this batch item. Same constraints as the top-level `role` parameter — ' +
+      'HTML/dashboard/interactive-demo deliverables use `frontend_coder` directly, not `content_writer`.',
+  }),
+  model_override: Type.Optional(Type.String({
+    description: 'Per-item ModelIdentity JSON (same shape as top-level `model_override`).',
+  })),
+  input_files: Type.Optional(Type.Array(Type.String(), {
+    description: 'Per-item VFS input files (same semantics as top-level `input_files`). Resolved to absolute paths internally.',
+  })),
+  output_path: Type.Optional(Type.String({
+    description: 'Per-item VFS output path (same semantics as top-level `output_path`).',
+  })),
+  expected_schema: Type.Optional(Type.String({
+    description: 'Per-item handoff JSON schema (same semantics as top-level `expected_schema`).',
+  })),
+  skills: Type.Optional(Type.Array(Type.String(), {
+    description: 'Per-item skill list (same semantics as top-level `skills`).',
+  })),
+  anti_patterns: Type.Optional(Type.Array(Type.String(), {
+    description: 'Per-item anti-pattern list (same semantics as top-level `anti_patterns`).',
+  })),
+}, { additionalProperties: false });
+
 /**
- * 8 个参数：2 必填（task / role，role 是 4 个 literal union 之一，**不**有
- * 默认值——LLM 不传会抛 schema 校验错）+ 6 可选（model_override / input_files /
- * output_path / expected_schema / skills / anti_patterns，全部 Type.Optional 包裹）。
+ * 8 个参数 + 第 9 个 `tasks`（batch）。
+ *
+ * `task` 和 `role` 在 schema 层是 **Optional** —— 这是为了不阻挡 batch
+ * 入口（`tasks: [...]` 单独调用）。真正的「必填」校验在 `execute()`
+ * 互斥分支里完成：
+ *   - 走 batch 分支（`tasks` 非空）→ top-level `task`/`role` 必须空
+ *   - 走 single-task 分支 → top-level `task` 非空 + `role` 在 4 literal union
+ *   - 两者都不满足 → text error
+ *
+ * Single source of truth 放 handler 是因为只有 handler 能区分「batch 调用」与
+ * 「LLM 漏填参数」两种语义。Schema 层面如果保留 required=['task','role']
+ * 会把 batch 路径整个堵死 —— 死锁：schema 不让进 batch，handler 不让混用，
+ * LLM 没法表达 batch intent。这条 schema-level relaxation 也在测试里 pin
+ * 死（`tasks` only call 必须 Value.Check 通过）。
+ *
  * 空数组与「不传」走同一条 path（skill list = [] → runner 跳过 hydration block）。
+ *
+ * Subtask 1.2：再加一个第 9 个可选参数 `tasks`（1–4 个 DelegateTaskItem 并行
+ * dispatch）。与 top-level `task`/`role` 互斥——callable 只用 1 形态
+ *（「单 task」或「batch」），不能混。约束：
+ *  - `tasks` 必须 ≥1 ≤4（max 4 是 keepalive budget + 4×50 KB content 总开销的 sanity cap）
+ *  - 同一 call 里 `tasks` + (`task` 或 `role` 非空) → text error 「don't mix」
+ *  - 全部 item 必须**独立**——B 不能 read A 的产物；依赖链要分多 delegate_task
  *
  * 所有 `description` 是 LLM-facing，不走 i18n（与 `delegate_dom` 一致）：
  * 工具 schema 是协议契约，LLM 看英文最稳；UI 文案走 i18n。
  */
 const DelegateTaskParameters = Type.Object({
-  task: Type.String({
+  task: Type.Optional(Type.String({
     description:
       `Natural-language task for the worker sub-agent. Be specific: ` +
       `"Extract 3 RACES cards about photosynthesis, one per grade 3-5, ` +
       `each with 1 question + 1 cite-paragraph reference" beats "write cards". ` +
       `Worker reads from VFS (fs_read_file / fs_list) and writes to VFS (fs_create_file / fs_edit_file). ` +
       `The worker's reply is a JSON handoff (status / output_file / summary / handoff_notes) — ` +
-      `do not ask the worker to return long prose in its reply; route the actual content through \`output_path\`.`,
-  }),
-  role: Type.Union([
+      `do not ask the worker to return long prose in its reply; route the actual content through \`output_path\`. ` +
+      `Required when not using \`tasks: [...]\` batch shape. Mutually exclusive with \`tasks\`.`,
+  })),
+  role: Type.Optional(Type.Union([
     Type.Literal('content_writer'),
     Type.Literal('frontend_coder'),
     Type.Literal('reviewer'),
@@ -78,8 +166,10 @@ const DelegateTaskParameters = Type.Object({
       'frontend_coder: HTML / CSS / JavaScript into VFS, no browser tools. ' +
       'Fast Lane: for HTML / dashboard / interactive-demo deliverables use `frontend_coder` directly. ' +
       'reviewer: read-only static text audit of generated artifacts (no DOM execution available); ' +
-      'researcher: read VFS + query RAG collections; output is structured text or a new VFS file.',
-  }),
+      'reviewer emits 15-item checklist (REVIEWER_HANDOFF_SCHEMA auto-injected) when caller omits `expected_schema`. ' +
+      'researcher: read VFS + query RAG collections; output is structured text or a new VFS file. ' +
+      'Required when not using `tasks: [...]` batch shape. Mutually exclusive with `tasks`.',
+  })),
   model_override: Type.Optional(Type.String({
     description:
       'Optional. ModelIdentity JSON, e.g. `{"provider":"anthropic","modelId":"claude-sonnet-4-5"}`. ' +
@@ -106,7 +196,10 @@ const DelegateTaskParameters = Type.Object({
       'Optional. JSON Schema string applied to the worker\'s handoff JSON. On mismatch the runner ' +
       'auto-retries once with the validation error in the retry feedback. ' +
       'Example: `{"type":"object","required":["status","output_file","summary","handoff_notes"],"properties":{...}}`. ' +
-      'If the schema itself is malformed JSON, the runner returns an error (no retry — your input was wrong).',
+      'If the schema itself is malformed JSON, the runner returns an error (no retry — your input was wrong). ' +
+      'When `role: "reviewer"` and this field is omitted, the runner auto-injects `REVIEWER_HANDOFF_SCHEMA` ' +
+      '(15-item checklist: status / output_file / summary / handoff_notes / checklist: [{item, status, evidence}]) ' +
+      'so the reviewer emits a machine-parseable audit result. Caller-supplied schema takes precedence.',
   })),
   skills: Type.Optional(Type.Array(Type.String(), {
     description:
@@ -121,6 +214,19 @@ const DelegateTaskParameters = Type.Object({
       'inside a `<do-not-do>` block prepended to the prompt. Keep entries short and concrete: ' +
       '"Do not fabricate quotes" beats "be careful with citations".',
   })),
+  tasks: Type.Optional(Type.Array(DelegateTaskItem, {
+    minItems: 1,
+    maxItems: 4,
+    description:
+      'Optional. Up to 4 INDEPENDENT tasks to dispatch in parallel. Each item mirrors the top-level ' +
+      'parameters (task / role / model_override / input_files / output_path / expected_schema / ' +
+      'skills / anti_patterns). Items run concurrently via `Promise.allSettled` — one item failure ' +
+      'does not cancel siblings. ' +
+      '**Use only for independent tasks.** If task B reads task A\'s output (e.g. content_writer → ' +
+      'frontend_coder reads content.json → reviewer reads studio.html), do NOT batch them: worker B ' +
+      'may `fs_read_file` before worker A writes the file. Split into separate `delegate_task` calls. ' +
+      'Mutually exclusive with the top-level `task`/`role` — pick one shape, not both.',
+  })),
 }, {
   // Subtask 8.9：在 top-level description 加 Fast Lane routing 提点（一行，
   // 不展开论证——论证在 role param description 和 PREAMBLE 里），让 LLM 在
@@ -131,7 +237,8 @@ const DelegateTaskParameters = Type.Object({
     'On success returns the handoff JSON + (truncated) output file content. ' +
     'On failure returns the handoff JSON with status="failed" — read `handoff_notes` to decide whether to retry, ' +
     'refine the task, or escalate to the user. ' +
-    'Fast Lane: HTML / dashboard / interactive-demo deliverables go to `frontend_coder`, NOT `content_writer`.',
+    'Fast Lane: HTML / dashboard / interactive-demo deliverables go to `frontend_coder`, NOT `content_writer`. ' +
+    'For 2–4 independent tasks in parallel, use `tasks: [...]` (up to 4 items, mutually exclusive with top-level `task`).',
 });
 
 // ─── Helpers (internal) ───
@@ -200,6 +307,14 @@ function summarizeHandoffJson(rawJson: string): string {
     if (typeof obj.attemptDurationMs === 'number') {
       parts.push(`"attemptDurationMs":${obj.attemptDurationMs}`);
     }
+    // Subtask 2.2 code-review Finding #3: surface reviewer audit fail/warn/pass
+    // counts so the main agent can programmatically react. 15-entry evidence
+    // array 太长不适合进 context（爆 3 KB+），count 聚合保留 fail/warn/pass
+    // 决策信号同时只多 ~50 chars。
+    const checklistSummary = summarizeChecklistSummary(rawJson);
+    if (checklistSummary) {
+      parts.push(`"checklist_summary":${JSON.stringify(checklistSummary)}`);
+    }
     const compact = `{${parts.join(',')}}`;
     if (compact.length <= MAX_HANDOFF_JSON_CHARS) return compact;
     return compact.slice(0, MAX_HANDOFF_JSON_CHARS) + '…[truncated]';
@@ -211,12 +326,287 @@ function summarizeHandoffJson(rawJson: string): string {
   }
 }
 
+/** Reviewer checklist 三态计数（Subtask 2.2 code-review Finding #3 fix）。
+ *  从 reviewer handoff 的 `checklist: [{item, status, evidence}]` 数组聚合
+ *  pass / warn / fail 计数，附在 summarizeHandoffJson 输出末尾，让主代理
+ *  LLM 一眼看出「audit 通过了吗？严重程度如何？」而不是只能从 prose
+ *  summary 推断。`checklist` 字段本身不重复 emit —— 15 条 evidence 数组
+ *  会让 handoff 文本爆 3 KB+，count 聚合才适合进主代理 context。
+ *
+ *  非 reviewer / 无 checklist 字段 / 空 checklist 数组 → undefined，输出
+ *  skip 计数行。空数组也算 undefined —— reviewer 没 emit（minItems gate
+ *  让 WorkerHandoff.checklist 是 undefined）和 emit 了空数组（schema-fail
+ *  reject 路径）语义等价，都不该让主代理看到 `pass=0 warn=0 fail=0` 的
+ *  误导「all-clear」视图。 */
+function summarizeChecklistSummary(rawJson: string): { pass: number; warn: number; fail: number } | undefined {
+  try {
+    const obj = JSON.parse(rawJson) as Record<string, unknown>;
+    if (!Array.isArray(obj.checklist) || obj.checklist.length === 0) return undefined;
+    let pass = 0;
+    let warn = 0;
+    let fail = 0;
+    for (const entry of obj.checklist) {
+      if (entry && typeof entry === 'object' && 'status' in entry) {
+        const status = (entry as { status: unknown }).status;
+        if (status === 'pass') pass++;
+        else if (status === 'warn') warn++;
+        else if (status === 'fail') fail++;
+      }
+    }
+    return { pass, warn, fail };
+  } catch {
+    return undefined;
+  }
+}
+
 /** output_content 截断（独立于 handoff JSON 截断）。`output_content` 是 runner
  *  从 VFS 读回的 worker 产物（已 50 KB cap），tool 这里再 cap 一遍避免极端
  *  情况下主代理收到 50 KB × N 个 handoff。 */
 function summarizeOutputContent(content: string): string {
   if (content.length <= MAX_OUTPUT_CONTENT_IN_RESULT_CHARS) return content;
   return content.slice(0, MAX_OUTPUT_CONTENT_IN_RESULT_CHARS) + '…[truncated]';
+}
+
+/** 把 batch handoff 渲染成主代理 tool result 的 text。规则：
+ *  - 顶部一行 outer summary（coarse 计数）
+ *  - 每个 item 一行：「[index] <modelKey> role=<role> status=<status> attempts=<N>」+ optional output_file
+ *  - 每个 item 的 `summary` + `error` 单独行
+ *  - 每个 item 的 `checklist_summary`（reviewer only，Subtask 2.2 code-review Finding #6 fix）
+ *  - 每个 item 的 `output_content`（若有）作为 labeled chunk
+ *  - 末尾 annotation（first item 的 modelKey+role as representative）
+ *  总长度 cap `MAX_HANDOFF_JSON_CHARS × items.length + 余量`，避免主代理
+ *  收到 16 KB+。这里走和 single-task 一样的 cap-per-item 哲学。
+ *
+ *  失败 (status: 'failed') outer 不展开 per-item 的 retryable 字段 —— 主代理
+ *  通过 batchSummary 拿到 coarse 视图，per-item 详情如有需要再走 outer.ok 看
+ *  是否整体有产物。 */
+function renderBatchToolResult(handoff: WorkerHandoff): string {
+  const lines: string[] = [];
+  // Outer summary（coarse 计数 + outer status）
+  lines.push(`[batch] ${handoff.summary}`);
+  if (handoff.batchSummary) {
+    const { total, succeeded, failed, partial, cancelled } = handoff.batchSummary;
+    lines.push(
+      `[batch-summary] total=${total} succeeded=${succeeded} failed=${failed} partial=${partial} cancelled=${cancelled}`,
+    );
+  }
+  // Per-item 一行
+  if (handoff.batch) {
+    handoff.batch.forEach((item, idx) => {
+      const mk = item.modelKey || '?';
+      const attempts = item.attempts ?? 1;
+      // Subtask 1.2 review #3: surface per-item `partial` so the chat parser
+      // (chat/index.tsx) can map `status === 'partial'` to a meaningful badge
+      // instead of silently lumping it with success. `output_file` quoted with
+      // double quotes so paths containing `=` (e.g. `?query=value` or
+      // `/path=k=v`) don't confuse the space-delimited field parser.
+      const outFile = item.output_file
+        ? ` file="${item.output_file.replace(/"/g, '\\"')}"`
+        : '';
+      // 标记 item 自己是否 partial（runner 的 batch 现在把 partial 当
+      // success 等价的 "item 内 partial" —— 标 partial 让 caller 能区分
+      // "完整成功" vs "item 跑出来了但 runner 标 partial"）。
+      const partialTag = item.partial ? ' partial=true' : '';
+      lines.push(
+        `[item ${idx}] model=${mk} role=${item.role} status=${item.status} attempts=${attempts}${partialTag}${outFile}`,
+      );
+      if (item.summary) {
+        lines.push(`  summary: ${item.summary}`);
+      }
+      if (item.error) {
+        lines.push(`  error: ${item.error}`);
+      }
+      // Subtask 2.2 code-review Finding #6: surface per-item reviewer audit
+      // counts in batch tool result text（与 single-task 路径对称）。从已
+      // structured 的 `WorkerHandoff.checklist` 字段聚合，避免重新 parse 整
+      // 个 handoff JSON。
+      if (item.checklist && item.checklist.length > 0) {
+        let pass = 0, warn = 0, fail = 0;
+        for (const entry of item.checklist) {
+          if (entry.status === 'pass') pass++;
+          else if (entry.status === 'warn') warn++;
+          else if (entry.status === 'fail') fail++;
+        }
+        lines.push(`  checklist_summary: pass=${pass} warn=${warn} fail=${fail}`);
+      }
+      if (item.output_content) {
+        const label = item.output_file ?? 'output';
+        lines.push(`  --- output_content (${label}) ---`);
+        lines.push(`  ${summarizeOutputContent(item.output_content)}`);
+      }
+    });
+  }
+  // Annotation
+  const annotation = `— via batch worker (${handoff.modelKey || '?'}, role=${handoff.role || '?'}, attempts=${handoff.attempts ?? 1})`;
+  lines.push(annotation);
+  const text = lines.join('\n');
+  // Cap 一次，避免极端 batch（4 item × 2 KB handoff + 4 × 2 KB content = ~16 KB）
+  if (text.length <= MAX_HANDOFF_JSON_CHARS * 4 + 1000) return text;
+  return text.slice(0, MAX_HANDOFF_JSON_CHARS * 4 + 1000) + '…[truncated]';
+}
+
+// ─── Batch item gate (Subtask 1.2) ───
+//
+// Per-item path-safety + skill + model_override 校验。失败聚合到 caller 一
+// 个 text error 上返回，不调 runner。所有 gate 镜像 top-level path-safety
+// 路径（line 274-353），保证行为一致。Item-level gate 在 batch dispatch 之前
+// 完成（vs 单 task 路径）—— 一个 item 不合法就让整批 fail-fast，不浪费
+// runner cycle。
+
+/** Batch item 的 raw 输入形态（来自 `tasks: [...]` 数组，每个元素未 resolve）。 */
+interface BatchItemInput {
+  task?: string;
+  role?: WorkerRole;
+  model_override?: string;
+  input_files?: readonly string[];
+  output_path?: string;
+  expected_schema?: string;
+  skills?: readonly string[];
+  anti_patterns?: readonly string[];
+}
+
+/** Per-item resolved 形态（绝对路径 + modelOverride parsed）—— 喂给
+ *  `runBatchWorker` 的 BatchWorkerItem 形态。 */
+type BatchItemResolved = {
+  task: string;
+  role: WorkerRole;
+  modelOverride?: ModelIdentity;
+  inputFiles?: readonly string[];
+  outputPath?: string;
+  expectedSchema?: string;
+  skills?: readonly string[];
+  antiPatterns?: readonly string[];
+};
+
+/** 单个 batch item 的 gate 结果。成功返回 `{ item }`；失败返回 `{ error }`。
+ *  `error` 是已构造好的 text content，主代理 execute() 直接 `return result.error`。 */
+type BatchItemResult =
+  | { item: BatchItemResolved }
+  | { error: AgentToolResult<Record<string, never>> };
+
+async function resolveBatchItem(
+  sessionId: string,
+  raw: BatchItemInput,
+  index: number,
+): Promise<BatchItemResult> {
+  const label = `tasks[${index}]`;
+
+  // 1. task 非空
+  if (!raw.task || !raw.task.trim()) {
+    return {
+      error: {
+        content: [{ type: 'text', text: `Error: \`${label}.task\` is required and must not be empty.` }],
+        details: {},
+      },
+    };
+  }
+  // 2. role 必填（typebox 应已 enforce，runtime 兜底）
+  if (!raw.role) {
+    return {
+      error: {
+        content: [{ type: 'text', text: `Error: \`${label}.role\` is required.` }],
+        details: {},
+      },
+    };
+  }
+
+  // 3. output_path resolve + assert
+  let resolvedOutputPath: string | undefined;
+  if (raw.output_path) {
+    try {
+      resolvedOutputPath = resolveSessionPath(sessionId, raw.output_path);
+      assertWithinSessionRoot(sessionId, resolvedOutputPath);
+    } catch (e) {
+      if (e instanceof VfsScopeError) {
+        return {
+          error: {
+            content: [{ type: 'text', text: `Error: \`${label}.output_path\` is outside the session workspace.` }],
+            details: {},
+          },
+        };
+      }
+      throw e;
+    }
+  }
+
+  // 4. input_files resolve + assert
+  let resolvedInputFiles: readonly string[] | undefined;
+  if (raw.input_files && raw.input_files.length > 0) {
+    const absolutePaths: string[] = [];
+    try {
+      for (const p of raw.input_files) {
+        absolutePaths.push(resolveSessionPath(sessionId, p));
+      }
+      await assertInputFilesReadable(sessionId, absolutePaths);
+    } catch (e) {
+      if (e instanceof VfsScopeError) {
+        return {
+          error: {
+            content: [{
+              type: 'text',
+              text: `Error: one or more \`${label}.input_files\` paths are outside the session workspace.`,
+            }],
+            details: {},
+          },
+        };
+      }
+      throw e;
+    }
+    resolvedInputFiles = absolutePaths;
+  }
+
+  // 5. skills 名字合法
+  if (raw.skills) {
+    for (const name of raw.skills) {
+      try {
+        skillRoot(name);
+      } catch (e) {
+        if (e instanceof VfsScopeError) {
+          return {
+            error: {
+              content: [{
+                type: 'text',
+                text: `Error: \`${label}.skills[${name}]\` is invalid. Use a simple lowercase/dash/dot identifier.`,
+              }],
+              details: {},
+            },
+          };
+        }
+        throw e;
+      }
+    }
+  }
+
+  // 6. model_override parse
+  const modelOverride = parseModelOverride(raw.model_override);
+  if (raw.model_override && !modelOverride) {
+    return {
+      error: {
+        content: [{
+          type: 'text',
+          text: `Error: \`${label}.model_override\` must be a JSON object with \`provider\` and \`modelId\` strings.`,
+        }],
+        details: {},
+      },
+    };
+  }
+
+  // Reviewer auto-schema（Subtask 2.2）：caller 没传 expected_schema 时
+  // 注入 REVIEWER_HANDOFF_SCHEMA。Caller 显式传 → 用 caller 的（不覆盖）。
+  const resolvedExpectedSchema = defaultExpectedSchemaForRole(raw.role, raw.expected_schema);
+
+  return {
+    item: {
+      task: raw.task,
+      role: raw.role,
+      ...(modelOverride ? { modelOverride } : {}),
+      ...(resolvedInputFiles ? { inputFiles: resolvedInputFiles } : {}),
+      ...(resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
+      ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
+      ...(raw.skills ? { skills: raw.skills } : {}),
+      ...(raw.anti_patterns ? { antiPatterns: raw.anti_patterns } : {}),
+    },
+  };
 }
 
 // ─── Factory ───
@@ -245,21 +635,78 @@ export function createDelegateTaskTool(options: {
       'not into the chat.',
     parameters: DelegateTaskParameters,
     async execute(_toolCallId, args, signal): Promise<AgentToolResult<Record<string, never>>> {
+      // Schema 层 task / role 是 Optional（见 DelegateTaskParameters 注释）——
+      // 真正「必填」由下面的 mutual-exclusion 分支校验。这里 cast 成 Optional
+      // 与 schema 1:1 对齐，避免 TS 错把 schema 放宽当作 contract drift。
       const a = args as {
-        task: string;
-        role: WorkerRole;
+        task?: string;
+        role?: WorkerRole;
         model_override?: string;
         input_files?: readonly string[];
         output_path?: string;
         expected_schema?: string;
         skills?: readonly string[];
         anti_patterns?: readonly string[];
+        tasks?: readonly BatchItemInput[];
       };
 
+      // ── 0. Batch mode 分支（Subtask 1.2） ───────────────────────
+      // `tasks` 存在 → 走 batch dispatch（最多 4 item 并行）。与 top-level
+      // `task`/`role` 互斥：必须**只**用一个形态，混用直接 text error 早退。
+      // batch 内部每个 item 仍走同一套 path-safety gate（resolveSessionPath
+      // / assertWithinSessionRoot / assertInputFilesReadable / skillRoot），
+      // 失败聚合后整批返回 text error，不调 runner。
+      if (a.tasks && a.tasks.length > 0) {
+        // 互斥校验：tasks + (task 或 role 非空) → 拒
+        const hasTopLevel = !!(a.task && a.task.trim()) || !!a.role;
+        if (hasTopLevel) {
+          return {
+            content: [{
+              type: 'text',
+              text: 'Error: `tasks` is mutually exclusive with top-level `task`/`role`. Pick one shape: single-task call or batch call, not both.',
+            }],
+            details: {},
+          };
+        }
+        // Item-level gate（path-safety / skills / model_override per item）
+        const resolvedItems: BatchItemResolved[] = [];
+        for (let i = 0; i < a.tasks.length; i++) {
+          const item = a.tasks[i];
+          const result = await resolveBatchItem(sessionId, item, i);
+          if ('error' in result) return result.error;
+          resolvedItems.push(result.item);
+        }
+        // 调 batch runner
+        const { runBatchWorker } = await import('@/entrypoints/background/agent/worker-runner');
+        const batchHandoff = await runBatchWorker({
+          tasks: resolvedItems,
+          sessionId,
+          mainModel: null,
+          ...(signal ? { signal } : {}),
+        });
+        return {
+          content: [{ type: 'text', text: renderBatchToolResult(batchHandoff) }],
+          details: {},
+        };
+      }
+
       // ── 1. task 非空检查 ──────────────────────────────────────────
+      // 注意：schema 层 task 是 Optional（见 DelegateTaskParameters 注释）——
+      // 真正的「单 task 形态必填」在这里由 mutual-exclusion 后续分支保证：
+      // 这里过了就意味着走 single-task path，必须 `task` 非空 + `role` 在
+      // 4 literal union（role 校验见 line 614+）。
       if (!a.task || !a.task.trim()) {
         return {
           content: [{ type: 'text', text: 'Error: `task` is required and must not be empty.' }],
+          details: {},
+        };
+      }
+      // role 同样在 schema 层 Optional（为了 batch 入口）。Single-task
+      // 路径必须显式校验 —— 否则 runner 拿到 undefined 会 panic。
+      const validRoles = ['content_writer', 'frontend_coder', 'reviewer', 'researcher'] as const;
+      if (!a.role || !validRoles.includes(a.role)) {
+        return {
+          content: [{ type: 'text', text: 'Error: `role` is required and must be one of: content_writer, frontend_coder, reviewer, researcher.' }],
           details: {},
         };
       }
@@ -361,6 +808,10 @@ export function createDelegateTaskTool(options: {
 
       // ── 7. Lazy import + 调 runner ──────────────────────────────
       const { runWorker } = await import('@/entrypoints/background/agent/worker-runner');
+      // Reviewer auto-schema（Subtask 2.2）：caller 没传 expected_schema 时
+      // 注入 REVIEWER_HANDOFF_SCHEMA，让 reviewer emit 结构化 15 条 checklist。
+      // Caller 显式传 → 用 caller 的（不覆盖）。
+      const resolvedExpectedSchema = defaultExpectedSchemaForRole(a.role!, a.expected_schema);
       const handoff = await runWorker({
         task: a.task,
         role: a.role,
@@ -370,7 +821,7 @@ export function createDelegateTaskTool(options: {
         // /content.json 这种「猜测根目录」（E2E 实测 bug）。
         ...(resolvedInputFiles ? { inputFiles: resolvedInputFiles } : {}),
         ...(resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
-        ...(a.expected_schema !== undefined ? { expectedSchema: a.expected_schema } : {}),
+        ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
         ...(a.skills ? { skills: a.skills } : {}),
         ...(a.anti_patterns ? { antiPatterns: a.anti_patterns } : {}),
         sessionId,
@@ -405,6 +856,13 @@ export function createDelegateTaskTool(options: {
         handoff_notes: handoff.handoff_notes,
         timedOut: handoff.timedOut,
         attemptDurationMs: handoff.attemptDurationMs,
+        // Subtask 2.2 code-review Finding #3：把 reviewer 的 checklist 透
+        // 传到 summarizeHandoffJson，让 checklist_summary 聚合能用上。tool
+        // 这里按需选字段（不直接 JSON.stringify(handoff) 是为了 cap 输出
+        // 大小 + 避免把 runner 内部字段如 batch / attempts 等 leak 出去）。
+        // 用 `?.length ?? 0` 守卫避免空 array 走 truthy 路径（empty array
+        // 语义 = reviewer 没 emit，不该出现在主代理 view）。
+        ...(handoff.checklist && handoff.checklist.length > 0 ? { checklist: handoff.checklist } : {}),
       }));
 
       if (handoff.status === 'failed') {

@@ -23,6 +23,24 @@
 //   - 2.3 Role action badge：status='running' 时 header 额外加 "writing /
 //     coding / researching / reviewing" 的 action label（具体文案见 locales
 //     `chat.delegation.action.*`），让用户一眼看出 "这个 worker 现在在做什么"（不只是 "在跑"）。
+//
+// Subtask 1.3 batch container：
+//   当 `delegate_task` 用 `tasks: [...]` 形态调用时（最多 4 个独立 task 并行），
+//   渲染 outer `DelegationCard`（不带 single-task 字段，header 显示 coarse 计数 + status badge），
+//   body 渲染 N 个 `DelegationCardItem`（内层卡片，与单 task 视觉一致）。
+//   Per-item 的状态 / elapsed timer / output 链接都独立 —— 一个 item 卡死不影响其他。
+//   Outer status 决策表：all success → success；≥1 fail → partial；all fail → failed。
+//
+// Subtask 2.3 reviewer checklist mini-table：
+//   `WorkerHandoff.checklist: [{item, status, evidence}]`（Subtask 2.2 schema）
+//   在 inner card 渲染一个 mini-table：3 列（kebab id / status icon / evidence
+//   truncated 80 chars），aggregate header 显示 X pass · Y warn · Z fail。
+//   checklist 缺 / 空数组时**不**渲染 —— 非 reviewer role（content_writer /
+//   frontend_coder / researcher）没有 checklist，老 reviewer 没 emit 也是空。
+//   这条 prop 接受 `readonly ChecklistItem[]` 而非 enum-typed id：schema 用了
+//   开放 pattern `^[a-z][a-z0-9-]*$`（Subtask 2.2 code-review #10），未来
+//   加 item 不需要改 DelegationCard 编译；table 用 i18n lookup map 把 known 15
+//   id 翻成 label，未知 id fallback 成 kebab 原文。
 
 import { useState, useEffect } from 'react';
 import {
@@ -72,7 +90,51 @@ const ROLE_ACTION_LABEL_KEYS: Record<WorkerRole, 'chat.delegation.action.content
   researcher: 'chat.delegation.action.researcher',
 };
 
-interface DelegationCardProps {
+/** Public API */
+
+/** Reviewer audit row shape —— mirror `WorkerHandoff.checklist`（Subtask 2.2
+ *  schema-validate.ts）。`item` 是 open-pattern kebab id（schema 用
+ *  `^[a-z][a-z0-9-]*$`，不是 enum），所以这里也用 `string` 接受未知 id —— table
+ *  渲染时走 i18n lookup map + 原文 fallback。 */
+export interface ChecklistItem {
+  item: string;
+  status: 'pass' | 'fail' | 'warn';
+  evidence: string;
+}
+
+/** Aggregate reviewer audit counts —— 驱动 mini-table header。
+ *  空数组 / undefined 时 caller 不渲染 table（sane default）。 */
+export interface ChecklistSummary {
+  pass: number;
+  warn: number;
+  fail: number;
+}
+
+/** Pure counter —— 给 mini-table header 用，不依赖 React。
+ *  undefined / 空数组时返回 undefined（caller 跳过 table 渲染）。
+ *  非 ChecklistItem 元素被 silently skip（schema 校验过的 handoff
+ *  不会走到这条路径，但 UI 不能因脏数据 crash）。 */
+export function summarizeChecklist(
+  items: readonly ChecklistItem[] | undefined,
+): ChecklistSummary | undefined {
+  if (!items || items.length === 0) return undefined;
+  let pass = 0;
+  let warn = 0;
+  let fail = 0;
+  for (const it of items) {
+    if (!it || typeof it !== 'object') continue;
+    if (it.status === 'pass') pass++;
+    else if (it.status === 'warn') warn++;
+    else if (it.status === 'fail') fail++;
+  }
+  return { pass, warn, fail };
+}
+
+/** Per-task inner card shape. Both `DelegationCardItem` (inner rendering) and
+ *  the outer batch container accept this. The outer container's full
+ *  props also accept `batch?: readonly DelegationCardItemProps[]` +
+ *  `batchSummary?: BatchSummary`. */
+export interface DelegationCardItemProps {
   /** Worker role —— 来自 tool argument `tc.arguments.role`。 */
   role: WorkerRole;
   /** 当前状态。`running` 时不传 toolResult；`success` / `failed` / `partial` 时
@@ -107,6 +169,9 @@ interface DelegationCardProps {
    *  120_000 会在 runner cap 改的瞬间漂移。`status === 'running'` 时用
    *  于渲染 "Xs / Ys" 倒计时分母。 */
   timeoutMs?: number;
+  /** Reviewer 静态 audit 的结构化结果（Subtask 2.2 `REVIEWER_HANDOFF_SCHEMA`）。
+   *  非 reviewer role 永远 undefined —— 不渲染 mini-table。 */
+  checklist?: readonly ChecklistItem[];
 }
 
 interface DelegationStatusBadgeProps {
@@ -190,7 +255,7 @@ export type DelegationStatus =
   | 'cancelled'
   | 'timedOut';
 
-export function DelegationCard({
+export function DelegationCardItem({
   role,
   status,
   task,
@@ -203,7 +268,8 @@ export function DelegationCard({
   attemptDurationMs,
   attemptStartedAt,
   timeoutMs,
-}: DelegationCardProps) {
+  checklist,
+}: DelegationCardItemProps) {
   // 默认展开策略：running / failed / partial / timedOut 一律展开（用户在等结果 /
   // 要看错误 / 要看「换 model」提示），success + 有 output 折叠（点 header 看
   // detail，点 outputFile 按钮直接预览），success 无 output / cancelled 折叠。
@@ -348,6 +414,54 @@ export function DelegationCard({
             </div>
           )}
 
+          {checklist && checklist.length > 0 && (() => {
+            const summaryCounts = summarizeChecklist(checklist);
+            return (
+              <div className="px-3.5 py-2.5 bg-background border-t border-border/50">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="text-[0.65rem] text-muted-foreground/60 font-medium">
+                    {t('chat.delegation.reviewer.auditHeader')}
+                  </div>
+                  {summaryCounts && (
+                    <div className="flex items-center gap-2 text-[0.65rem] tabular-nums">
+                      <span className="flex items-center gap-0.5 text-success">
+                        <Check className="size-3" />
+                        {summaryCounts.pass}
+                      </span>
+                      <span className="flex items-center gap-0.5 text-warning-foreground">
+                        <AlertTriangle className="size-3" />
+                        {summaryCounts.warn}
+                      </span>
+                      <span className="flex items-center gap-0.5 text-destructive">
+                        <X className="size-3" />
+                        {summaryCounts.fail}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <table className="w-full text-[0.7rem] tabular-nums">
+                  <tbody>
+                    {checklist.map((row, idx) => (
+                      <tr key={idx} className="border-t border-border/30 first:border-t-0 align-top">
+                        <td className="py-1 pr-2 font-mono text-muted-foreground whitespace-nowrap">
+                          {row.item}
+                        </td>
+                        <td className="py-1 pr-2 w-4 text-center">
+                          {row.status === 'pass' && <Check className="size-3 text-success inline-block" aria-label={t('chat.delegation.reviewer.statusPass')} />}
+                          {row.status === 'warn' && <AlertTriangle className="size-3 text-warning-foreground inline-block" aria-label={t('chat.delegation.reviewer.statusWarn')} />}
+                          {row.status === 'fail' && <X className="size-3 text-destructive inline-block" aria-label={t('chat.delegation.reviewer.statusFail')} />}
+                        </td>
+                        <td className="py-1 text-muted-foreground break-words" title={row.evidence}>
+                          {row.evidence.length > 80 ? `${row.evidence.slice(0, 80)}…` : row.evidence}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
+
           {/* Handoff notes — only present on failure / partial; sits at the bottom as the "why" tail */}
           {handoffNotes && (
             <div className="px-3.5 py-2.5 bg-background border-t border-border/50">
@@ -417,6 +531,190 @@ export function DelegationCard({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Batch container (Subtask 1.3) ────────────────────────────────────────
+//
+// 外层 `DelegationCard` 渲染 batch mode（`delegate_task({ tasks: [...] })`）：
+// header 显示 "N tasks — X succeeded, Y failed" + 外层 status badge，
+// body 渲染 N 个 `DelegationCardItem`（内层卡片，与单 task 视觉一致）。
+//
+// 外层 status 决策（与 `aggregateBatchHandoffs` 保持一致 — 单 source of truth）：
+//   - 任一 item status='running'            → outer 'running'
+//   - ≥1 success + ≥1 fail（非 running）    → outer 'partial'
+//   - 所有 item 都 'success'                  → outer 'success'
+//   - 所有 item 都 fail / cancelled / timedOut → outer 'failed'
+//
+// 为什么不在 DelegationCard 内部就聚合：聚合是纯函数，runner 已经做完了。
+// UI 层只负责把 `batchSummary` + 每个 item 的 fields 渲染出来 —— 避免
+// 让 React 组件重新跑一遍同样的决策逻辑导致和 runner drift。
+
+export interface BatchSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  partial: number;
+  cancelled: number;
+}
+
+export interface DelegationCardProps {
+  /** 单 task 模式：传这个 + `role` / `task` / 其它 item 字段。
+   *  Batch 模式：传 `batch` 数组，外层 header 会用 batchSummary 算 status。 */
+  role?: WorkerRole;
+  status?: DelegationStatus;
+  task?: string;
+  outputFile?: string;
+  sessionId?: string;
+  summary?: string;
+  handoffNotes?: string;
+  modelKey?: string;
+  attempts?: number;
+  attemptDurationMs?: number;
+  attemptStartedAt?: number;
+  timeoutMs?: number;
+  /** Reviewer 静态 audit（Subtask 2.3）—— 单 task mode 时挂在 outer card
+   *  上而不是 inner item，因为这里 outer 自己也接受 inner 的全部字段。 */
+  checklist?: readonly ChecklistItem[];
+  /** Batch 模式：per-item 渲染为内层 `DelegationCardItem`。
+   *  传这个就忽略 outer single-task 字段（外层 header 改成 batchSummary）。 */
+  batch?: readonly DelegationCardItemProps[];
+  /** Batch 模式：外层 header 用的 coarse 计数（来自 runner 的 `aggregateBatchHandoffs`）。 */
+  batchSummary?: BatchSummary;
+}
+
+/** 从 per-item 状态数组里聚合外层 status（保持和 `aggregateBatchHandoffs`
+ *  决策表 1:1 镜像；index.tsx 解析阶段算好直接传，但允许 caller 临时手算）。
+ *
+ *  Decision table（与 runner 完全一致）：
+ *    - 任一 item 'running'                → outer 'running'
+ *    - 所有 item 都 'success'              → outer 'success'
+ *    - ≥1 success + ≥1 非 success 且非 running → outer 'partial'
+ *    - 全部 fail / cancelled / timedOut    → outer 'failed'
+ *
+ * 重要：'partial' 是「混合成功」的意思，不是「有 partial item」。runner
+ * 用 succeeded count 算 outer status；所以 4/4 全 success → outer.success，
+ * 3/4 success → outer.partial（即使第 4 个 item 自己 status='failed'）。
+ */
+export function aggregateBatchStatus(
+  items: readonly DelegationCardItemProps[],
+): DelegationStatus {
+  if (items.length === 0) return 'failed';
+  if (items.some((it) => it.status === 'running')) return 'running';
+  const allSuccess = items.every((it) => it.status === 'success');
+  if (allSuccess) return 'success';
+  const anySuccess = items.some((it) => it.status === 'success');
+  return anySuccess ? 'partial' : 'failed';
+}
+
+export function DelegationCard(props: DelegationCardProps) {
+  const isBatch = props.batch !== undefined && props.batch.length > 0;
+  if (!isBatch) {
+    // 单 task 模式：直接代理到 inner item，保留原有 props 形状 / 默认展开策略
+    if (!props.role || !props.task || !props.status) {
+      // 类型守卫：缺少必要字段就 fallback 到 placeholder —— 测试 / 异常路径
+      return (
+        <div className="border border-border rounded-lg px-3.5 py-2.5 text-xs text-muted-foreground">
+          —
+        </div>
+      );
+    }
+    return (
+      <DelegationCardItem
+        role={props.role}
+        status={props.status}
+        task={props.task}
+        outputFile={props.outputFile}
+        sessionId={props.sessionId}
+        summary={props.summary}
+        handoffNotes={props.handoffNotes}
+        modelKey={props.modelKey}
+        attempts={props.attempts}
+        attemptDurationMs={props.attemptDurationMs}
+        attemptStartedAt={props.attemptStartedAt}
+        timeoutMs={props.timeoutMs}
+        checklist={props.checklist}
+      />
+    );
+  }
+
+  // Batch 模式：渲染外层 container + N 个 inner items
+  const items = props.batch ?? [];
+  const summary: BatchSummary =
+    props.batchSummary ?? {
+      total: items.length,
+      succeeded: items.filter((it) => it.status === 'success').length,
+      failed: items.filter(
+        (it) => it.status === 'failed' || it.status === 'timedOut',
+      ).length,
+      partial: 0,
+      cancelled: items.filter((it) => it.status === 'cancelled').length,
+    };
+  const outerStatus = aggregateBatchStatus(items);
+  const anyRunning = outerStatus === 'running';
+
+  return (
+    <div
+      className={
+        anyRunning
+          ? 'border border-warning/50 border-l-2 border-l-warning rounded-lg overflow-hidden text-[0.8rem] min-w-0 animate-pulse'
+          : 'border border-border rounded-lg overflow-hidden text-[0.8rem] min-w-0'
+      }
+    >
+      {/* Batch header —— coarse count + outer status badge */}
+      <div className="flex items-center gap-2.5 px-3.5 py-2.5 bg-card">
+        <span className="text-foreground font-medium">
+          {t('chat.delegation.batch.header', [
+            String(summary.total),
+            String(summary.succeeded),
+            String(summary.failed),
+          ])}
+        </span>
+        <DelegationStatusBadge
+          status={outerStatus}
+          elapsedSec={
+            // Batch mode: outer elapsed 显示 batch 整体运行时间 —— placeholder
+            // 阶段所有 item 共享同一个 batchStartedAt（index.tsx 注入），
+            // resolved 阶段 item 不带 attemptStartedAt 所以 undefined。
+            anyRunning && items[0]?.attemptStartedAt !== undefined
+              ? Math.max(
+                  0,
+                  Math.floor((Date.now() - items[0].attemptStartedAt!) / 1000),
+                )
+              : undefined
+          }
+          timeoutSec={
+            items[0]?.timeoutMs !== undefined
+              ? Math.round(items[0].timeoutMs! / 1000)
+              : undefined
+          }
+        />
+      </div>
+
+      {/* Per-item body —— each inner card manages its own timer / output link /
+          error fold; one item crashing/stuck does not affect the others' interactivity. */}
+      <div className="border-t border-border divide-y divide-border/60">
+        {items.map((item, idx) => (
+          <div key={idx} className="px-2 py-2">
+            <DelegationCardItem
+              role={item.role}
+              status={item.status}
+              task={item.task}
+              outputFile={item.outputFile}
+              sessionId={item.sessionId}
+              summary={item.summary}
+              handoffNotes={item.handoffNotes}
+              modelKey={item.modelKey}
+              attempts={item.attempts}
+              attemptDurationMs={item.attemptDurationMs}
+              attemptStartedAt={item.attemptStartedAt}
+              timeoutMs={item.timeoutMs}
+              checklist={item.checklist}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import {
   assembleHandoff,
+  aggregateBatchHandoffs,
   buildAntiPatternsBlock,
   buildWorkspaceBlock,
   composePrompt,
@@ -18,7 +19,9 @@ import {
   type AssembleHandoffArgs,
   type PromptContext,
   type WorkerHandoff,
+  type BatchWorkerItem,
 } from '@/entrypoints/background/agent/worker-runner';
+import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 import {
   resolveWorkerRoleTimeoutMs,
   resolvePhaseTimeout,
@@ -473,6 +476,151 @@ describe('assembleHandoff', () => {
   it('attempts 透传：caller 不传 → handoff.attempts undefined（兼容老 caller）', () => {
     const h = assembleHandoff(baseArgs());
     expect(h.attempts).toBeUndefined();
+  });
+
+  // ── Subtask 2.2: checklist pass-through ─────────────────────────
+  // Reviewer handoff 现在带结构化 15 条 checklist（`{item, status, evidence}`）。
+  // assembleHandoff 在 success path 把 JSON 里的 checklist 字段 narrow 一遍
+  // 后挂到 WorkerHandoff.checklist，让 DelegationCard（Subtask 2.3）能直接
+  // machine-parse。Schema 校验已在 branch 3 跑过，这里只做 narrow 类型守卫。
+  it('success path + valid checklist 数组 → handoff.checklist 挂载', () => {
+    const handoffJson = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'Audit done',
+      handoff_notes: '',
+      checklist: [
+        { item: 'no-localstorage', status: 'fail', evidence: 'line 42: localStorage.setItem' },
+        { item: 'no-sessionstorage', status: 'pass', evidence: 'no sessionStorage' },
+        { item: 'overflow-x-auto', status: 'warn', evidence: 'table missing wrap' },
+      ],
+    });
+    const h = assembleHandoff({
+      ...baseArgs({ json: handoffJson, rawText: handoffJson, role: 'reviewer' }),
+    });
+    expect(h.status).toBe('success');
+    expect(h.checklist).toEqual([
+      { item: 'no-localstorage', status: 'fail', evidence: 'line 42: localStorage.setItem' },
+      { item: 'no-sessionstorage', status: 'pass', evidence: 'no sessionStorage' },
+      { item: 'overflow-x-auto', status: 'warn', evidence: 'table missing wrap' },
+    ]);
+  });
+
+  it('success path + 缺 checklist 字段 → handoff.checklist undefined（非 reviewer 兼容）', () => {
+    // 非 reviewer 角色（content_writer / frontend_coder / researcher）从来不
+    // emit checklist —— 字段缺失是 expected，不是 bug。assembleHandoff 不挂
+    // checklist 字段让 UI fallback 到「no checklist」路径。
+    const handoffJson = JSON.stringify({
+      status: 'success',
+      output_file: 'out.txt',
+      summary: 'ok',
+      handoff_notes: '',
+    });
+    const h = assembleHandoff(baseArgs({ json: handoffJson, rawText: handoffJson }));
+    expect(h.checklist).toBeUndefined();
+  });
+
+  it('success path + 空 checklist 数组 → handoff.checklist 不挂（minItems gate）', () => {
+    // Empty array = 「忘了 emit」语义错误 —— 不挂字段比挂空数组给 UI 友好。
+    const handoffJson = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'ok',
+      handoff_notes: '',
+      checklist: [],
+    });
+    const h = assembleHandoff({
+      ...baseArgs({ json: handoffJson, rawText: handoffJson, role: 'reviewer' }),
+    });
+    expect(h.checklist).toBeUndefined();
+  });
+
+  it('success path + checklist item 字段缺（缺 evidence）→ handoff.checklist 不挂', () => {
+    // narrow 守卫：单个 item 字段缺 / 类型错 → drop 整个 checklist 字段，
+    // 不让 partial data 渲染成误导表。不抛（schema fail 已在 branch 3 跑过
+    // 没失败，说明 caller 没传 expected_schema，narrow 不该 throw）。
+    const handoffJson = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'ok',
+      handoff_notes: '',
+      checklist: [
+        { item: 'no-localstorage', status: 'pass' }, // evidence missing
+      ],
+    });
+    const h = assembleHandoff({
+      ...baseArgs({ json: handoffJson, rawText: handoffJson, role: 'reviewer' }),
+    });
+    expect(h.checklist).toBeUndefined();
+  });
+
+  it('success path + checklist item status 不在 enum → handoff.checklist 不挂', () => {
+    // status 字段非 'pass' / 'fail' / 'warn' → narrow 拒收。
+    const handoffJson = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'ok',
+      handoff_notes: '',
+      checklist: [{ item: 'no-localstorage', status: 'passed', evidence: 'ok' }],
+    });
+    const h = assembleHandoff({
+      ...baseArgs({ json: handoffJson, rawText: handoffJson, role: 'reviewer' }),
+    });
+    expect(h.checklist).toBeUndefined();
+  });
+
+  it('expectedSchema = REVIEWER_HANDOFF_SCHEMA + checklist 缺 → schema fail retryable', () => {
+    // 集成：caller 显式传 REVIEWER_HANDOFF_SCHEMA + reviewer 漏 emit checklist
+    // → schema fail → retryable:true（让 reviewer 第二轮有机会补 emit）。
+    // Schema 用 source-of-truth import 而不是 inline literal —— Subtask 2.2
+    // code-review Finding #5：inline copy 会随 REVIEWER_HANDOFF_SCHEMA 改动
+    // 悄悄 drift。
+    const schemaJson = JSON.stringify(REVIEWER_HANDOFF_SCHEMA);
+    const noChecklist = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'ok',
+      handoff_notes: '',
+    });
+    const h = assembleHandoff(
+      baseArgs({
+        json: noChecklist,
+        rawText: noChecklist,
+        role: 'reviewer',
+        expectedSchema: schemaJson,
+      }),
+    );
+    expect(h.status).toBe('failed');
+    expect(h.retryable).toBe(true);
+    expect(h.error).toMatch(/checklist/i);
+    expect(h.checklist).toBeUndefined();
+  });
+
+  it('expectedSchema = REVIEWER_HANDOFF_SCHEMA + 满 checklist → success + checklist 挂载', () => {
+    // 集成：caller 显式传 schema + reviewer 完整 emit 15 条 → 全过，挂 checklist。
+    // Schema 用 source-of-truth import（Finding #5）。
+    const schemaJson = JSON.stringify(REVIEWER_HANDOFF_SCHEMA);
+    const validHandoff = JSON.stringify({
+      status: 'success',
+      output_file: null,
+      summary: 'Audit done',
+      handoff_notes: '',
+      checklist: [
+        { item: 'no-localstorage', status: 'fail', evidence: 'line 42' },
+        { item: 'overflow-x-auto', status: 'pass', evidence: 'ok' },
+      ],
+    });
+    const h = assembleHandoff(
+      baseArgs({
+        json: validHandoff,
+        rawText: validHandoff,
+        role: 'reviewer',
+        expectedSchema: schemaJson,
+      }),
+    );
+    expect(h.status).toBe('success');
+    expect(h.retryable).toBeUndefined();
+    expect(h.checklist).toHaveLength(2);
   });
 });
 
@@ -1058,6 +1206,223 @@ describe('resolvePhaseTimeout (Subtask 7 phase-aware idle)', () => {
     // 强制 ≥180s。callers 应自行 sanity-check。
     expect(resolvePhaseTimeout('emitting', 60_000)).toBe(60_000);
     expect(resolvePhaseTimeout('between_turns', 60_000)).toBe(WORKER_IDLE_MS);
+  });
+});
+
+// ─── aggregateBatchHandoffs (Subtask 1.1 — batch dispatch aggregation) ───
+//
+// 纯聚合 helper：把 N 个 per-item WorkerHandoff 折成 outer batch handoff。
+// Status 决策表（钉死）：
+//   - 全部 ok:true + status:success → outer 'success'
+//   - ≥1 ok + ≥1 non-ok           → outer 'partial'
+//   - 全部 ok:false               → outer 'failed'
+// outer.modelKey / role 取第一个 item 的值（旧 caller / UI header 渲染的
+// fallback）；per-item 真实数据在 batch[] 数组里。IO-heavy 的 `runBatchWorker`
+// 自身走 manual integration（plan 显式提到 BG SW console），不在此测。
+
+function stubItemHandoff(overrides: Partial<WorkerHandoff> & { role: WorkerRole }): WorkerHandoff {
+  return {
+    status: 'success',
+    ok: true,
+    summary: 'ok',
+    handoff_notes: '',
+    modelKey: 'anthropic/claude-3-5-sonnet',
+    ...overrides,
+  };
+}
+
+function stubBatchItem(role: WorkerRole, task = 'x'): BatchWorkerItem {
+  return { task, role };
+}
+
+describe('aggregateBatchHandoffs (Subtask 1.1 batch aggregator)', () => {
+  it('全部 4 个 item success → outer status:success + ok:true + batchSummary 正确', () => {
+    const tasks = [
+      stubBatchItem('content_writer'),
+      stubBatchItem('frontend_coder'),
+      stubBatchItem('reviewer'),
+      stubBatchItem('researcher'),
+    ];
+    const items: WorkerHandoff[] = tasks.map((t) => stubItemHandoff({ role: t.role }));
+    const outer = aggregateBatchHandoffs(tasks, items);
+
+    expect(outer.status).toBe('success');
+    expect(outer.ok).toBe(true);
+    expect(outer.batchSummary).toEqual({
+      total: 4,
+      succeeded: 4,
+      failed: 0,
+      partial: 0,
+      cancelled: 0,
+    });
+    expect(outer.batch).toHaveLength(4);
+    // 顺序保留
+    expect(outer.batch!.map((i) => i.role)).toEqual([
+      'content_writer',
+      'frontend_coder',
+      'reviewer',
+      'researcher',
+    ]);
+    // outer.role / modelKey 取第一个 item 的值
+    expect(outer.role).toBe('content_writer');
+    expect(outer.modelKey).toBe('anthropic/claude-3-5-sonnet');
+  });
+
+  it('1 个 item fail + 3 个 success → outer status:partial + ok:true', () => {
+    // 「partial」语义：batch 本身跑完了、有产物，但有 item 失败 —— 主代理
+    // 应该看 batch[] 决定下一步。outer.ok:true 让 caller 不必额外检查。
+    const tasks = [
+      stubBatchItem('content_writer'),
+      stubBatchItem('frontend_coder'),
+      stubBatchItem('reviewer'),
+      stubBatchItem('researcher'),
+    ];
+    const items: WorkerHandoff[] = [
+      stubItemHandoff({ role: 'content_writer' }),
+      stubItemHandoff({ role: 'frontend_coder', status: 'failed', ok: false, error: 'parse fail' }),
+      stubItemHandoff({ role: 'reviewer' }),
+      stubItemHandoff({ role: 'researcher' }),
+    ];
+    const outer = aggregateBatchHandoffs(tasks, items);
+
+    expect(outer.status).toBe('partial');
+    expect(outer.ok).toBe(true);
+    expect(outer.batchSummary).toMatchObject({
+      total: 4,
+      succeeded: 3,
+      failed: 1,
+      partial: 0,
+    });
+    // 失败的 item 完整保留
+    expect(outer.batch![1].status).toBe('failed');
+    expect(outer.batch![1].error).toBe('parse fail');
+  });
+
+  it('全部 4 个 item fail → outer status:failed + ok:false', () => {
+    const tasks = [
+      stubBatchItem('content_writer'),
+      stubBatchItem('frontend_coder'),
+      stubBatchItem('reviewer'),
+      stubBatchItem('researcher'),
+    ];
+    const items: WorkerHandoff[] = tasks.map((t) =>
+      stubItemHandoff({ role: t.role, status: 'failed', ok: false, error: 'oops' }),
+    );
+    const outer = aggregateBatchHandoffs(tasks, items);
+
+    expect(outer.status).toBe('failed');
+    expect(outer.ok).toBe(false);
+    expect(outer.batchSummary).toMatchObject({ total: 4, succeeded: 0, failed: 4 });
+  });
+
+  it('mixed: 2 success + 1 partial + 1 fail → outer status:partial + batchSummary 区分 partial', () => {
+    // partial 是 worker 自报 status='partial'（≠ ok:false）。要确保 batchSummary
+    // 把 partial 单独计数而不是混进 failed —— 否则 UI 显示 "4 failed" 误
+    // 导。status 决策按 okCount > 0 走 partial。
+    const tasks = [
+      stubBatchItem('content_writer'),
+      stubBatchItem('frontend_coder'),
+      stubBatchItem('reviewer'),
+      stubBatchItem('researcher'),
+    ];
+    const items: WorkerHandoff[] = [
+      stubItemHandoff({ role: 'content_writer' }),
+      stubItemHandoff({ role: 'frontend_coder', status: 'partial' }),
+      stubItemHandoff({ role: 'reviewer', status: 'failed', ok: false, error: 'x' }),
+      stubItemHandoff({ role: 'researcher' }),
+    ];
+    const outer = aggregateBatchHandoffs(tasks, items);
+    expect(outer.status).toBe('partial');
+    expect(outer.batchSummary).toEqual({
+      total: 4,
+      succeeded: 2,
+      failed: 1,
+      partial: 1,
+      cancelled: 0,
+    });
+  });
+
+  it('cancelled 字段识别 abort / cancel 字样', () => {
+    // 「cancelled」是 failed 子集 —— UI 想区分「用户主动取消」vs「真失败」
+    // 时用这条。regex 用 `/abort|cancel/i`，拼写不区分大小写。
+    const tasks = [
+      stubBatchItem('content_writer'),
+      stubBatchItem('frontend_coder'),
+      stubBatchItem('reviewer'),
+    ];
+    const items: WorkerHandoff[] = [
+      stubItemHandoff({ role: 'content_writer' }),
+      stubItemHandoff({
+        role: 'frontend_coder',
+        status: 'failed',
+        ok: false,
+        error: 'Worker aborted by parent signal',
+      }),
+      stubItemHandoff({
+        role: 'reviewer',
+        status: 'failed',
+        ok: false,
+        error: 'Cancelled by user',
+      }),
+    ];
+    const outer = aggregateBatchHandoffs(tasks, items);
+    expect(outer.batchSummary?.cancelled).toBe(2);
+    expect(outer.batchSummary?.failed).toBe(2);
+  });
+
+  it('outer summary 含「succeeded / failed」等人类可读数字', () => {
+    // 给主代理 LLM 一眼看 batch 整体结果 —— 不必扫 batch[]。
+    const tasks = [stubBatchItem('content_writer'), stubBatchItem('frontend_coder')];
+    const items: WorkerHandoff[] = [
+      stubItemHandoff({ role: 'content_writer' }),
+      stubItemHandoff({ role: 'frontend_coder', status: 'failed', ok: false, error: 'oops' }),
+    ];
+    const outer = aggregateBatchHandoffs(tasks, items);
+    expect(outer.summary).toMatch(/succeeded/i);
+    expect(outer.summary).toMatch(/failed/i);
+    expect(outer.summary).toContain('2 total');
+  });
+
+  it('outer.modelKey / role 兜底到第一个 item 的值（缺 batch[0] 时用 content_writer 默认）', () => {
+    // 空 items 数组 + tasks 也是空 → 兜底 content_writer + 空 modelKey
+    const outer = aggregateBatchHandoffs([], []);
+    expect(outer.role).toBe('content_writer');
+    expect(outer.modelKey).toBe('');
+  });
+
+  it('空 tasks 列表（edge case，tool 层应当 gate 住） → status:failed 不 throw', () => {
+    // tool 层 (`delegate_task.ts` schema) 用 `minItems: 1` 卡掉空数组；
+    // 但 helper 自己要 safe —— 防止 caller 直接调（e.g. test harness）时
+    // 除零 / undefined。期望 outer.status:failed + summary 提及 0 tasks。
+    const outer = aggregateBatchHandoffs([], []);
+    expect(outer.status).toBe('failed');
+    expect(outer.batch).toHaveLength(0);
+    expect(outer.batchSummary?.total).toBe(0);
+  });
+
+  it('保留 batch 顺序与 tasks 输入顺序一致（即使中间 item fail）', () => {
+    // Subtask 1.1 contract：batch[i] 必须对应 tasks[i] —— 否则 UI 按索引
+    // 渲染会导致 attribution 错位。下面 4 items，第 2 个 fail，其它 success，
+    // 顺序必须保留。
+    const tasks = [
+      stubBatchItem('content_writer', 'task-A'),
+      stubBatchItem('frontend_coder', 'task-B'),
+      stubBatchItem('reviewer', 'task-C'),
+      stubBatchItem('researcher', 'task-D'),
+    ];
+    const items: WorkerHandoff[] = [
+      stubItemHandoff({ role: 'content_writer' }),
+      stubItemHandoff({ role: 'frontend_coder', status: 'failed', ok: false, error: 'x' }),
+      stubItemHandoff({ role: 'reviewer' }),
+      stubItemHandoff({ role: 'researcher' }),
+    ];
+    const outer = aggregateBatchHandoffs(tasks, items);
+    expect(outer.batch!.map((i) => i.role)).toEqual([
+      'content_writer',
+      'frontend_coder',
+      'reviewer',
+      'researcher',
+    ]);
   });
 });
 

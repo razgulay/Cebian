@@ -25,10 +25,45 @@ vi.mock('@/entrypoints/background/agent/worker-runner', () => ({
     role: 'content_writer',
     attempts: 1,
   })),
+  runBatchWorker: vi.fn(async () => ({
+    status: 'success',
+    ok: true,
+    summary: 'Batch: 2 succeeded, 0 partial, 0 failed, 0 cancelled (2 total)',
+    handoff_notes: '',
+    modelKey: 'openai/gpt-4o-mini',
+    role: 'content_writer',
+    attempts: 1,
+    batch: [
+      {
+        status: 'success',
+        ok: true,
+        output_file: 'a.md',
+        summary: 'item 0 done',
+        handoff_notes: '',
+        output_content: '# A',
+        modelKey: 'openai/gpt-4o-mini',
+        role: 'content_writer',
+        attempts: 1,
+      },
+      {
+        status: 'success',
+        ok: true,
+        output_file: 'b.md',
+        summary: 'item 1 done',
+        handoff_notes: '',
+        output_content: '# B',
+        modelKey: 'openai/gpt-4o-mini',
+        role: 'frontend_coder',
+        attempts: 1,
+      },
+    ],
+    batchSummary: { total: 2, succeeded: 2, failed: 0, partial: 0, cancelled: 0 },
+  })),
 }));
 
-import { runWorker } from '@/entrypoints/background/agent/worker-runner';
+import { runWorker, runBatchWorker } from '@/entrypoints/background/agent/worker-runner';
 import { vfs } from '@/lib/persistence/vfs';
+import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 
 // 真实格式的 UUID sessionId —— `lib/utils.ts` 的 `isValidSessionId` 强制
 // UUID v4 形态，`'session-test-1'` 会被 `path-safety.sessionRoot` 直接抛
@@ -213,5 +248,779 @@ describe('createDelegateTaskTool — delegate_task 工具', () => {
     expect(call.inputFiles).toEqual([absoluteInput]);
     // 关键负向断言：不能被双 prefix
     expect(call.inputFiles[0]).not.toBe(`/workspaces/${SESSION_ID}/workspaces/${SESSION_ID}/a.md`);
+  });
+});
+
+// ─── Subtask 1.2: batch dispatch (`tasks: [...]`) ───────────────────────────
+//
+// 新 schema 字段 `tasks: Type.Array(DelegateTaskItem, {minItems:1, maxItems:4})`
+// + `renderBatchToolResult` + 互斥校验 + per-item path-safety gate。`runBatchWorker`
+// 被 vi.mock 接管（顶部的 stub 模拟「2 个 item 全 success」场景）。
+
+describe('Subtask 1.2 — delegate_task batch dispatch', () => {
+  // 每个 `it` 自己起一份 fresh tool + reset mocks，避免共享 describe scope
+  // 的 `tool` 常量 + mock call history 跨 test 泄漏。
+  // `mockReset` 比 `clearAllMocks` 更彻底 —— 既清 call history 也重置 mock
+  // implementation（虽然这里 mock 不带 implementation），防止 `runWorker` /
+  // `runBatchWorker` 跨 test 累加调用次数。
+  const batchTool = createDelegateTaskTool({ sessionId: SESSION_ID });
+  beforeEach(() => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    // Re-apply stub behavior after reset
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 'success',
+      ok: true,
+      summary: 'Batch: 2 succeeded, 0 partial, 0 failed, 0 cancelled (2 total)',
+      handoff_notes: '',
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'content_writer',
+      attempts: 1,
+      batch: [
+        {
+          status: 'success',
+          ok: true,
+          output_file: 'a.md',
+          summary: 'item 0 done',
+          handoff_notes: '',
+          output_content: '# A',
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'content_writer',
+          attempts: 1,
+        },
+        {
+          status: 'success',
+          ok: true,
+          output_file: 'b.md',
+          summary: 'item 1 done',
+          handoff_notes: '',
+          output_content: '# B',
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'frontend_coder',
+          attempts: 1,
+        },
+      ],
+      batchSummary: { total: 2, succeeded: 2, failed: 0, partial: 0, cancelled: 0 },
+    });
+    // item 5 (review finding #5): explicitly re-declare vfs.access spy to make
+    // this describe block self-contained — outer describe's beforeEach still
+    // installs it, but if a future refactor moves the spy, batch tests would
+    // fail with cryptic "File not found" instead of being obviously missing.
+    vi.spyOn(vfs, 'access').mockResolvedValue(undefined);
+  });
+
+  it('valid 2-item batch → runBatchWorker 被调 1 次，resolvedItems 路径正确', async () => {
+    const result = await batchTool.execute('call-batch-1', {
+      tasks: [
+        { task: 'write a.md', role: 'content_writer', output_path: 'a.md' },
+        { task: 'write b.md', role: 'frontend_coder', output_path: 'b.md' },
+      ],
+    } as never, undefined);
+    expect(runBatchWorker).toHaveBeenCalledTimes(1);
+    expect(runWorker).not.toHaveBeenCalled();
+    if (result.content[0].type === 'text') {
+      expect(result.content[0].text).toContain('[batch]');
+      expect(result.content[0].text).toContain('[item 0]');
+      expect(result.content[0].text).toContain('[item 1]');
+      expect(result.content[0].text).toContain('role=content_writer');
+      expect(result.content[0].text).toContain('role=frontend_coder');
+    }
+  });
+
+  it('互斥：tasks 同时带 top-level task 或 role → text error，不调任何 runner', async () => {
+    const result = await batchTool.execute('call-batch-2', {
+      task: 'leftover top-level',
+      role: 'content_writer',
+      tasks: [
+        { task: 'x', role: 'frontend_coder' },
+      ],
+    } as never, undefined);
+    if (result.content[0].type === 'text') {
+      expect(result.content[0].text).toContain('mutually exclusive');
+    }
+    expect(runBatchWorker).not.toHaveBeenCalled();
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
+  it('size cap 守门在 typebox schema 层（提供 5 个 task → pi-agent-core 拦在 schema 校验阶段）', () => {
+    // 我们在 tool 层不需要重复 maxItems check —— typebox schema 自带守门。
+    // 这里只断言 schema 形状含 maxItems 4，让 reviewer 把这条压在 schema 上。
+    const schema = batchTool.parameters;
+    const json = JSON.stringify(schema);
+    expect(json).toContain('"maxItems":4');
+    expect(json).toContain('"minItems":1');
+  });
+
+  it('items 内 path-safety 失败（output_path 越界）→ 整批 fail-fast，不调 runBatchWorker', async () => {
+    // 单 item 越界 → resolveBatchItem 返回 { error } → tool 立即 return，
+    // runBatchWorker 完全没机会跑。比 top-level 路径更严：不让 runner 空转
+    // 一次才发现第一个 item 就有问题。
+    const result = await batchTool.execute('call-batch-3', {
+      tasks: [
+        { task: 'safe', role: 'content_writer', output_path: 'safe.md' },
+        { task: 'evil', role: 'content_writer', output_path: '../escape.md' },
+      ],
+    } as never, undefined);
+    if (result.content[0].type === 'text') {
+      expect(result.content[0].text).toContain('tasks[1].output_path');
+      expect(result.content[0].text).toContain('outside the session workspace');
+    }
+    expect(runBatchWorker).not.toHaveBeenCalled();
+  });
+
+  it('item skill 名字非法 → 整批 fail-fast', async () => {
+    const result = await batchTool.execute('call-batch-4', {
+      tasks: [
+        { task: 'x', role: 'content_writer', skills: ['../../../etc/passwd'] },
+      ],
+    } as never, undefined);
+    if (result.content[0].type === 'text') {
+      expect(result.content[0].text).toContain('tasks[0].skills');
+    }
+    expect(runBatchWorker).not.toHaveBeenCalled();
+  });
+
+  it('item model_override 非法 → 整批 fail-fast', async () => {
+    const result = await batchTool.execute('call-batch-5', {
+      tasks: [
+        { task: 'x', role: 'content_writer', model_override: 'not-json' },
+      ],
+    } as never, undefined);
+    if (result.content[0].type === 'text') {
+      expect(result.content[0].text).toContain('tasks[0].model_override');
+    }
+    expect(runBatchWorker).not.toHaveBeenCalled();
+  });
+
+  it('合法 model_override JSON 解析后透传到 runBatchWorker', async () => {
+    await batchTool.execute('call-batch-6', {
+      tasks: [
+        {
+          task: 'x',
+          role: 'content_writer',
+          model_override: JSON.stringify({ provider: 'anthropic', modelId: 'claude-sonnet-4-5' }),
+        },
+      ],
+    } as never, undefined);
+    const call = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(call.tasks[0].modelOverride).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-4-5',
+    });
+  });
+
+  it('relative output_path / input_files resolve 成绝对路径再传给 runBatchWorker', async () => {
+    // E2E bug fix：worker 不知道 sessionId → 必须给绝对路径。batch item
+    // 同样走 resolveSessionPath（top-level path 的镜像）。
+    await batchTool.execute('call-batch-7', {
+      tasks: [
+        {
+          task: 'x',
+          role: 'content_writer',
+          output_path: 'a.md',
+          input_files: ['b.md'],
+        },
+      ],
+    } as never, undefined);
+    const call = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(call.tasks[0].outputPath).toBe(`/workspaces/${SESSION_ID}/a.md`);
+    expect(call.tasks[0].inputFiles).toEqual([`/workspaces/${SESSION_ID}/b.md`]);
+  });
+
+  it('batch mode 完全不调 runWorker（防御 regression：互斥分支独立）', async () => {
+    // top-level path 用 `runWorker`，batch 用 `runBatchWorker`；绝不能让 batch
+    // 误调 `runWorker`（一个 item）或让 runWorker 在 batch 模式下被触达。
+    await batchTool.execute('call-batch-8', {
+      tasks: [
+        { task: 'a', role: 'content_writer' },
+        { task: 'b', role: 'frontend_coder' },
+      ],
+    } as never, undefined);
+    expect(runBatchWorker).toHaveBeenCalledTimes(1);
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
+  it('renderBatchToolResult 输出含 [batch] / [batch-summary] / [item N] / annotation', async () => {
+    // 验证文本格式契约 —— UI 后续要用这套 prefix 解析（Subtask 1.3）。
+    const result = await batchTool.execute('call-batch-9', {
+      tasks: [
+        { task: 'a', role: 'content_writer', output_path: 'a.md' },
+        { task: 'b', role: 'frontend_coder', output_path: 'b.md' },
+      ],
+    } as never, undefined);
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toContain('[batch]');
+    expect(text).toContain('[batch-summary]');
+    expect(text).toContain('total=2');
+    expect(text).toContain('succeeded=2');
+    expect(text).toContain('[item 0]');
+    expect(text).toContain('[item 1]');
+    expect(text).toContain('via batch worker');
+  });
+
+  // ─── Review findings 1, 2, 4, 6 增量测试 ──────────────────────────────
+
+  it('expected_schema / skills / anti_patterns 都会透传给 runBatchWorker（review #1）', async () => {
+    // Mirror top-level path 测 (line 209-234)，保证 batch 路径不丢字段。
+    await batchTool.execute('call-batch-r1', {
+      tasks: [
+        {
+          task: 'x',
+          role: 'content_writer',
+          expected_schema: '{"type":"object"}',
+          skills: ['races-template'],
+          anti_patterns: ['Do not fabricate quotes'],
+        },
+      ],
+    } as never, undefined);
+    const call = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(call.tasks[0].expectedSchema).toBe('{"type":"object"}');
+    expect(call.tasks[0].skills).toEqual(['races-template']);
+    expect(call.tasks[0].antiPatterns).toEqual(['Do not fabricate quotes']);
+  });
+
+  it('input_files 已是绝对路径 → 幂等不双 prefix（review #2: E2E bug 防回归）', async () => {
+    // Top-level path 有这个测 (line 236-250)；batch 路径同样走 resolveSessionPath，
+    // 必须保幂等。
+    const absoluteInput = `/workspaces/${SESSION_ID}/b.md`;
+    await batchTool.execute('call-batch-r2', {
+      tasks: [
+        { task: 'x', role: 'content_writer', input_files: [absoluteInput] },
+      ],
+    } as never, undefined);
+    const call = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(call.tasks[0].inputFiles).toEqual([absoluteInput]);
+    expect(call.tasks[0].inputFiles[0]).not.toBe(
+      `/workspaces/${SESSION_ID}/workspaces/${SESSION_ID}/b.md`,
+    );
+  });
+
+  it('size cap 真正被 typebox 拒：5 个 item 数组 → schema 校验失败（review #4）', async () => {
+    // 直接用 Value.Check 验证 schema 真的 enforce maxItems；之前的 JSON 嗅
+    // 探测只能确认字符串里有 maxItems 字面量，无法验约束生效。
+    const { Value } = await import('typebox/value');
+    // 5 个 item 应被拒（maxItems: 4）
+    const five = {
+      tasks: Array.from({ length: 5 }, (_, i) => ({
+        task: `t${i}`,
+        role: 'content_writer' as const,
+      })),
+    };
+    expect(Value.Check(batchTool.parameters, five)).toBe(false);
+    // 1 个 item（合法 baseline）
+    const one = {
+      tasks: [{ task: 't', role: 'content_writer' as const }],
+    };
+    expect(Value.Check(batchTool.parameters, one)).toBe(true);
+  });
+
+  it('deadlock 防回归：仅 tasks: [...] 也应 schema-valid（manual test deadlock fix）', async () => {
+    // 之前 DelegateTaskParameters top-level 把 task / role 标 required，
+    // LLM 调 batch 时被 schema 拦在门外；如果 LLM 加上 task/role 凑齐
+    // required，handler 又抛 mutually exclusive —— 死锁：LLM 没法表达
+    // batch intent。修复：schema 把 task/role 降到 Optional，互斥由
+    // handler mutual-exclusion 分支校验。这里 pin 死 schema 放宽。
+    const { Value } = await import('typebox/value');
+    // 只传 tasks，不传 top-level task/role —— schema 必须接受
+    const batchOnly = {
+      tasks: [
+        { task: 'a', role: 'content_writer' as const },
+        { task: 'b', role: 'reviewer' as const },
+      ],
+    };
+    expect(Value.Check(batchTool.parameters, batchOnly)).toBe(true);
+    // 反向：空对象（既无 task/role 也无 tasks）也 schema-valid，错误由
+    // handler mutual-exclusion 收尾
+    expect(Value.Check(batchTool.parameters, {})).toBe(true);
+    // 单 task 路径仍接受 task + role —— 向后兼容
+    const single = { task: 't', role: 'content_writer' as const };
+    expect(Value.Check(batchTool.parameters, single)).toBe(true);
+  });
+
+  it('handler 在 single-task 路径拒 missing/empty role（schema 放宽后的兜底）', async () => {
+    // Schema 把 role 降到 Optional 之后，single-task 路径必须在 handler
+    // 显式校验 role 是否在 4 literal union —— 否则 runner 拿到 undefined
+    // 会 panic。`role: 'undefined' as never` 模拟 LLM 漏传或 typo。
+    const result = await batchTool.execute('call-no-role', {
+      task: 'do something',
+      // 故意省略 role
+    } as never, undefined);
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toMatch(/role.*required/);
+  });
+
+  it('per-item output_content 在 renderBatchToolResult 里被渲染为 labeled chunk（review #6）', async () => {
+    // batch renderer 有 if (item.output_content) 块 + `--- output_content (${label}) ---`
+    // 分隔符；这是 Subtask 1.3 UI 解析的关键格式契约。当前测试只断言
+    // summary / batch-summary prefix；这条把 output_content 渲染分支钉死。
+    const result = await batchTool.execute('call-batch-r6', {
+      tasks: [{ task: 'a', role: 'content_writer', output_path: 'a.md' }],
+    } as never, undefined);
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    // mock stub 给 item 0 设了 output_content: '# A'
+    expect(text).toContain('--- output_content');
+    expect(text).toContain('a.md');
+    expect(text).toContain('# A');
+  });
+
+  // Subtask 1.4: PREAMBLE + schema doc 双层 defense-in-depth —— tool
+  // schema description 里也要带 batch 入口 + 上限 + 独立约束 + 互斥契约。
+  // Subtask 8.9 已经在 PREAMBLE / role.description 里放过 Fast Lane rule；
+  // 这条测试把 `tasks` 参数 description 也钉死，避免下次精简 description
+  // 时悄悄删掉关键条款导致 LLM 看不到 batch 入口 / 把依赖链塞进 batch。
+  it('tool schema description 把 batch 入口 + 独立约束 + 互斥契约写进 description', () => {
+    // `tasks` 参数的 description 在 DelegateTaskParameters 里；
+    // 抽出字段 props 检查 substring（避免依赖完整 schema dump）
+    const schema = batchTool.parameters as unknown as {
+      properties: Record<string, { description?: string }>;
+    };
+    const tasksDesc = schema.properties?.tasks?.description;
+    expect(tasksDesc, '`tasks` parameter description missing').toBeTruthy();
+    // 关键契约 substring —— 这些字面量被 LLM 在 tool 选定前看到一次，
+    // 是 defense-in-depth 的第二层（第一层是 PREAMBLE）
+    expect(tasksDesc).toContain('Up to 4');
+    expect(tasksDesc).toContain('INDEPENDENT');
+    expect(tasksDesc).toContain('Promise.allSettled');
+    // 反例：依赖链 —— content_writer → frontend_coder reads content.json
+    expect(tasksDesc).toMatch(/frontend_coder reads content\.json/);
+    // 互斥契约：tasks 与 top-level task/role 不能混用
+    expect(tasksDesc).toMatch(/Mutually exclusive/i);
+  });
+
+  // Subtask 1.3 deadlock fix 的 schema 层 pin：top-level `task` / `role`
+  // 都是 Optional —— batch-only call 必须 schema-valid。这是上一条
+  // 「description pin」对应的 schema-shape pin，两条一起锁死 schema
+  // 放宽契约（不再回到 required 死锁）。
+  it('schema shape: top-level task / role 都是 Optional（batch 入口不被 schema 拦）', () => {
+    const schema = batchTool.parameters as unknown as {
+      required?: readonly string[];
+      properties: Record<string, { type?: string }>;
+    };
+    // 用 default-empty 而不是 if-defined —— 防止 TypeBox 当前 undefined
+    // required 的行为哪天变成 `required: []` 时整段 assert 被静默跳过
+    // （CLAUDE.md 反复警告「test give zero signal」是 silent regression
+    // 最危险形态）。
+    const required = schema.required ?? [];
+    expect(required, 'top-level `task` is back in schema.required').not.toContain('task');
+    expect(required, 'top-level `role` is back in schema.required').not.toContain('role');
+    // properties 层面：task / role 仍存在（schema 没漏字段），type 是 string
+    expect(schema.properties.task).toBeDefined();
+    expect(schema.properties.role).toBeDefined();
+  });
+});
+
+// ─── Subtask 2.2: reviewer auto-schema inject ───────────────────────────────
+//
+// Reviewer 角色当 caller 不传 `expected_schema` 时，tool 层自动注入
+// `REVIEWER_HANDOFF_SCHEMA`（让 reviewer 第二轮 retry 按 15 条 checklist 重
+// emit）。Caller 显式传 → 用 caller 的（不覆盖）。
+//
+// 这里只测「auto-inject 开关」语义：调用 runWorker 时拿到什么 `expectedSchema`
+// 参数。Schema 本身的形状/校验走 `schema-validate.test.ts`，不在这里重复。
+
+describe('Subtask 2.2 — reviewer auto-schema inject (delegate_task tool layer)', () => {
+  const reviewTool = createDelegateTaskTool({ sessionId: SESSION_ID });
+  const REVIEWER_SCHEMA_JSON = JSON.stringify(REVIEWER_HANDOFF_SCHEMA);
+
+  beforeEach(() => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    // Re-apply stub：reviewer handoff 不强制跑通，stub 返 success 即可。
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 'success',
+      ok: true,
+      output_file: null,
+      summary: 'audit done',
+      handoff_notes: '',
+      checklist: [{ item: 'no-localstorage', status: 'pass', evidence: 'ok' }],
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'reviewer',
+      attempts: 1,
+    });
+    vi.spyOn(vfs, 'access').mockResolvedValue(undefined);
+  });
+
+  it('role=reviewer + 无 expected_schema → runner 收到 REVIEWER_HANDOFF_SCHEMA', async () => {
+    // 关键 case：caller 完全不传 expected_schema —— tool 必须自动注入，
+    // 否则 reviewer 不会走 schema fail-retry。
+    await reviewTool.execute(
+      'call-2.2-1',
+      {
+        task: 'audit studio.html',
+        role: 'reviewer',
+        input_files: ['studio.html'],
+      } as never,
+      undefined,
+    );
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.expectedSchema).toBe(REVIEWER_SCHEMA_JSON);
+  });
+
+  it('role=reviewer + caller 自传 expected_schema → runner 用 caller 的（不覆盖）', async () => {
+    // Caller 自传 schema 必须原样透传 —— auto-inject 只在 caller 没传时兜底。
+    const customSchema = JSON.stringify({
+      type: 'object',
+      required: ['status', 'summary'],
+      properties: { status: { enum: ['success', 'failed'] }, summary: { type: 'string' } },
+    });
+    await reviewTool.execute(
+      'call-2.2-2',
+      {
+        task: 'audit studio.html',
+        role: 'reviewer',
+        input_files: ['studio.html'],
+        expected_schema: customSchema,
+      } as never,
+      undefined,
+    );
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.expectedSchema).toBe(customSchema);
+    expect(callArgs.expectedSchema).not.toBe(REVIEWER_SCHEMA_JSON);
+  });
+
+  it('role=content_writer + 无 expected_schema → runner 收到 undefined（auto-inject 仅 reviewer）', async () => {
+    // content_writer / frontend_coder / researcher 都没自动 schema —— 三个
+    // role 的 handoff 是自由 prose，不需要结构化。
+    await reviewTool.execute(
+      'call-2.2-3',
+      {
+        task: 'write a poem',
+        role: 'content_writer',
+      } as never,
+      undefined,
+    );
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.expectedSchema).toBeUndefined();
+  });
+
+  it('top-level tool schema 描述里提了 reviewer auto-schema 提示', () => {
+    // Caller 看到 schema description 时应知道 reviewer 有 auto-inject —— 不
+    // 然 caller 不知道「不传 expected_schema 也能拿到结构化 checklist」。
+    const schema = reviewTool.parameters as { properties: Record<string, { description?: string }> };
+    const desc = schema.properties.expected_schema?.description ?? '';
+    expect(desc).toMatch(/reviewer/i);
+    expect(desc).toMatch(/auto-?inject/i);
+    expect(desc).toMatch(/REVIEWER_HANDOFF_SCHEMA/);
+  });
+
+  // ── Subtask 2.2 code-review fixes (Finding #8) ──────────────────
+  it('expected_schema = "" (空串) → 按 undefined 处理，不调 caller-supplied 路径', async () => {
+    // 关键 case：call site 可能把 setting 默认值 '' 透传过来。空串 → 让
+    // parseExpectedSchema 抛「not valid JSON」runner error 是 UX 灾难，
+    // 等同没传即可。这里测 empty-string 兜底：runner 拿到 REVIEWER_HANDOFF_SCHEMA
+    // （auto-inject），而不是空串。
+    await reviewTool.execute(
+      'call-2.2-empty',
+      {
+        task: 'audit',
+        role: 'reviewer',
+        expected_schema: '   ',
+      } as never,
+      undefined,
+    );
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.expectedSchema).toBe(REVIEWER_SCHEMA_JSON);
+  });
+
+  it('expected_schema = "  " (whitespace only) → 按 undefined 处理', async () => {
+    await reviewTool.execute(
+      'call-2.2-ws',
+      {
+        task: 'audit',
+        role: 'reviewer',
+        expected_schema: '  ',
+      } as never,
+      undefined,
+    );
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(callArgs.expectedSchema).toBe(REVIEWER_SCHEMA_JSON);
+  });
+});
+
+// ─── Subtask 2.2 code-review Finding #3+#6: checklist_summary surfaces ──────
+//
+// `summarizeHandoffJson` 和 `renderBatchToolResult` 现在挂 `checklist_summary:
+// {pass, warn, fail}` 让主代理 LLM 一眼看出 reviewer audit 的 fail/warn 计数。
+// 测试用 vi.mock('@/entrypoints/background/agent/worker-runner') 已经 stub
+// 了一个固定 handoff —— 改用 mockResolvedValueOnce 让每个测试自定义 handoff
+// 形状，再断言 tool result text 含 `checklist_summary: pass=X warn=Y fail=Z`。
+//
+// 这里测的是 text-rendering 函数本身；mock 拿到什么 handoff → render 出什么
+// string。`summarizeHandoffJson` 是 file-local（无 export），通过 mock
+// `runWorker` 把 handoff 喂进 tool，再断言 result.content[0].text。
+
+describe('Subtask 2.2 — checklist_summary surfaced to main agent (single-task)', () => {
+  const summaryTool = createDelegateTaskTool({ sessionId: SESSION_ID });
+
+  beforeEach(() => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    vi.spyOn(vfs, 'access').mockResolvedValue(undefined);
+  });
+
+  it('reviewer handoff 带 checklist (2 fail + 1 warn + 1 pass) → tool text 含 checklist_summary', async () => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'success',
+      ok: true,
+      output_file: null,
+      summary: 'Audit done',
+      handoff_notes: '',
+      checklist: [
+        { item: 'no-localstorage', status: 'fail', evidence: 'line 42' },
+        { item: 'overflow-x-auto', status: 'fail', evidence: 'wide table' },
+        { item: 'no-indexeddb', status: 'warn', evidence: 'indexedDB.open' },
+        { item: 'title-present', status: 'pass', evidence: 'ok' },
+      ],
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'reviewer',
+      attempts: 1,
+    });
+    const result = await summaryTool.execute(
+      'call-2.2-sum-1',
+      {
+        task: 'audit',
+        role: 'reviewer',
+      } as never,
+      undefined,
+    );
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toMatch(/"checklist_summary":\{"pass":1,"warn":1,"fail":2\}/);
+  });
+
+  it('non-reviewer handoff 无 checklist → tool text 不含 checklist_summary', async () => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'success',
+      ok: true,
+      output_file: 'poem.md',
+      summary: 'done',
+      handoff_notes: '',
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'content_writer',
+      attempts: 1,
+    });
+    const result = await summaryTool.execute(
+      'call-2.2-sum-2',
+      {
+        task: 'write poem',
+        role: 'content_writer',
+      } as never,
+      undefined,
+    );
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).not.toMatch(/checklist_summary/);
+  });
+
+  it('reviewer handoff 带空 checklist 数组 → tool text 不含 checklist_summary', async () => {
+    // 空 array → 不挂字段（minItems gate）。tool text 不应该出现计数行。
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'success',
+      ok: true,
+      output_file: null,
+      summary: 'Audit done',
+      handoff_notes: '',
+      checklist: [],
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'reviewer',
+      attempts: 1,
+    });
+    const result = await summaryTool.execute(
+      'call-2.2-sum-3',
+      {
+        task: 'audit',
+        role: 'reviewer',
+      } as never,
+      undefined,
+    );
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).not.toMatch(/checklist_summary/);
+  });
+});
+
+describe('Subtask 2.2 — checklist_summary surfaced to main agent (batch per-item)', () => {
+  const summaryBatchTool = createDelegateTaskTool({ sessionId: SESSION_ID });
+
+  beforeEach(() => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    vi.spyOn(vfs, 'access').mockResolvedValue(undefined);
+  });
+
+  it('batch reviewer item 带 checklist → batch text 含 per-item checklist_summary', async () => {
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'success',
+      ok: true,
+      summary: 'Batch: 1 succeeded',
+      handoff_notes: '',
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'reviewer',
+      attempts: 1,
+      batch: [
+        {
+          status: 'success',
+          ok: true,
+          output_file: null,
+          summary: 'audit done',
+          handoff_notes: '',
+          checklist: [
+            { item: 'no-localstorage', status: 'fail', evidence: 'line 42' },
+            { item: 'title-present', status: 'pass', evidence: 'ok' },
+          ],
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'reviewer',
+          attempts: 1,
+        },
+      ],
+      batchSummary: { total: 1, succeeded: 1, failed: 0, partial: 0, cancelled: 0 },
+    });
+    const result = await summaryBatchTool.execute(
+      'call-2.2-bsum-1',
+      {
+        tasks: [{ task: 'audit', role: 'reviewer' as const }],
+      } as never,
+      undefined,
+    );
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).toMatch(/checklist_summary: pass=1 warn=0 fail=1/);
+  });
+
+  it('batch non-reviewer item → batch text 不含 checklist_summary', async () => {
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'success',
+      ok: true,
+      summary: 'Batch: 1 succeeded',
+      handoff_notes: '',
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'content_writer',
+      attempts: 1,
+      batch: [
+        {
+          status: 'success',
+          ok: true,
+          output_file: 'a.md',
+          summary: 'done',
+          handoff_notes: '',
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'content_writer',
+          attempts: 1,
+        },
+      ],
+      batchSummary: { total: 1, succeeded: 1, failed: 0, partial: 0, cancelled: 0 },
+    });
+    const result = await summaryBatchTool.execute(
+      'call-2.2-bsum-2',
+      {
+        tasks: [{ task: 'write', role: 'content_writer' as const, output_path: 'a.md' }],
+      } as never,
+      undefined,
+    );
+    const text = result.content[0].type === 'text' ? result.content[0].text : '';
+    expect(text).not.toMatch(/checklist_summary/);
+  });
+});
+
+describe('Subtask 2.2 — reviewer auto-schema inject (batch per-item path)', () => {
+  // batch path 的 per-item resolver 复用同一个 `defaultExpectedSchemaForRole`
+  // helper。这里验证 batch reviewer item 同样收到 auto-inject。
+  const batchTool2 = createDelegateTaskTool({ sessionId: SESSION_ID });
+  const REVIEWER_SCHEMA_JSON = JSON.stringify(REVIEWER_HANDOFF_SCHEMA);
+
+  beforeEach(() => {
+    (runWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 'success',
+      ok: true,
+      summary: 'Batch: 2 succeeded',
+      handoff_notes: '',
+      modelKey: 'openai/gpt-4o-mini',
+      role: 'reviewer',
+      attempts: 1,
+      batch: [
+        {
+          status: 'success',
+          ok: true,
+          output_file: null,
+          summary: 'item 0 done',
+          handoff_notes: '',
+          checklist: [{ item: 'no-localstorage', status: 'pass', evidence: 'ok' }],
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'reviewer',
+          attempts: 1,
+        },
+        {
+          status: 'success',
+          ok: true,
+          output_file: null,
+          summary: 'item 1 done',
+          handoff_notes: '',
+          checklist: [{ item: 'no-localstorage', status: 'pass', evidence: 'ok' }],
+          modelKey: 'openai/gpt-4o-mini',
+          role: 'reviewer',
+          attempts: 1,
+        },
+      ],
+      batchSummary: { total: 2, succeeded: 2, failed: 0, partial: 0, cancelled: 0 },
+    });
+    vi.spyOn(vfs, 'access').mockResolvedValue(undefined);
+  });
+
+  it('batch 中 reviewer item 无 expected_schema → 每 item 收到 REVIEWER_HANDOFF_SCHEMA', async () => {
+    await batchTool2.execute(
+      'call-2.2-batch-1',
+      {
+        tasks: [
+          { task: 'audit A', role: 'reviewer' as const, input_files: ['a.html'] },
+          { task: 'audit B', role: 'reviewer' as const, input_files: ['b.html'] },
+        ],
+      } as never,
+      undefined,
+    );
+    expect(runBatchWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const items = callArgs.tasks as Array<{ expectedSchema?: string }>;
+    expect(items).toHaveLength(2);
+    expect(items[0].expectedSchema).toBe(REVIEWER_SCHEMA_JSON);
+    expect(items[1].expectedSchema).toBe(REVIEWER_SCHEMA_JSON);
+  });
+
+  it('batch 中 reviewer item 自传 expected_schema → 用 caller 的（不 auto-inject）', async () => {
+    const customSchema = JSON.stringify({
+      type: 'object',
+      required: ['status', 'summary'],
+    });
+    await batchTool2.execute(
+      'call-2.2-batch-2',
+      {
+        tasks: [
+          { task: 'audit', role: 'reviewer' as const, expected_schema: customSchema },
+        ],
+      } as never,
+      undefined,
+    );
+    expect(runBatchWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const items = callArgs.tasks as Array<{ expectedSchema?: string }>;
+    expect(items[0].expectedSchema).toBe(customSchema);
+  });
+
+  it('batch 中 non-reviewer item → 不 auto-inject（content_writer 自由 prose）', async () => {
+    await batchTool2.execute(
+      'call-2.2-batch-3',
+      {
+        tasks: [
+          { task: 'write poem', role: 'content_writer' as const, output_path: 'poem.md' },
+        ],
+      } as never,
+      undefined,
+    );
+    expect(runBatchWorker).toHaveBeenCalledTimes(1);
+    const callArgs = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const items = callArgs.tasks as Array<{ expectedSchema?: string }>;
+    expect(items[0].expectedSchema).toBeUndefined();
   });
 });

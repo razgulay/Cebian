@@ -218,6 +218,50 @@ export interface WorkerHandoff {
    *  的 `timedOut` 字段保持正交：`timedOut` 仅 truthy iff `failureReason ∈
    *  {ttft, idle, timeout, ceiling}`. */
   failureReason?: 'ttft' | 'idle' | 'timeout' | 'ceiling';
+  /** Batch result：仅 batch dispatch 时有值。`batch.length === tasks.length`，
+   *  顺序与 tasks 一致。每个 item 是独立的 WorkerHandoff（自己的 ok / status /
+   *  attempts / failureReason）—— 一个 item 失败不影响 siblings。 */
+  batch?: readonly WorkerHandoff[];
+  /** Batch coarse summary：主代理不用扫 N 个 item 就能判断「全 ok / 部分 ok /
+   *  全 fail」。Computed from batch items；batch 缺失时为 undefined。 */
+  batchSummary?: BatchSummary;
+  /** Per-item self-reported partial：worker 在 handoff JSON 里把 status 标
+   *  partial 时设为 true。区别于 runner-level partial（status 字段）：这是
+   *  「item 自己说产物不完整」但 batch outer status 仍按 partial 算。
+   *  Additive —— 单 task 模式永远为 undefined。 */
+  partial?: boolean;
+  /** Reviewer checklist：reviewer 角色按 Subtask 2.1 prompt emit 15 条静态
+   *  audit 结果（item / status / evidence）让主代理 / DelegationCard 能
+   *  machine-parse 出 fail / warn / pass 分布，而不是 grep prose。
+   *  校验走 `REVIEWER_HANDOFF_SCHEMA`（`lib/agent/schema-validate.ts`）——
+   *  schema fail → retryable，让 reviewer 第二轮有机会按 schema 重 emit。
+   *  Additive —— 非 reviewer role 永远为 undefined。 */
+  checklist?: readonly ChecklistItem[];
+}
+
+/** Reviewer 角色专属 checklist item shape。Stable kebab-case id（来自
+ *  `REVIEWER_CHECKLIST_ITEM_IDS` 常量），三态 status（pass / fail / warn，
+ *  区别于外层 WorkerHandoff.status 的 success / failed / partial），
+ *  evidence 是 200 char 内的 grep 命中证据（line number / pattern literal）。
+ *
+ *  与外层 `status: 'success' | 'failed' | 'partial'` 的关系：
+ *  - reviewer 外层 `status: 'success'` + checklist 里有 fail / warn = 任务
+ *    成功交付但 audit 发现问题，让主代理决定 escalate。
+ *  - reviewer 外层 `status: 'failed'` + checklist 都空 / 缺 = worker 自身
+ *    跑挂了（runner-level），checklist 没有意义。
+ */
+export interface ChecklistItem {
+  item: string;
+  status: 'pass' | 'fail' | 'warn';
+  evidence: string;
+}
+
+export interface BatchSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  partial: number;
+  cancelled: number;
 }
 
 // ─── Pure helpers (exported for unit tests) ───
@@ -243,6 +287,11 @@ interface ParsedHandoffJson {
   output_file?: string;
   summary?: string;
   handoff_notes?: string;
+  /** Reviewer 角色（Subtask 2.2）携带 15 条 checklist 结果。
+   *  Schema 校验走 `REVIEWER_HANDOFF_SCHEMA`（`lib/agent/schema-validate.ts`），
+   *  这里只做 narrow 类型守卫；schema 校验失败会让整个 handoff 走 schema-fail
+   *  分支（不挂 checklist 字段，避免把坏数据传给 UI）。 */
+  checklist?: unknown;
 }
 
 export interface AssembleHandoffArgs {
@@ -455,6 +504,38 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
   if (args.outputContent) out.output_content = args.outputContent;
   if (args.attemptDurationMs !== undefined) out.attemptDurationMs = args.attemptDurationMs;
   if (args.attempts !== undefined) out.attempts = args.attempts;
+  // Reviewer checklist pass-through（Subtask 2.2）—— schema 校验已在 branch 3
+  // 跑过，这里再做一遍 narrow 类型守卫把坏数据剥掉而不是 throw：
+  // - array.length === 0：reviewer emit 空数组 = 「忘了 emit」语义错误，
+  //   drop 字段比传空数组给 UI 友好（DelegationCard 看不到就当 reviewer 没
+  //   audit，UI 显示「no checklist」fallback 而非「0 pass」误导）。
+  // - 单个 item 字段缺 / 类型错：drop 整个 checklist 字段（不让 partial
+  //   data 渲染成误导表），不让 worker 自己 trigger schema-fail retry 来
+  //   重写 —— schema-fail 已在 branch 3 跑过，没失败说明 narrow 不该再
+  //   throw。这层是「UI 兜底」非「合约兜底」。
+  if (Array.isArray(parsed.checklist) && parsed.checklist.length > 0) {
+    const items: ChecklistItem[] = [];
+    let allValid = true;
+    for (const raw of parsed.checklist) {
+      if (
+        raw &&
+        typeof raw === 'object' &&
+        typeof (raw as ChecklistItem).item === 'string' &&
+        ((raw as ChecklistItem).status === 'pass' ||
+          (raw as ChecklistItem).status === 'fail' ||
+          (raw as ChecklistItem).status === 'warn') &&
+        typeof (raw as ChecklistItem).evidence === 'string'
+      ) {
+        items.push(raw as ChecklistItem);
+      } else {
+        allValid = false;
+        break;
+      }
+    }
+    if (allValid) {
+      out.checklist = items;
+    }
+  }
   return out;
 }
 
@@ -1369,4 +1450,184 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
     ),
   );
   return handoff;
+}
+
+// ─── Batch dispatch (Subtask 1.1) ───
+//
+// `delegate_task` 一次最多带 4 个独立 task 并行跑（Phase 1 调研：「3 个文件
+// 并行能跑 1/3 时间」是 user 实际 latency 期望；上限 4 是 keepalive budget
+// + 4×50 KB content 总开销的 sanity cap）。每个 item 仍是独立 `runWorker`
+// —— 自己的 retry / timer / abort 状态。一个 item 失败不影响 siblings
+//（`Promise.allSettled`）。Outer handoff 提供 `batch`（per-item 详情）+
+// `batchSummary`（coarse 计数）让主代理 / UI 不必扫 N 个 item。
+//
+// **重要：仅用于独立 task。** 任务 B 读任务 A 的产物时（如
+// content_writer → frontend_coder reads content.json → reviewer reads
+// studio.html），不要 batch 起来——worker B 会在 A 写文件之前 race。
+// 这种依赖链必须分多 delegate_task 串行调用，或等 Phase 1.5 加
+// `depends_on: number[]` 显式声明。这条 caveat 在 PREAMBLE + tool schema
+// description 里 defense-in-depth 写明。
+
+export interface BatchWorkerItem {
+  /** worker 要执行的自然语言任务。 */
+  task: string;
+  /** worker role（4 种固定之一）。 */
+  role: WorkerRole;
+  /** LLM 显式指定的模型身份（最高优先级）。 */
+  modelOverride?: ModelIdentity;
+  /** 任务开始前从 VFS 预读并嵌入 task 的文件列表。文件缺失静默跳过（warn）。 */
+  inputFiles?: readonly string[];
+  /** worker 应写入的输出文件路径。runner 跑完后读回内容（截断）挂到 handoff。 */
+  outputPath?: string;
+  /** Worker 输出 JSON schema（字符串）。runner 抽完 JSON 后用 typebox/value
+   *  校验；失败 → retryable failure。Malformed schema（本身不是合法 JSON）
+   *  → runner error（不 retry）。 */
+  expectedSchema?: string;
+  /** Skill hydration：要自动加载注入 worker 的 skill 名列表。 */
+  skills?: readonly string[];
+  /** Anti-patterns：要 prepend 给 worker 的「禁止事项」列表。 */
+  antiPatterns?: readonly string[];
+}
+
+export interface RunBatchWorkerOptions {
+  /** 待并行的 task 列表（顺序保留；最多 4 个）。 */
+  tasks: readonly BatchWorkerItem[];
+  /** 调用方 session 的 id。 */
+  sessionId: string;
+  /** 主会话当前模型（per-item 解析失败时回退）。 */
+  mainModel?: ModelIdentity | null;
+  /** 调用方（主代理）的 AbortSignal。已 abort → 早退所有 items；
+   *  运行中 abort → 透传到每个 in-flight runWorker。 */
+  signal?: AbortSignal;
+}
+
+/** Batch dispatch 主入口：并行跑 N 个 `runWorker`，组装 outer handoff。
+ *  每个 item 用 `Promise.allSettled` 隔离 —— 一个 item reject 不会中断其它
+ *  in-flight 调用。返回的 outer handoff 永远 `ok:true`（即便所有 item 都
+ *  fail 也是「batch 本身跑完了」），`status` 反映 coarse 结果。
+ *
+ *  Pre-flight abort：signal 在入口处已 abort → 不调 runWorker，直接返回
+ *  batch handoff：所有 items 是「Aborted before start」+ outer `failed`。
+ *  调用方仍能根据 outer.status 判断 batch 没跑。 */
+export async function runBatchWorker(
+  options: RunBatchWorkerOptions,
+): Promise<WorkerHandoff> {
+  const { tasks, sessionId, signal } = options;
+
+  if (signal?.aborted) {
+    const aborted = tasks.map<WorkerHandoff>((t) => ({
+      status: 'failed',
+      ok: false,
+      error: 'Aborted before start',
+      summary: 'Aborted before start',
+      handoff_notes: '',
+      modelKey: '',
+      role: t.role,
+    }));
+    return aggregateBatchHandoffs(tasks, aborted);
+  }
+
+  const settled = await Promise.allSettled(
+    tasks.map((item) =>
+      runWorker({
+        task: item.task,
+        role: item.role,
+        ...(item.modelOverride ? { modelOverride: item.modelOverride } : {}),
+        ...(item.inputFiles ? { inputFiles: item.inputFiles } : {}),
+        ...(item.outputPath ? { outputPath: item.outputPath } : {}),
+        ...(item.expectedSchema !== undefined
+          ? { expectedSchema: item.expectedSchema }
+          : {}),
+        ...(item.skills ? { skills: item.skills } : {}),
+        ...(item.antiPatterns ? { antiPatterns: item.antiPatterns } : {}),
+        sessionId,
+        mainModel: options.mainModel ?? null,
+        ...(signal ? { signal } : {}),
+      }),
+    ),
+  );
+
+  const items: WorkerHandoff[] = settled.map((r, i) => {
+    if (r.status === 'fulfilled') return r.value;
+    // runWorker 自身 never throws（per 顶部 contract 「runner 永远不抛」）；
+    // 但 promise.allSettled 仍防御性包一层，让 batch 在 runtime exception
+    // 下也有 degraded handoff 而不是 throw。
+    const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+    return {
+      status: 'failed',
+      ok: false,
+      error: msg,
+      summary: 'Worker run threw an exception',
+      handoff_notes: '',
+      modelKey: '',
+      role: tasks[i].role,
+    };
+  });
+
+  return aggregateBatchHandoffs(tasks, items);
+}
+
+/** 把 batch items 聚合成 outer handoff。纯函数，可被 unit test 钉死。
+ *  Status 决策表：
+ *  - 全部 `ok:true` + `status:'success'` → outer `status:'success'`
+ *  - 至少 1 个 ok（success/partial）+ 至少 1 个非 ok → outer `status:'partial'`
+ *  - 全部 `ok:false` → outer `status:'failed'`
+ *
+ *  outer `modelKey` / `role`：取第一个 item 的 modelKey + role 作为
+ *  「代表性」值，方便旧 caller / UI 渲染 header 时不报「缺字段」错；
+ *  实际 per-item 数据在 `batch` 数组里。 */
+export function aggregateBatchHandoffs(
+  tasks: readonly BatchWorkerItem[],
+  items: readonly WorkerHandoff[],
+): WorkerHandoff {
+  const total = tasks.length;
+  let succeeded = 0;
+  let failed = 0;
+  let partial = 0;
+  let cancelled = 0;
+  let okCount = 0;
+
+  for (const item of items) {
+    if (item.ok) okCount++;
+    if (item.status === 'success') succeeded++;
+    else if (item.status === 'partial') partial++;
+    else failed++;
+    // cancelled = item 自报 failed + reason 包含 abort / 取消字样
+    if (!item.ok && item.error && /abort|cancel/i.test(item.error)) {
+      cancelled++;
+    }
+  }
+
+  let outerStatus: 'success' | 'partial' | 'failed';
+  if (total === 0) {
+    // Edge case：空 tasks 列表不该走 batch 路径，但作为兜底避免未定义行为。
+    outerStatus = 'failed';
+  } else if (succeeded === total) {
+    outerStatus = 'success';
+  } else if (okCount === 0) {
+    outerStatus = 'failed';
+  } else {
+    outerStatus = 'partial';
+  }
+
+  const first = items[0];
+  const summary =
+    total === 0
+      ? 'Batch dispatch: no tasks'
+      : `Batch: ${succeeded} succeeded, ${partial} partial, ${failed - cancelled} failed, ${cancelled} cancelled (${total} total)`;
+
+  return {
+    status: outerStatus,
+    ok: okCount > 0,
+    summary,
+    handoff_notes: '',
+    modelKey: first?.modelKey ?? '',
+    role: first?.role ?? 'content_writer',
+    // Per-item `partial` flag 让 chat parser / DelegationCardItem 知道这个 item
+    // 是「runner 完整跑完了，worker 自称部分产出」（区别于「item ok 但 batch
+    // outer 部分失败」）。只在 item.status === 'partial' 时挂 true —— 其他
+    // 状态不污染字段。
+    batch: items.map((it) => (it.status === 'partial' ? { ...it, partial: true } : it)),
+    batchSummary: { total, succeeded, failed, partial, cancelled },
+  };
 }

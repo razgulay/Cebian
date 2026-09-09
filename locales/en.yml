@@ -1054,6 +1054,21 @@ chat:
     # Footer on failed / timedOut cards so the user can judge "is the API
     # actually slow, or did it really hang?". $1 = whole seconds (≥1).
     duration: "Failed after $1 s"
+    # Subtask 1.3 batch container: header shows coarse count of a parallel
+    # delegate_task call. $1=total, $2=succeeded, $3=failed. Inner
+    # DelegationCardItem each carries its own status / elapsed timer.
+    batch:
+      header: "Batch · $1 tasks — $2 succeeded, $3 failed"
+    # Subtask 2.3 reviewer audit mini-table. Header label + per-row status
+    # icon a11y labels (screen reader announces "pass" / "warn" / "fail"
+    # instead of the underlying lucide icon name). auditHeader renders above
+    # the table; the per-bucket counts are composed inline by the React
+    # component, so i18n only owns the label text.
+    reviewer:
+      auditHeader: "Audit"
+      statusPass: "pass"
+      statusWarn: "warn"
+      statusFail: "fail"
 
 
 # ─── Provider sub-components (OAuth / API Key / custom) ───

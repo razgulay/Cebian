@@ -33,7 +33,7 @@ import {
 } from '@/components/chat/Message';
 import { ToolCard } from '@/components/chat/ToolCard';
 import { ToolCardWithUI } from '@/components/chat/ToolCardWithUI';
-import { DelegationCard, type DelegationStatus } from '@/components/chat/DelegationCard';
+import { DelegationCard, type DelegationStatus, type BatchSummary, type DelegationCardItemProps, type ChecklistItem } from '@/components/chat/DelegationCard';
 import { isMcpAppResult } from '@/lib/tools/mcp-tool';
 import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
 // WORKER_TIMEOUT_MS / resolveWorkerRoleTimeoutMs 放在 lib/agent/worker-roles.ts
@@ -768,6 +768,9 @@ export function ChatPage({
                     // 跑中（无 toolResult）：status='running'，从 tc.arguments 取 task。
                     // 跑完：parse toolResult 第一段 text content。
                     if (tc.name === TOOL_DELEGATE_TASK) {
+                      // Subtask 1.3: batch mode detection —— `tasks: [...]` shape
+                      // 走 batch path，single-task shape 走原路径（向后兼容）。
+                      const isBatchCall = Array.isArray(tc.arguments?.tasks);
                       const taskArg = typeof tc.arguments?.task === 'string' ? tc.arguments.task : '';
                       const roleArg = typeof tc.arguments?.role === 'string'
                         ? (tc.arguments.role as WorkerRole)
@@ -780,6 +783,90 @@ export function ChatPage({
                             .join('\n') || undefined
                         : undefined;
 
+                      // ─── Batch mode (Subtask 1.3) ──────────────────────
+                      if (isBatchCall) {
+                        // Running batch：runner 还没返回 toolResult，渲染
+                        // 一个 batch container with N placeholder items，task
+                        // 描述从 `tc.arguments.tasks[]` 各 item 取。让用户在
+                        // 等待时能看到「这次发了 N 个并行任务」而不是空卡片。
+                        if (!toolResult) {
+                          const rawTasks = (tc.arguments?.tasks ?? []) as Array<Record<string, unknown>>;
+                          const placeholderItems: DelegationCardItemProps[] = rawTasks.map((it) => {
+                            const role = typeof it.role === 'string' && isWorkerRole(it.role)
+                              ? it.role
+                              : 'content_writer';
+                            const taskText = typeof it.task === 'string' ? it.task : '';
+                            return {
+                              role,
+                              status: 'running',
+                              task: taskText,
+                              timeoutMs: resolveWorkerRoleTimeoutMs(role, workerTimeouts),
+                            };
+                          });
+                          // 第一次见这个 tool call 在 running 时存 attemptStartedAt
+                          // —— 让 batch 内每个 item 复用同一个起点（实际是 batch
+                          // 起点，不是 per-item 起点；够用于「batch 已经跑了多久」
+                          // 的 coarse 提示）。
+                          let batchStartedAt: number | undefined;
+                          const cached = attemptStartedAtRef.current.get(tc.id);
+                          if (cached !== undefined) {
+                            batchStartedAt = cached;
+                          } else {
+                            batchStartedAt = Date.now();
+                            attemptStartedAtRef.current.set(tc.id, batchStartedAt);
+                          }
+                          const itemsWithTimer: DelegationCardItemProps[] = placeholderItems.map((it) => ({
+                            ...it,
+                            ...(batchStartedAt !== undefined ? { attemptStartedAt: batchStartedAt } : {}),
+                          }));
+                          return (
+                            <DelegationCard
+                              key={`tool-${tc.id}`}
+                              batch={itemsWithTimer}
+                              batchSummary={{
+                                total: placeholderItems.length,
+                                succeeded: 0,
+                                failed: 0,
+                                partial: 0,
+                                cancelled: 0,
+                              }}
+                            />
+                          );
+                        }
+
+                        // toolResult 已回来：先尝试 batch parser，失败退到 raw notes
+                        if (resultText) {
+                          const parsed = parseBatchHandoffText(resultText);
+                          if (parsed) {
+                            // 把 per-item task description 从 tc.arguments.tasks[i].task
+                            // 注入 —— parser 拿不到这层语义。
+                            const rawTasks = (tc.arguments?.tasks ?? []) as Array<Record<string, unknown>>;
+                            const enrichedItems: DelegationCardItemProps[] = parsed.items.map((it, idx) => {
+                              const sourceTask = rawTasks[idx]?.task;
+                              return {
+                                ...it,
+                                task: typeof sourceTask === 'string' ? sourceTask : it.task,
+                                ...(routeSessionId ? { sessionId: routeSessionId } : {}),
+                                timeoutMs: resolveWorkerRoleTimeoutMs(it.role, workerTimeouts),
+                              };
+                            });
+                            return (
+                              <DelegationCard
+                                key={`tool-${tc.id}`}
+                                batch={enrichedItems}
+                                batchSummary={parsed.batchSummary}
+                              />
+                            );
+                          }
+                          // 不是 batch format（runner 出 bug）→ 退化：把 raw text
+                          // 作为 notes 塞进单卡，仍然能展示出一些信息。
+                        }
+                        // toolResult 是 error / 文本不可解析：fall through 到单卡
+                        // fallback 路径（下面 raw delegation card）
+                      }
+
+                      // ─── Single-task mode (原路径，向后兼容) ────────────
+
                       // runner-level failure（model 解析失败 / abort）——
                       // toolResult.isError=true 且 resultText 是人类可读错误，
                       // handoff 字段都没有。映射成 'failed' 状态 + 把错误
@@ -791,6 +878,9 @@ export function ChatPage({
                       let modelKeyText: string | undefined;
                       let attemptsNum: number | undefined;
                       let attemptDurationMsNum: number | undefined;
+                      // Subtask 2.3: reviewer audit rows. 缺 / 脏时不传 prop,
+                      // DelegationCard 自带 conditional render 跳过。
+                      let checklistRows: readonly ChecklistItem[] | undefined;
 
                       if (!toolResult) {
                         delegationStatus = isAborted ? 'cancelled' : 'running';
@@ -816,6 +906,7 @@ export function ChatPage({
                             modelKeyText = parsed.modelKey;
                             attemptsNum = parsed.attempts;
                             attemptDurationMsNum = parsed.attemptDurationMs;
+                            checklistRows = parsed.checklist;
                           } else {
                             // 解析失败 —— 原始文本当作 notes 展示，至少不丢信息。
                             handoffNotesText = resultText;
@@ -858,6 +949,7 @@ export function ChatPage({
                           {...(attemptsNum ? { attempts: attemptsNum } : {})}
                           {...(attemptDurationMsNum !== undefined ? { attemptDurationMs: attemptDurationMsNum } : {})}
                           {...(attemptStartedAt !== undefined ? { attemptStartedAt } : {})}
+                          {...(checklistRows ? { checklist: checklistRows } : {})}
                           timeoutMs={resolveWorkerRoleTimeoutMs(safeRole, workerTimeouts)}
                         />
                       );
@@ -1054,6 +1146,26 @@ export function ChatPage({
 
 // ─── delegate_task handoff helpers (module-scope) ───
 
+/** Subtask 2.3: 从 handoff JSON 的 `checklist` 字段里挑出合法 audit rows。
+ *  Schema（Subtask 2.2 `REVIEWER_HANDOFF_SCHEMA`）已经在 runner 层校验过
+ *  `status` enum / `evidence` type，但 UI parser 仍然走宽松 narrow —— 脏数据
+ *  silently drop（不抛错），空数组 / 非数组 / 缺字段时返回 undefined。 */
+function parseChecklistFromObj(raw: unknown): readonly ChecklistItem[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: ChecklistItem[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const item = typeof e.item === 'string' ? e.item : null;
+    const status = e.status;
+    const evidence = typeof e.evidence === 'string' ? e.evidence : null;
+    if (!item || !evidence) continue;
+    if (status !== 'pass' && status !== 'warn' && status !== 'fail') continue;
+    out.push({ item, status, evidence });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /**
  * 从 runner 的 tool result text 里挑出第一个能 parse 的 JSON object。
  * Runner 在 success / partial / failed 三种 handoff 路径下都会塞 JSON；
@@ -1077,6 +1189,10 @@ function parseHandoffText(text: string): {
   attempts?: number;
   timedOut?: boolean;
   attemptDurationMs?: number;
+  /** Reviewer audit rows（Subtask 2.3）—— Subtask 2.2 schema 校验过的 handoff
+   *  里 `checklist` 是 `{item, status, evidence}[]`。空数组 / 缺字段时 undefined，
+   *  caller 不传 DelegationCard.checklist prop（不渲染 mini-table）。 */
+  checklist?: readonly ChecklistItem[];
 } | null {
   // 顺序找第一个 '{'，向右扫到配对 '}' —— 手写小型 stack 比正则更稳。
   for (let i = 0; i < text.length; i++) {
@@ -1116,6 +1232,12 @@ function parseHandoffText(text: string): {
               attempts: typeof obj.attempts === 'number' ? obj.attempts : undefined,
               timedOut: obj.timedOut === true,
               attemptDurationMs: typeof obj.attemptDurationMs === 'number' ? obj.attemptDurationMs : undefined,
+              // Subtask 2.3: reviewer audit rows. Schema (Subtask 2.2) 强制
+              // `status: 'pass'|'fail'|'warn'` enum + `evidence` ≤200 chars + `item` kebab
+              // pattern —— UI 不重新枚举校验（schema 漏过的脏数据 silently drop，
+              // 跟 UI 不 crash 的契约一致；DelegationCard.summarizeChecklist 也有
+              // 同款 silent-drop 兜底）。空数组直接 undefined（mini-table 不渲染）。
+              checklist: parseChecklistFromObj(obj.checklist),
             };
           } catch {
             // 第一个匹配到 '{' 解析失败 —— 可能是大 JSON 中间一段。继续往后找。
@@ -1146,6 +1268,169 @@ function mapHandoffStatus(s: string | undefined, timedOut?: boolean): Delegation
     case 'cancelled': return 'cancelled';
     default: return 'failed';
   }
+}
+
+/** Subtask 1.3 batch parser.
+ *
+ *  `delegate_task({ tasks: [...] })` 形态跑完后，runner 的 `renderBatchToolResult`
+ *  会输出以下纯文本格式（不是 JSON）—— 因为 batch handoff 体积大（≤ 16 KB），
+ *  单 task 的 JSON.parse 路线没法复用：
+ *    [batch] <coarse summary>
+ *    [batch-summary] total=N succeeded=X failed=Y partial=Z cancelled=W
+ *    [item 0] model=<m> role=<r> status=<s> attempts=<n>[ partial=true][ file="<path>"]
+ *      summary: <one-line>
+ *      error: <reason>            # only when item failed / partial
+ *      --- output_content (<path>) ---     # only when item produced content
+ *        <body>
+ *    [item 1] ...
+ *    — via batch worker (<m>, role=<r>, attempts=<n>)
+ *
+ *  Parser 走 line-by-line：扫 `[item N]` 切 chunk，每 chunk 内解析 4 个
+ *  key=val 字段（model/role/status/attempts）和可选的 quoted `file`、
+ *  缩进 `summary:` / `error:` 行。失败 items 缺 summary / output_file 是
+ *  正常情况；这些字段返回 undefined 让 DelegationCardItem 自己 skip 渲染。
+ *
+ *  返回 `null` 当文本不匹配 batch 格式 —— caller 退到单 task parser 路径。
+ */
+function parseBatchHandoffText(text: string): {
+  batchSummary: BatchSummary;
+  items: DelegationCardItemProps[];
+} | null {
+  if (!text.startsWith('[batch]')) return null;
+
+  // batch-summary line：单行 `key=val` 重复，分号前都用空格分隔
+  const batchSummary: BatchSummary = { total: 0, succeeded: 0, failed: 0, partial: 0, cancelled: 0 };
+  const summaryLine = text.split('\n').find((l) => l.startsWith('[batch-summary]'));
+  if (summaryLine) {
+    for (const kv of summaryLine.replace('[batch-summary]', '').trim().split(/\s+/)) {
+      const eq = kv.indexOf('=');
+      if (eq < 0) continue;
+      const key = kv.slice(0, eq);
+      const val = Number(kv.slice(eq + 1));
+      if (!Number.isFinite(val)) continue;
+      if (key === 'total' || key === 'succeeded' || key === 'failed'
+          || key === 'partial' || key === 'cancelled') {
+        batchSummary[key] = val;
+      }
+    }
+  }
+
+  // item chunks：按 `[item N]` 切，遇到 annotation 行或 `—` 收尾
+  const itemHeaderRe = /^\[item (\d+)\]\s+(.*)$/;
+  const lines = text.split('\n');
+  const items: DelegationCardItemProps[] = [];
+  let current: {
+    raw: Record<string, string>;
+    summary?: string;
+    error?: string;
+    /** true once we've seen the `--- output_content (...) ---` marker; all
+     *  subsequent lines belong to the body and must NOT match summary:/error:
+     *  (防 worker output body 误命中这两个前缀). Reset on next item. */
+    inOutputBody: boolean;
+  } | null = null;
+  let currentItemIdx = -1;
+
+  /** Pull `key="value"` or `key=value` from the `[item N]` header line.
+   *  顺序无要求；空格分隔；quoted values 保留内部空格但去掉外层 quote。 */
+  function parseHeaderFields(header: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    let i = 0;
+    while (i < header.length) {
+      // skip leading spaces
+      while (i < header.length && header[i] === ' ') i++;
+      if (i >= header.length) break;
+      // read key
+      const eqIdx = header.indexOf('=', i);
+      if (eqIdx < 0) break;
+      const key = header.slice(i, eqIdx);
+      i = eqIdx + 1;
+      // value: either "..." or until next space
+      let value: string;
+      if (header[i] === '"') {
+        // quoted: find matching unescaped "
+        i++;
+        let buf = '';
+        while (i < header.length) {
+          const ch = header[i];
+          if (ch === '\\' && i + 1 < header.length) {
+            buf += header[i + 1];
+            i += 2;
+          } else if (ch === '"') {
+            i++;
+            break;
+          } else {
+            buf += ch;
+            i++;
+          }
+        }
+        value = buf;
+      } else {
+        const nextSpace = header.indexOf(' ', i);
+        if (nextSpace < 0) {
+          value = header.slice(i);
+          i = header.length;
+        } else {
+          value = header.slice(i, nextSpace);
+          i = nextSpace;
+        }
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
+  function flushCurrent() {
+    if (!current || currentItemIdx < 0) return;
+    const f = current.raw;
+    const role = (f.role ?? 'content_writer') as WorkerRole;
+    const statusStr = f.status ?? 'failed';
+    const mapped = mapHandoffStatus(statusStr);
+    const attempts = f.attempts ? Number(f.attempts) : undefined;
+    items.push({
+      role: isWorkerRole(role) ? role : 'content_writer',
+      status: mapped,
+      task: '', // batch mode: per-item task text is injected from the original tool call arguments by the caller (parser cannot recover it from the rendered text).
+      ...(f.file ? { outputFile: f.file } : {}),
+      ...(current.summary ? { summary: current.summary } : {}),
+      ...(current.error ? { handoffNotes: current.error } : {}),
+      ...(f.model && f.model !== '?' ? { modelKey: f.model } : {}),
+      ...(attempts && attempts > 1 ? { attempts } : {}),
+    });
+  }
+
+  for (const line of lines) {
+    if (line.startsWith('— via batch worker')) {
+      // annotation tail —— flush current item, stop parsing
+      flushCurrent();
+      break;
+    }
+    const m = line.match(itemHeaderRe);
+    if (m) {
+      // new item starts —— flush previous
+      flushCurrent();
+      currentItemIdx = Number(m[1]);
+      current = { raw: parseHeaderFields(m[2]), inOutputBody: false };
+      continue;
+    }
+    if (!current) continue;
+    // 一旦看到 `--- output_content ... ---` marker 就进入 output-body 模式：
+    // 后面所有行都是 worker output 内容（任意前缀 / 任意内容），绝对不能
+    // 误命中 summary:/error:。直到下一个 `[item N]` header 才退出。
+    if (line.trim().startsWith('--- output_content')) {
+      current.inOutputBody = true;
+      continue;
+    }
+    if (current.inOutputBody) continue;
+    const trimmed = line.trim();
+    if (trimmed.startsWith('summary:')) {
+      current.summary = trimmed.slice('summary:'.length).trim();
+    } else if (trimmed.startsWith('error:')) {
+      current.error = trimmed.slice('error:'.length).trim();
+    }
+  }
+
+  if (items.length === 0) return null;
+  return { batchSummary, items };
 }
 
 /** LLM 误传 / 旧 data 残留等情况下，校验 4 个 literal 之一。

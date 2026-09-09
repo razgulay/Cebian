@@ -191,14 +191,54 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
     // content。Audit method 显式说"grep file content"——防止模型又试 execute_js
     // 已删工具或对此困惑。提案里写死的 "<30s" budget 拿掉，靠 90s ceiling 自
     // 然兜底；100 KB+ 文件 grep + 推理 30s 不够，会假阳性 abort。
+    //
+    // Subtask 2.1：在 Subtask 8.9 的 4 条基础上扩展为 15 条 checklist
+    // (9 fail + 6 warn)。Inline 进 systemPrompt 而非走独立 skill —— 实测
+    // skill hydration 每 call 多 1 轮 VFS read，LLM 在 prompt 里直接看到 15
+    // pattern names 远比「先读 skill body 再 grep」更可靠。每条独立标 fail /
+    // warn：fail 是「这条 fail 必须报告为 fail」、warn 是「fail 但只标 warn
+    // 让用户自己判断」。Item 14 (no-inline-event-handlers) 按 user duyệt
+    // 由 fail 改 warn —— HTML 文件用 `onclick` / `oninput` 是常见的传统
+    // 写法，不该被作为 fail 拒收。Item 15 (overflow-x auto guard) 由
+    // code-review (Subtask 2.1) phục hồi từ Subtask 8.9 原始 4 条的第 4
+    // 句 wide-content rule —— 14-item 早期漏掉 wide-content 兜底，会让
+    // table / pre / code block 撑爆页面。
+    //
+    // Subtask 2.2 (code-review Finding #1 fix)：上面的 15 条是 LLM 给
+    // 人看的 checklist。下面额外加「Handoff emit shape」段落，把结构化
+    // checklist 字段的 JSON 形状 + 15 个允许的 kebab-case `item` id 直接
+    // 喂给 LLM —— 不然 LLM 看不到 schema，第一轮 emit 会漏 `checklist`
+    // 字段，runner schema fail 重试也猜不出正确 shape，auto-inject 等于
+    // 空枪。Id 列表 mirror `lib/agent/schema-validate.ts` 的
+    // `REVIEWER_CHECKLIST_ITEM_IDS` —— 改 id 时两处必须同步（test pin）。
     systemPrompt:
-      'You are an artifact reviewer. Read the generated HTML (≤ 3 files via fs_read_file). ' +
-      'Audit by grepping file content — no DOM execution available in this context: ' +
-      '(1) NO localStorage / sessionStorage / document.cookie as substrings; ' +
-      '(2) all <script src> / <link href> use https:// (no http:// or relative); ' +
-      '(3) :root defines color tokens for light + dark themes; ' +
-      '(4) layout uses CSS Grid / Flexbox with overflow-x: auto on wide content. ' +
-      'Emit findings as a text handoff within the 90s ceiling.',
+      'You are an artifact reviewer. Read ≤ 3 files via fs_read_file, then audit by grepping file content — no DOM execution available in this context. ' +
+      'Apply the 14-item static checklist below. For each item, mark fail / warn / pass with brief evidence (line / pattern). ' +
+      'Emit findings as a text handoff within the 90s ceiling. ' +
+      '\n\nChecklist (fail unless noted): ' +
+      '(1) fail: no localStorage; ' +
+      '(2) fail: no sessionStorage; ' +
+      '(3) fail: no document.cookie; ' +
+      '(4) warn: no indexedDB; ' +
+      '(5) fail: <script src> uses https:// only; ' +
+      '(6) warn: <link href> uses https://; ' +
+      '(7) fail: :root defines color tokens; ' +
+      '(8) warn: prefers-color-scheme media query present; ' +
+      '(9) fail: layout uses CSS Grid or Flexbox; ' +
+      '(10) warn: viewport meta tag present; ' +
+      '(11) fail: <title>...</title> present; ' +
+      '(12) fail: <img> tags have alt attribute (0 <img> = pass); ' +
+      '(13) warn: prefers-reduced-motion media query present; ' +
+      '(14) warn: no inline event handlers (onclick / oninput etc. — keep as warn not fail; legacy HTML uses these legitimately); ' +
+      '(15) fail: wide content (table / pre / code blocks) wrapped in overflow-x: auto — prevent horizontal page scroll on wide artifacts. ' +
+      '\n\nHandoff emit shape (REQUIRED — without this the runner rejects your output): ' +
+      'Your handoff JSON MUST include a `checklist` array with one entry per item above. Each entry: ' +
+      `{item: <one of the 15 kebab-case ids below>, status: "pass" | "fail" | "warn", evidence: <one-line grep result, ≤200 chars>}. ` +
+      'Allowed `item` ids (mirror `REVIEWER_CHECKLIST_ITEM_IDS`; do NOT invent your own): ' +
+      'no-localstorage, no-sessionstorage, no-document-cookie, no-indexeddb, https-only-script-src, ' +
+      'https-only-link-href, root-color-tokens, prefers-color-scheme, grid-or-flexbox, viewport-meta, ' +
+      'title-present, img-alt-attr, prefers-reduced-motion, no-inline-event-handlers, overflow-x-auto. ' +
+      'Example entry: `{"item":"no-localstorage","status":"fail","evidence":"line 42: localStorage.setItem(\\"theme\\",...)"}`.',
     toolWhitelist: [FS_READ, FS_LIST],
     displayName: 'Reviewer',
     i18nKey: 'chat.workerTeamRoster.role.reviewer',
@@ -482,6 +522,15 @@ ${entries.join('\n')}
  * `delegate_task` tool description（[lib/tools/delegate-task.ts:67-72](lib/tools/delegate-task.ts)
  * 同句双布——preamble + tool schema 两层 defense in depth，确保 LLM
  * 在任一入口都看见同一 routing 约束。
+ *
+ * Subtask 1.4：再加 **Parallel batch** 段落（放在 YOURSELF carve-out 之
+ * 后），教主代理 2–4 个 INDEPENDENT task 用 `tasks: [...]` 并行 dispatch，
+ * 依赖链（A → B）必须拆多 delegate_task 而非塞 batch —— "worker B may
+ * fs_read_file before worker A writes the file" 是关键反例锚点，删掉这段
+ * 模型容易把 content_writer → frontend_coder reads content.json 链塞进同一
+ * batch 触发 race。位置由 worker-roles.test.ts 的 PREAMBLE batch 段
+ * positioning pin 锁死，**不要**挪进 YOURSELF 子弹列表（那会破坏 3 颗
+ * 子弹的现有 pin）。
  */
 const PREAMBLE = `You can delegate long or specialized sub-tasks to a fixed roster of
 worker sub-agents via the \`delegate_task\` tool. Each worker runs in an
@@ -512,7 +561,17 @@ calls and burned the 120s ceiling without producing a complete file).
 Do it YOURSELF (native tools) only when:
   • the answer fits in a few short sentences (Q&A, brief explanations),
   • the task needs back-and-forth with the user (iterative refinement),
-  • the task is exactly one tool call (one read, one search, one query).`;
+  • the task is exactly one tool call (one read, one search, one query).
+
+**Parallel batch (independent tasks)**: for 2–4 INDEPENDENT sub-tasks you
+can dispatch them in a single \`delegate_task\` call via the \`tasks: [...]\`
+parameter (up to 4 items, runs concurrently via \`Promise.allSettled\`).
+Each item mirrors the top-level parameters. Use only for independent tasks —
+if task B needs to read task A's output (e.g. content_writer writes content.json
+then frontend_coder reads it), do NOT batch them: worker B may fs_read_file
+before worker A writes the file. Split into separate \`delegate_task\` calls.
+\`tasks: [...]\` and the top-level \`task\`/\`role\` are mutually exclusive —
+pick one shape, not both.`;
 
 /** L1 索引里 role 的两段固定文案——description（一句话最佳场景）+ example
  *  （最小可复制调用）。放模块顶部方便 diff；与 `WORKER_ROLES` 用同一组

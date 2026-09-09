@@ -1023,6 +1023,18 @@ chat:
       generic: "這個 worker 逾時 / API 出錯了。打開 Sidebar Team Roster 換一個 model 再試。"
     # 失敗 / 逾時卡片的頁腳：讓使用者能判斷「是真慢還是 API 卡死」。$1 = 秒（≥1）。
     duration: "$1 秒後失敗"
+    # Subtask 1.3 batch 容器：並行 delegate_task 呼叫的 header 計數。
+    # $1=總數，$2=成功數，$3=失敗數。內層 DelegationCardItem 各帶狀態/計時器。
+    batch:
+      header: "批次 · $1 個任務 — $2 成功，$3 失敗"
+    # Subtask 2.3 審查員 audit 迷你表。header 標籤 + per-row 狀態圖示無障礙
+    # 標籤（screen reader 念「通過 / 警告 / 失敗」而非 lucide 圖示名）。具體
+    # 計數由 React 組件 inline 拼，i18n 只負責 label 文字。
+    reviewer:
+      auditHeader: "審查清單"
+      statusPass: "通過"
+      statusWarn: "警告"
+      statusFail: "失敗"
 
 
 # ─── 供應商子元件（OAuth / API Key / 自訂）───
