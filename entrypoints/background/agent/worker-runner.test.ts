@@ -9,6 +9,7 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import {
   assembleHandoff,
   aggregateBatchHandoffs,
+  autoTruncateHandoff,
   buildAntiPatternsBlock,
   buildWorkspaceBlock,
   buildWorkerRunnerError,
@@ -1564,35 +1565,40 @@ describe('synthesizeSilentWriteHandoff (Subtask 8.8 Fix Y silent-write fallback)
 // (false positive), 或反之让 Minimax-M3 类 proxy 的 loop 漏抓 (false negative),
 // 下面每个 case 都是一条 invariant:
 //
-//   - Threshold A (same-path ≥4): pre-write over-read / post-write 同 path verify
-//   - Threshold B (post-write ≥6): post-write verify, 不论同 path 还是不同 path
+//   - Threshold A (same-chunk ≥4): pre-write over-read / post-write 同 chunk
+//     verify. Phase 2: `sameChunkRepeats` (was `samePathRepeats` ở Phase 1)
+//     dựa trên full `(path, start_line, end_line)` signature —— pagination
+//     hợp lệ (cùng path, range tăng) không bị tính.
+//   - Threshold B (post-write ≥6): post-write verify, 不论同 chunk 还是不同
+//     chunk. Researcher / reviewer (`hasWrittenThisAttempt` always false) không
+//     触 Threshold B.
 //   - 写工具 (fs_create_file / fs_edit_file) reset 所有 counter, 并 sticky
 //     set hasWrittenThisAttempt=true
-//   - fs_list 无 path → samePathRepeats reset (researcher 浏览目录是合法流程)
+//   - fs_list 无 path → sameChunkRepeats reset (researcher 浏览目录是合法流程)
 describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
-  // Threshold A: same-path ≥4 trigger
-  it('Threshold A: 同 path 读第 4 次 → trigger reason=same_path_repeat', () => {
+  // Threshold A: same-chunk ≥4 trigger
+  it('Threshold A: 同 chunk (path + range) 读第 4 次 → trigger reason=same_path_repeat', () => {
     const r = shouldTriggerStuckLoop({
       toolName: 'fs_read_file',
-      toolArgs: { path: '/workspaces/abc/studio.html' },
+      toolArgs: { path: '/workspaces/abc/studio.html', start_line: 0, end_line: 100 },
       consecutiveReads: 4,
-      samePathRepeats: 4,
-      lastReadPath: '/workspaces/abc/studio.html',
+      sameChunkRepeats: 4,
+      lastReadSignature: '/workspaces/abc/studio.html|0|100',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(true);
     expect(r.reason).toBe('same_path_repeat');
   });
 
-  it('Threshold A: 同 path 读第 3 次 → no trigger (boundary)', () => {
-    // boundary pin: 同 path 3 次不 trigger, 4 次 trigger。改一个数字就 silent
+  it('Threshold A: 同 chunk 读第 3 次 → no trigger (boundary)', () => {
+    // boundary pin: 同 chunk 3 次不 trigger, 4 次 trigger。改一个数字就 silent
     // regression, 把 ±1 都钉死。
     const r = shouldTriggerStuckLoop({
       toolName: 'fs_read_file',
-      toolArgs: { path: '/workspaces/abc/studio.html' },
+      toolArgs: { path: '/workspaces/abc/studio.html', start_line: 0, end_line: 100 },
       consecutiveReads: 3,
-      samePathRepeats: 3,
-      lastReadPath: '/workspaces/abc/studio.html',
+      sameChunkRepeats: 3,
+      lastReadSignature: '/workspaces/abc/studio.html|0|100',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
@@ -1601,15 +1607,15 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
 
   it('Threshold A: 不同 path 多读 (无 write) → no trigger (researcher 合法流程)', () => {
     // researcher 调 fs_read_file 读 10 个不同 file 不该被抓。consecutiveReads
-    // 累计 10, 但 samePathRepeats 应该被 caller 端 reset 成 1 (因为 path
-    // 不同)。Pure helper 只看 caller 传的值, 不自己 update —— 这里模拟 caller
-    // 端正确 reset 后的 state。
+    // 累计 10, 但 sameChunkRepeats 应该被 caller 端 reset 成 1 (因为
+    // signature 不同). Pure helper 只看 caller 传的值, 不自己 update
+    // —— 这里模拟 caller 端正确 reset 后的 state。
     const r = shouldTriggerStuckLoop({
       toolName: 'fs_read_file',
       toolArgs: { path: '/workspaces/abc/file-10.txt' },
       consecutiveReads: 10,
-      samePathRepeats: 1,
-      lastReadPath: '/workspaces/abc/file-10.txt',
+      sameChunkRepeats: 1,
+      lastReadSignature: '/workspaces/abc/file-10.txt||',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
@@ -1621,8 +1627,8 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_read_file',
       toolArgs: { path: '/workspaces/abc/studio.html' },
       consecutiveReads: 6,
-      samePathRepeats: 1,
-      lastReadPath: '/workspaces/abc/studio.html',
+      sameChunkRepeats: 1,
+      lastReadSignature: '/workspaces/abc/studio.html||',
       hasWrittenThisAttempt: true,
     });
     expect(r.trigger).toBe(true);
@@ -1635,8 +1641,8 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_read_file',
       toolArgs: { path: '/workspaces/abc/studio.html' },
       consecutiveReads: 5,
-      samePathRepeats: 1,
-      lastReadPath: '/workspaces/abc/studio.html',
+      sameChunkRepeats: 1,
+      lastReadSignature: '/workspaces/abc/studio.html||',
       hasWrittenThisAttempt: true,
     });
     expect(r.trigger).toBe(false);
@@ -1649,23 +1655,23 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_read_file',
       toolArgs: { path: '/workspaces/abc/file-20.txt' },
       consecutiveReads: 20,
-      samePathRepeats: 1,
-      lastReadPath: '/workspaces/abc/file-20.txt',
+      sameChunkRepeats: 1,
+      lastReadSignature: '/workspaces/abc/file-20.txt||',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
   });
 
-  it('Threshold B 优先于 A: hasWritten + 同 path ≥4 → reason=post_write_over_read (B 先)', () => {
+  it('Threshold B 优先于 A: hasWritten + 同 chunk ≥4 → reason=post_write_over_read (B 先)', () => {
     // 命中条件时, decision helper 优先报 B (post_write_over_read)——B 是
-    // 「更确定的 loop 信号」(已写过 + 后续还在读, 不论 path), A 是兜底
-    // 「同 path 4 次」(pre-write 也可能)。
+    // 「更确定的 loop 信号」(已写过 + 后续还在读, 不论 chunk), A 是兜底
+    // 「同 chunk 4 次」(pre-write 也可能).
     const r = shouldTriggerStuckLoop({
       toolName: 'fs_read_file',
-      toolArgs: { path: '/workspaces/abc/studio.html' },
+      toolArgs: { path: '/workspaces/abc/studio.html', start_line: 0, end_line: 100 },
       consecutiveReads: 6,
-      samePathRepeats: 6,
-      lastReadPath: '/workspaces/abc/studio.html',
+      sameChunkRepeats: 6,
+      lastReadSignature: '/workspaces/abc/studio.html|0|100',
       hasWrittenThisAttempt: true,
     });
     expect(r.trigger).toBe(true);
@@ -1673,14 +1679,15 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
   });
 
   // fs_list (no path) 特殊处理
-  it('fs_list 无 path → no trigger (caller 不该把 fs_list 算进 same-path 计数)', () => {
-    // 这里模拟 caller 正确处理: fs_list 后 samePathRepeats=0, lastReadPath=undefined
+  it('fs_list 无 path → no trigger (caller 不该把 fs_list 算进 same-chunk 计数)', () => {
+    // 这里模拟 caller 正确处理: fs_list 后 sameChunkRepeats=0,
+    // lastReadSignature=undefined
     const r = shouldTriggerStuckLoop({
       toolName: 'fs_list',
       toolArgs: {}, // fs_list 无 path
       consecutiveReads: 5,
-      samePathRepeats: 0,
-      lastReadPath: undefined,
+      sameChunkRepeats: 0,
+      lastReadSignature: undefined,
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
@@ -1692,8 +1699,8 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_create_file',
       toolArgs: { path: '/workspaces/abc/out.html' },
       consecutiveReads: 0,
-      samePathRepeats: 0,
-      lastReadPath: undefined,
+      sameChunkRepeats: 0,
+      lastReadSignature: undefined,
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
@@ -1705,8 +1712,8 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_edit_file',
       toolArgs: { path: '/workspaces/abc/out.html' },
       consecutiveReads: 5,
-      samePathRepeats: 3,
-      lastReadPath: '/workspaces/abc/out.html',
+      sameChunkRepeats: 3,
+      lastReadSignature: '/workspaces/abc/out.html||',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
@@ -1721,11 +1728,236 @@ describe('shouldTriggerStuckLoop (Subtask 9.0 L2 stuck detector)', () => {
       toolName: 'fs_search',
       toolArgs: { pattern: 'foo' },
       consecutiveReads: 10,
-      samePathRepeats: 1,
-      lastReadPath: '/workspaces/abc/x.txt',
+      sameChunkRepeats: 1,
+      lastReadSignature: '/workspaces/abc/x.txt||',
       hasWrittenThisAttempt: false,
     });
     expect(r.trigger).toBe(false);
+  });
+
+  // ─── Phase 2 (Subtask 9.0 follow-up): smart dedup —— pagination không tính ──
+  //
+  // 3 pin mới verifying rằng `sameChunkRepeats` reset khi caller thấy
+  // `(path, start_line, end_line)` signature thay đổi. Cùng path nhưng
+  // khác range là pagination hợp lệ, không phải loop. Regression pin
+  // cho cebian-debug-20260909-211043.json attempt 4 (reviewer đọc
+  // contact-form.html qua nhiều chunk, bị Threshold A misfire trước fix).
+  it('Phase 2 fix: cùng path 4 lần paginate (range tăng) → no trigger', () => {
+    // Simulates reviewer reads 60 KB HTML file in 4 chunks với
+    // start_line tăng dần. Caller đã reset `sameChunkRepeats` mỗi lần
+    // signature thay đổi. Lần cuối state là sameChunkRepeats=1, way
+    // below 4-call threshold. Pin này là regression cho attempt 4
+    // false-positive.
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/contact-form.html', start_line: 300, end_line: 400 },
+      consecutiveReads: 4,
+      sameChunkRepeats: 1, // paginate reset mỗi transition
+      lastReadSignature: '/workspaces/abc/contact-form.html|300|400',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toBeNull();
+  });
+
+  it('Phase 2 fix: 3 same-chunk + 1 paginate + 1 same-chunk → boundary 2', () => {
+    // Cùng chunk 3 lần → sameChunkRepeats=3, no trigger. Caller thấy
+    // paginate (range thay đổi) → reset về 1. Caller thấy same-chunk
+    // again → 2. Boundary check: reset chỉ transition paginate → same
+    // chunk, không reset ngược.
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/contact-form.html', start_line: 50, end_line: 80 },
+      consecutiveReads: 5,
+      sameChunkRepeats: 2, // 3 same → reset → 1 same → 2
+      lastReadSignature: '/workspaces/abc/contact-form.html|50|80',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toBeNull();
+  });
+
+  it('Phase 2 fix: 3 paginate + 1 same-chunk → no trigger at sameChunkRepeats=2', () => {
+    // Mirror of above: pagination trước, same-chunk sau. Reader learns
+    // rằng hướng reset không quan trọng — quan trọng là consecutive
+    // same-sig.
+    const r = shouldTriggerStuckLoop({
+      toolName: 'fs_read_file',
+      toolArgs: { path: '/workspaces/abc/contact-form.html', start_line: 0, end_line: 50 },
+      consecutiveReads: 4,
+      sameChunkRepeats: 2,
+      lastReadSignature: '/workspaces/abc/contact-form.html|0|50',
+      hasWrittenThisAttempt: false,
+    });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toBeNull();
+  });
+});
+
+// ─── autoTruncateHandoff (Subtask 9.0 Phase 2 B: Postel's Law) ──────────────
+//
+// Schema ceiling (vd reviewer `summary.maxLength=200`) quá khắc nghiệt cho
+// reviewer's natural-language style. Phase 1 hard-fail + retry-only làm
+// worse (retry vẫn fail cùng một length error, mất attempt). Phase 2:
+// runner clamp schema-bounded string fields về cap + '...' suffix trước
+// khi `checkSchema` chạy —— validation giờ chỉ fail trên genuine shape
+// error (type / required / pattern / enum).
+//
+// Pin: schema-driven walker, không hard-code cap nào. `parsed` argument
+// không mutate —— helper luôn trả về object mới (immutable update).
+describe('autoTruncateHandoff (Subtask 9.0 Phase 2 B: Postel\'s Law)', () => {
+  it('summary: 250 chars > 200 cap → truncated to 200 chars ending in "..."', () => {
+    // Boundary pin: 200-char cap, input dài 50 chars quá. Output phải
+    // đúng 200 chars (197 chars + "..." suffix).
+    const parsed = { summary: 'a'.repeat(250) };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.summary!.length).toBe(200);
+    expect(out.summary!.endsWith('...')).toBe(true);
+    expect(out.summary!.startsWith('a'.repeat(197))).toBe(true);
+  });
+
+  it('summary: exactly 200 chars → unchanged (boundary)', () => {
+    // Clamp chỉ apply khi value.length > cap. Exactly-200 phải giữ
+    // nguyên xi —— regression pin cho off-by-one.
+    const original = 'b'.repeat(200);
+    const parsed = { summary: original };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.summary).toBe(original);
+  });
+
+  it('summary: 100 chars < 200 cap → unchanged', () => {
+    // Short string không bị clamp.
+    const parsed = { summary: 'short and sweet' };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.summary).toBe('short and sweet');
+  });
+
+  it('checklist.items[0].evidence: 250 chars > 200 cap → truncated', () => {
+    // Nested array case: `checklist.items.evidence.maxLength=200`. Helper
+    // phải recurse 1 level vào items. `checklist` on `ParsedHandoffJson`
+    // is typed `unknown` (deliberate narrow —— UI narrows separately),
+    // so we cast to the structural shape expected by the walker.
+    const parsed = {
+      checklist: [
+        { item: 'no-localstorage', status: 'pass', evidence: 'e'.repeat(250) },
+      ],
+    };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    const items = out.checklist as Array<{ item: string; evidence: string }>;
+    expect(items[0].evidence.length).toBe(200);
+    expect(items[0].evidence.endsWith('...')).toBe(true);
+    expect(items[0].item).toBe('no-localstorage'); // sibling untouched
+  });
+
+  it('checklist.items[0].item: 65 chars > 64 cap → truncated to 64 chars', () => {
+    // Small maxLength (64) với ellipsis suffix. Cắt thành 61 chars + '...'
+    // = 64 chars exactly.
+    const parsed = {
+      checklist: [{ item: 'x'.repeat(65), status: 'pass', evidence: 'ok' }],
+    };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    const items = out.checklist as Array<{ item: string; evidence: string }>;
+    expect(items[0].item.length).toBe(64);
+    expect(items[0].item.endsWith('...')).toBe(true);
+    expect(items[0].item.startsWith('x'.repeat(61))).toBe(true);
+    expect(items[0].evidence).toBe('ok'); // sibling untouched
+  });
+
+  it('handoff_notes: 1000 chars → unchanged (no maxLength in schema)', () => {
+    // `handoff_notes` không có `maxLength` constraint trong schema (reviewer
+    // có thể viết bug-report context dài 1000+ chars). Helper phải giữ
+    // nguyên, không clamp.
+    const long = 'n'.repeat(1000);
+    const parsed = { handoff_notes: long };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.handoff_notes).toBe(long);
+  });
+
+  it('output_file: unchanged (typed ["string", "null"], no maxLength)', () => {
+    // `output_file` là path identifier với `type: ["string", "null"]` —
+    // không phải pure string + maxLength, helper bỏ qua.
+    const parsed = { output_file: '/workspaces/abc/studio.html' };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.output_file).toBe('/workspaces/abc/studio.html');
+  });
+
+  it('parsed without checklist → no error (array undefined → skip)', () => {
+    // Robustness pin: optional array không tồn tại — helper vẫn chạy,
+    // không throw. summary clamp bình thường.
+    const parsed = { summary: 'a'.repeat(250) };
+    const out = autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(out.summary!.length).toBe(200);
+    expect(out.checklist).toBeUndefined();
+  });
+
+  it('schema = null → return original parsed unchanged (defensive)', () => {
+    // Malformed schema case: insertion site sẽ không gọi helper khi
+    // schema null (early-return for malformed), nhưng helper itself
+    // vẫn phải robust —— defense-in-depth pin.
+    const parsed = { summary: 'a'.repeat(250) };
+    const out = autoTruncateHandoff(parsed, null);
+    expect(out.summary!.length).toBe(250);
+    expect(out).not.toBe(parsed); // vẫn trả về object mới (immutable contract)
+  });
+
+  it('parsed argument không bị mutate (immutable contract)', () => {
+    // `autoTruncateHandoff` luôn trả về shallow clone —— original
+    // `parsed` argument không bị touch. Pin quan trọng vì caller
+    // (assembleHandoff) reassign `parsed = autoTruncateHandoff(parsed,
+    // schema)`, nếu helper mutate input thì downstream logic có thể
+    // bị nhầm lẫn.
+    const parsed = { summary: 'a'.repeat(250) };
+    const originalSummary = parsed.summary;
+    autoTruncateHandoff(parsed, REVIEWER_HANDOFF_SCHEMA);
+    expect(parsed.summary).toBe(originalSummary);
+    expect(parsed.summary.length).toBe(250); // original unchanged
+  });
+
+  // Negative pin: walker intentionally không recurse vào primitive items
+  // (vd `items: { type: 'string', maxLength: 50 }`). Dù schema 是 array of
+  // string với cap, helper vẫn bỏ qua —— pin này chống silent over-reach
+  // nếu sau này người ta refactor walker thêm primitive-items support.
+  it('negative pin: primitive items (string-only) không bị recurse vào', () => {
+    const primitiveItemsSchema = {
+      type: 'object',
+      properties: {
+        tags: { type: 'array', items: { type: 'string', maxLength: 50 } },
+      },
+    };
+    const longTag = 't'.repeat(100);
+    const parsed = { tags: [longTag] } as unknown as Parameters<
+      typeof autoTruncateHandoff
+    >[0];
+    const out = autoTruncateHandoff(parsed, primitiveItemsSchema) as unknown as {
+      tags: string[];
+    };
+    expect(out.tags).toEqual([longTag]); // unchanged —— walker bỏ qua
+  });
+
+  // Negative pin: walker không recurse vào nested object properties
+  // (vd `properties.foo.properties.bar`). Chỉ array-of-object mới是
+  // recursion entry point —— pin này locks behavior hiện tại của
+  // `applyClampToField` (chỉ handle top-level string + array-of-object
+  // 1-level recurse); nếu sau này người ta thêm nested-object recursion,
+  // pin sẽ fail và bắt buộc update description + documentation.
+  it('negative pin: nested-object properties không bị recurse vào', () => {
+    const nestedObjSchema = {
+      type: 'object',
+      properties: {
+        foo: {
+          type: 'object',
+          properties: { bar: { type: 'string', maxLength: 50 } },
+        },
+      },
+    };
+    const longBar = 'b'.repeat(100);
+    const parsed = { foo: { bar: longBar } } as unknown as Parameters<
+      typeof autoTruncateHandoff
+    >[0];
+    const out = autoTruncateHandoff(parsed, nestedObjSchema) as unknown as {
+      foo: { bar: string };
+    };
+    expect(out.foo.bar).toBe(longBar); // unchanged —— object-of-object không recurse
   });
 });
 

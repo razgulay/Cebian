@@ -454,6 +454,17 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
   //    问题，重试不会变好），再看 worker 输出是否满足 schema（失败 →
   //    retryable）。顺序很重要：先 malformed gate，避免把 schema parse
   //    失败和 schema validation 失败混淆。
+  //
+  //    Phase 2 (Postel's Law): trước khi `checkSchema` chạy, walker schema
+  //    qua `autoTruncateHandoff` để clamp mọi string field vượt `maxLength`
+  //    (vd reviewer's `summary` 250 chars → cắt về 200 chars + '...'). Schema
+  //    ceiling quá khắc nghiệt cho natural-language fields; clamp-and-accept
+  //    gracefully giúp tránh retry-loop lặp lại cùng một length error. Các
+  //    shape errors (type / required / pattern / enum) vẫn fail + retryable
+  //    như cũ —— clamp không làm giảm sensitivity.
+  //
+  //    Refactor nhẹ: `parseExpectedSchema` được gọi 1 lần (thay vì 2 lần ở
+  //    Phase 1) và reuse cho cả `autoTruncateHandoff` + `checkSchema`.
   if (args.expectedSchema !== undefined) {
     const schema = parseExpectedSchema(args.expectedSchema);
     if (schema === null) {
@@ -470,6 +481,10 @@ export function assembleHandoff(args: AssembleHandoffArgs): WorkerHandoff {
       if (args.attempts !== undefined) handoff.attempts = args.attempts;
       return handoff;
     }
+    // Postel's Law clamp: schema-driven walker, không hard-code cap nào.
+    // `autoTruncateHandoff` trả về parsed mới (immutable) —— reassign
+    // trước khi validate.
+    parsed = autoTruncateHandoff(parsed, schema);
     // `parseExpectedSchema` 已经在前一步挡掉非 JSON 情况，所以这里 schema
     // 是合法 JSON.parse 输出（unknown）。TypeBox 的 Value.Check 在运行时
     // 接受任何对象作为 schema —— typing 只是 compile-time 形状断言，cast
@@ -806,7 +821,7 @@ export function synthesizeStuckLoopHandoff(args: {
 //      永远不触发 → 研究型 multi-file read 是合法的。
 //
 // Write/edit tool (fs_create_file / fs_edit_file) reset 所有 counter
-// (`consecutiveReads` / `samePathRepeats` / `lastReadPath`), 然后
+// (`consecutiveReads` / `sameChunkRepeats` / `lastReadSignature`), 然后
 // `hasWrittenThisAttempt = true` 永久 sticky 直到 attempt 结束。
 
 /** Reason tag for stuck_loop trigger — used in debug log + assert pure
@@ -819,19 +834,47 @@ export type StuckLoopReason = 'same_path_repeat' | 'post_write_over_read';
  *
  *  Return shape: `{ trigger: false, reason: null }` (don't fire) or
  *  `{ trigger: true, reason: 'same_path_repeat' | 'post_write_over_read' }`
- *  (fire stuck_loop abort). */
+ *  (fire stuck_loop abort).
+ *
+ *  Phase 2 (smart dedup, Subtask 9.0 follow-up): the `sameChunkRepeats`
+ *  counter is incremented by the caller only when the **full read
+ *  signature** (`path|start_line|end_line`) is identical to the previous
+ *  read. Legitimate pagination — 4 reads of the same 60 KB file with
+ *  increasing `start_line` — keeps the counter at 1 instead of climbing
+ *  to 4. This prevents the false-positive that
+ *  `cebian-debug-20260909-211043.json` attempt 4 reproduced (reviewer
+ *  reading `contact-form.html` in chunks tripped Threshold A before).
+ *
+ *  Threshold math unchanged from Phase 1:
+ *    - Threshold A (`sameChunkRepeats ≥ 4`): pre-write over-read, or
+ *      post-write same-chunk verify loop (same chunk = same path **and**
+ *      same range). `fs_list` without path makes caller reset the
+ *      counter (`lastReadSignature = undefined`).
+ *    - Threshold B (`consecutiveReads ≥ 6` with `hasWrittenThisAttempt`):
+ *      post-write over-read, regardless of chunk identity. Researcher /
+ *      reviewer (`hasWritten` always false) never trip Threshold B.
+ *
+ *  Write/edit tool (fs_create_file / fs_edit_file) resets both counters
+ *  (`consecutiveReads` / `sameChunkRepeats` / `lastReadSignature`), then
+ *  sticky-sets `hasWrittenThisAttempt = true` until attempt ends.
+ */
 export function shouldTriggerStuckLoop(args: {
   toolName: string;
   toolArgs: unknown;
   /** Number of consecutive read-only tool calls in this attempt (caller
    *  tracks; reset to 0 on write/edit tool). */
   consecutiveReads: number;
-  /** Number of consecutive reads of the same `lastReadPath` (caller
-   *  tracks; reset to 0 on different path or fs_list without path). */
-  samePathRepeats: number;
-  /** Path of the most recent read tool. `undefined` if last call was
-   *  fs_list (no path field). */
-  lastReadPath: string | undefined;
+  /** Number of consecutive reads with the **same** `lastReadSignature`
+   *  (path + start_line + end_line tuple). Phase 2: was `samePathRepeats`
+   *  in Phase 1, renamed to `sameChunkRepeats` to reflect that the
+   *  signature now includes the line range. Caller resets to 0 on
+   *  signature mismatch or `fs_list` without path. */
+  sameChunkRepeats: number;
+  /** Signature = `${path}|${start_line ?? ''}|${end_line ?? ''}` —
+   *  identical sig = same chunk; different sig = pagination transition
+   *  (caller resets counter). `undefined` if last call was fs_list
+   *  without path. */
+  lastReadSignature: string | undefined;
   /** True iff at least one fs_create_file / fs_edit_file has been seen
    *  in this attempt. Researcher/reviewer (no write tool) → always false. */
   hasWrittenThisAttempt: boolean;
@@ -839,12 +882,12 @@ export function shouldTriggerStuckLoop(args: {
   const isReadOnly = args.toolName === 'fs_read_file' || args.toolName === 'fs_list';
   if (!isReadOnly) return { trigger: false, reason: null };
   // Threshold B first: post-write over-read —— 让 post-write verify loop
-  // (无论同 path 还是不同 path) 都被抓住。Threshold A 在没 write 的情况
-  // 下 backup, 防 pre-write over-read (反复读同一 file 永远不写)。
+  // (不论同 chunk 还是不同 chunk) 都被抓住. Threshold A 兜底防 pre-write
+  // over-read (cùng chunk, không bao giờ viết).
   if (args.hasWrittenThisAttempt && args.consecutiveReads >= 6) {
     return { trigger: true, reason: 'post_write_over_read' };
   }
-  if (args.samePathRepeats >= 4) {
+  if (args.sameChunkRepeats >= 4) {
     return { trigger: true, reason: 'same_path_repeat' };
   }
   return { trigger: false, reason: null };
@@ -892,6 +935,133 @@ export function buildWorkerRunnerError(args: {
   // reason === undefined: distinguish parent-abort from genuine exception
   if (isAbort) return 'Aborted';
   return originalError instanceof Error ? originalError.message : String(originalError);
+}
+
+// ─── autoTruncateHandoff (Subtask 9.0 Phase 2 B: Postel's Law) ──────────────
+//
+// Pure walker —— clamp schema-bounded string fields về schema's `maxLength`
+// (nếu có) trước khi `checkSchema` chạy。Schema ceiling (vd reviewer
+// `summary.maxLength = 200`) 对 reviewer's natural-language prose 太苛刻
+// (`handoff_notes` 经常 250+ chars 的 bug-report 上下文)；Phase 1
+// hard-fail + retry-only 让事情更糟 (retry 仍然因同一 length error 失败，
+// 浪费 attempt)。根据 Postel's Law ("be liberal in what you accept")，
+// runner 用 "..." 后缀 graceful clamp —— schema validation 现在只在
+// genuine shape error (type / required / pattern / enum) 上失败，仍按
+// retryable 旧逻辑走。`handoff_notes` 在 schema 里没有 `maxLength` →
+// 不 clamp (reviewer 可以写长)。
+//
+// Schema 是 cap 的 source of truth —— helper 递归走 `schema.properties`，
+// 不硬编码任何 cap。Phase 2 只覆盖 TypeBox `Value.Check` 接受的 JSON Schema
+// 子集 + `REVIEWER_HANDOFF_SCHEMA` 实际用的部分：
+//   - top-level string + `maxLength` → 直接 clamp value
+//   - 顶层 array of object → recurse 1 cấp vào items (covers
+//     `checklist.items.*` pattern)。
+// **Recursive bound**：array-of-object 链任意深度都能继续 recurse
+// (每层通过 `applyClampToField` 重新进入)；但 **non-array object
+// properties** 不向下 recurse (顶层 `properties.foo` 是 object 时不进
+// 入 `foo.properties.bar`)。如果将来 schema 改成 nested-object
+// properties 形态，walker 必须扩 —— 是 pure refactor，不改 public API。
+//
+// `parsed` argument 在以下情况 trả về unchanged：
+//   - `schema` 不是 object / 没有 `.properties` (malformed 或 schema 不
+//     是 object shape)
+//   - `parsed` 中所有 string value 都已经 ≤ schema cap (no work needed)
+// Output 始终是新对象 (immutable update) —— caller reassigns
+// `parsed = autoTruncateHandoff(parsed, schema)` —— 不 mutate argument。
+//
+// Pin: `parsed.summary = 'a'.repeat(250)` với schema cap 200 → output
+// `'a'.repeat(197) + '...'` (length = 200 exactly)。`maxLength < 3` 时
+// ellipsis suffix 会超出 cap (vd `maxLength=2` → output `'...'` length 3)；
+// 当前所有 schema cap (200/200/64) 都 ≥ 64，所以不会触发；guard 在
+// `applyClampToField` 里以 `maxLength ≥ 3` 为前提。
+export function autoTruncateHandoff(
+  parsed: ParsedHandoffJson,
+  schema: unknown,
+): ParsedHandoffJson {
+  // 始终 shallow-clone `parsed` —— immutability contract: helper 永不
+  // mutate argument。即使 schema invalid 也要 clone，让 caller 可以
+  // 比较 `out !== parsed` 来 detect "no schema" / "no work" downstream
+  // (nếu cần)。`out` 被当作 `Record<string, unknown>` 用于 walker 字段
+  // 读写 (`ParsedHandoffJson` 没有 index signature，不能 generic key
+  // read/write)；最终结果 cast 回 `ParsedHandoffJson` 匹配 public
+  // signature —— runtime shape 是 input 的 spread，cast 是 safe 的。
+  const out = { ...parsed } as Record<string, unknown>;
+  if (!schema || typeof schema !== 'object') return out as ParsedHandoffJson;
+  const s = schema as { properties?: unknown };
+  if (!s.properties || typeof s.properties !== 'object') return out as ParsedHandoffJson;
+  const properties = s.properties as Record<string, unknown>;
+  for (const [key, propSchema] of Object.entries(properties)) {
+    const value = (parsed as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    applyClampToField(out, key, value, propSchema);
+  }
+  return out as ParsedHandoffJson;
+}
+
+/** 对 `parsed` 的 1 个 field 应用 schema-driven clamp。
+ *  - Mức 1 (top-level string + maxLength) 是主路径
+ *  - 若 schema 是 array of object，recurse 1 cấp vào items
+ *    (covers `REVIEWER_HANDOFF_SCHEMA` `checklist.items.*` pattern)
+ *  - file-local helper，public API 不导出 (AGENTS.md "keep exported
+ *    surface minimal") */
+function applyClampToField(
+  out: Record<string, unknown>,
+  key: string,
+  value: unknown,
+  propSchema: unknown,
+): void {
+  if (!propSchema || typeof propSchema !== 'object') return;
+  const ps = propSchema as {
+    type?: unknown;
+    maxLength?: unknown;
+    items?: unknown;
+    properties?: unknown;
+  };
+  // String + maxLength → clamp value trực tiếp. Formula `slice(0, n-3)
+  // + '...'` 保证 `out.length === maxLength` (200 cap → 197 + '...' =
+  // 200)。`maxLength < 3` 时 `slice(0, n-3)` 退化成空串 + '...' (length
+  // 3 > cap) —— current schemas cap 都 ≥ 64, JSDoc 已 pin 前提。
+  if (ps.type === 'string' && typeof ps.maxLength === 'number') {
+    if (typeof value === 'string' && value.length > ps.maxLength) {
+      out[key] = value.slice(0, ps.maxLength - 3) + '...';
+    }
+    return;
+  }
+  // Array of objects: recurse 1 level vào items (covers REVIEWER_HANDOFF_SCHEMA
+  // `checklist.items.*` pattern)。Mỗi item 在 clamp sub-field 之前先
+  // shallow-clone，保持 array level 的 immutability。
+  if (
+    ps.type === 'array' &&
+    ps.items &&
+    typeof ps.items === 'object' &&
+    Array.isArray(value)
+  ) {
+    const itemsSchema = ps.items as {
+      type?: unknown;
+      properties?: unknown;
+    };
+    if (
+      itemsSchema.type === 'object' &&
+      itemsSchema.properties &&
+      typeof itemsSchema.properties === 'object'
+    ) {
+      const subProperties = itemsSchema.properties as Record<string, unknown>;
+      const newArr = value.map(item => {
+        if (!item || typeof item !== 'object') return item;
+        const cloned = { ...(item as Record<string, unknown>) };
+        for (const [subKey, subSchema] of Object.entries(subProperties)) {
+          applyClampToField(
+            cloned,
+            subKey,
+            (item as Record<string, unknown>)[subKey],
+            subSchema,
+          );
+        }
+        return cloned;
+      });
+      out[key] = newArr;
+    }
+  }
 }
 
 // ─── IO helpers (internal; tested via mock of `vfs`) ───
@@ -1116,21 +1286,41 @@ async function runWorkerAttempt(
   // 最近 6 次 read-only tool 的 path ring buffer——日志里一起带上，方便区分
   // 「反复读同一个文件」（A 嫌疑）和「读不同文件做 research」（合法流程）。
   const recentReadPaths: string[] = [];
-  // Subtask 9.0 新增: stuck detector state。lastReadPath + samePathRepeats
-  // 给 Threshold A (same-path ≥4); hasWrittenThisAttempt 给 Threshold B
-  // (post-write ≥6)。写工具 (fs_create_file / fs_edit_file) reset 所有
-  // counter 并 sticky set hasWrittenThisAttempt=true 直到 attempt 结束。
-  let lastReadPath: string | undefined;
-  let samePathRepeats = 0;
+  // Subtask 9.0 新增: stuck detector state。`lastReadSignature` +
+  // `sameChunkRepeats` 给 Threshold A (same-chunk ≥4); `hasWrittenThisAttempt`
+  // 给 Threshold B (post-write ≥6). Phase 2 rename `lastReadPath` →
+  // `lastReadSignature` + `samePathRepeats` → `sameChunkRepeats` để dedup key
+  // là full `(path, start_line, end_line)` tuple thay vì chỉ path — chống
+  // false-positive khi reviewer / researcher paginate 1 file qua nhiều
+  // chunk hợp lệ (reproduce trong cebian-debug-20260909-211043.json
+  // attempt 4). 写工具 (fs_create_file / fs_edit_file) reset cả 3 state và
+  // sticky-set `hasWrittenThisAttempt = true` đến khi attempt kết thúc.
+  let lastReadSignature: string | undefined;
+  let sameChunkRepeats = 0;
   let hasWrittenThisAttempt = false;
-  /** Const helper：把 tool args 压成 "toolName:path" 摘要。fs_list 是
-   *  `{ path, options? }`，fs_read_file 是 `{ path, start_line?, end_line? }`，
-   // 都有 `.path`。其他工具 args 没有 path → 仅返回 toolName。 */
+  /** Const helper: 提取 path 字段 (fs_list không có path → undefined) 用来
+   *  给 `formatToolPath` 做 debug log. Read-only nhưng无 path 的 fs_list
+   *  không vào `lastReadSignature` / `sameChunkRepeats` 计数, 留给
+   *  Threshold B (consecutiveReads 仍累计, không phụ thuộc path). */
   const formatToolPath = (toolName: string, args: unknown): string => {
     if (args && typeof args === 'object' && typeof (args as { path?: unknown }).path === 'string') {
       return `${toolName}:${(args as { path: string }).path}`;
     }
     return toolName;
+  };
+  /** Build dedup signature cho `lastReadSignature`. `fs_read_file` 的
+   *  pagination params (`start_line` / `end_line`) cũng tham gia — cùng
+   *  path nhưng khác range là khác chunk, là pagination hợp lệ, không
+   *  tính vào `sameChunkRepeats`. Trả về `undefined` khi không có
+   *  `path` (vd `fs_list` với `{path, options?}` mà path không phải
+   *  string, hoặc args khác shape) để caller reset counter. */
+  const buildReadSignature = (args: unknown): string | undefined => {
+    if (!args || typeof args !== 'object') return undefined;
+    const a = args as { path?: unknown; start_line?: unknown; end_line?: unknown };
+    if (typeof a.path !== 'string') return undefined;
+    const sl = typeof a.start_line === 'number' ? String(a.start_line) : '';
+    const el = typeof a.end_line === 'number' ? String(a.end_line) : '';
+    return `${a.path}|${sl}|${el}`;
   };
 
   debugLog.info('sub_agent', 'sub_agent:worker:attempt:start', {
@@ -1378,18 +1568,16 @@ async function runWorkerAttempt(
               // 给 Threshold A 用。Read-only 但无 path 的 fs_list 不进入 same-path
               // 计数 (researcher 调 fs_list 浏览目录是合法流程, 不该被 Threshold A
               // 误抓)，但 consecutiveReads 仍累计 (post-write ≥6 不区分 read/list)。
-              const pathOnly =
-                ev.args &&
-                typeof ev.args === 'object' &&
-                typeof (ev.args as { path?: unknown }).path === 'string'
-                  ? (ev.args as { path: string }).path
-                  : undefined;
-              if (pathOnly !== undefined) {
-                samePathRepeats = pathOnly === lastReadPath ? samePathRepeats + 1 : 1;
-                lastReadPath = pathOnly;
+              const readSig = buildReadSignature(ev.args);
+              if (readSig !== undefined) {
+                sameChunkRepeats =
+                  readSig === lastReadSignature ? sameChunkRepeats + 1 : 1;
+                lastReadSignature = readSig;
               } else {
-                lastReadPath = undefined;
-                samePathRepeats = 0;
+                // fs_list không có path / args shape lạ → reset
+                // (different concept, same as Phase 1)
+                lastReadSignature = undefined;
+                sameChunkRepeats = 0;
               }
               // Subtask 9.0: stuck_loop detector — 两个 threshold 任一命中就
               // 触发 abort。Decision helper (`shouldTriggerStuckLoop`) 是 pure
@@ -1398,8 +1586,8 @@ async function runWorkerAttempt(
                 toolName: ev.toolName,
                 toolArgs: ev.args,
                 consecutiveReads,
-                samePathRepeats,
-                lastReadPath,
+                sameChunkRepeats,
+                lastReadSignature,
                 hasWrittenThisAttempt,
               });
               if (stuckDecision.trigger) {
@@ -1413,8 +1601,8 @@ async function runWorkerAttempt(
                     attempt: attemptNumber,
                     triggerReason: stuckDecision.reason,
                     consecutiveReads,
-                    samePathRepeats,
-                    lastReadPath,
+                    sameChunkRepeats,
+                    lastReadSignature,
                     hasWrittenThisAttempt,
                     elapsedMs: Math.round(performance.now() - attemptStartedAt),
                   },
@@ -1440,13 +1628,13 @@ async function runWorkerAttempt(
                 });
               }
             } else {
-              // Write/edit tool: reset consecutiveReads + same-path tracker.
+              // Write/edit tool: reset consecutiveReads + same-chunk tracker.
               // hasWrittenThisAttempt sticky true until attempt 结束 ——
               // 一旦写过, 后续任何 ≥6 consecutive read 都触发 Threshold B
-              // (post-write verify loop, 不论同 path 还是不同 path)。
+              // (post-write verify loop, 不论同 chunk 还是不同 chunk).
               consecutiveReads = 0;
-              samePathRepeats = 0;
-              lastReadPath = undefined;
+              sameChunkRepeats = 0;
+              lastReadSignature = undefined;
               if (
                 ev.toolName === 'fs_create_file' ||
                 ev.toolName === 'fs_edit_file'
