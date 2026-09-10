@@ -50,6 +50,9 @@ export default defineBackground(() => {
   setupOrganizeSchedule();
   // 订阅 MCP 服务端变更，把刷新后的工具集推给所有活跃会话。
   sessionManager.watchMCPTools();
+  // 订阅 Worker Team 总开关（Fast/Team）翻转，让活会话的 tool list 与
+  // system-prompt 侧同步撤下/挂上 `delegate_task`（见 watchWorkerTeam）。
+  sessionManager.watchWorkerTeam();
 
   // Dev-only: seed a custom provider from .env.local if configured.
   // No-op in production builds and when WXT_DEV_API_KEY is empty.

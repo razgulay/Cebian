@@ -233,8 +233,9 @@ export const workerModels = defineLoggedItem<WorkerModelMap>(
  *  `true` (default) = 当前行为：暴露 `delegate_task` 工具 + 注入 `<available-workers>`
  *  系统提示块；`false` = 主代理用原生 fs_* 工具直接产出 artifact，两边同时撤掉。
  *  与 `delegate_dom` 无关（DOM 读取是独立功能，不受本 flag 影响）。
- *  In-flight：用户在半轮切换时，正在跑的 worker 不会被 cancel；flag 在下轮
- *  `composeSystemPrompt` 时被读出（每轮 dispatch 调用，见 factory.ts）。 */
+ *  In-flight：用户在半轮切换时，正在跑的 worker 不会被 cancel；prompt 侧在下轮
+ *  `composeSystemPrompt` 时被读出（每轮 dispatch 调用，见 factory.ts），tool 侧由
+ *  `sessionManager.watchWorkerTeam()` 订阅翻转、立即重建活会话的工具数组。 */
 export const workerTeamEnabled = defineLoggedItem<boolean>(
   'local:workerTeamEnabled',
   { fallback: true },

@@ -78,6 +78,7 @@ import {
   lastSelectedThinkingLevel,
   userInstructions as userInstructionsStorage,
   memorySettings,
+  workerTeamEnabled,
   type ModelIdentity,
   type ThinkingLevel,
 } from '@/lib/persistence/storage';
@@ -315,6 +316,12 @@ class SessionManager {
   private keepAliveHeld = false;
   /** Subscription to MCPManager change notifications; pushes refreshed tools into every live session. */
   private mcpUnsubscribe?: () => void;
+  /** Worker Team 开关（Fast/Team）翻转的 storage watch 退订句柄，与
+   *  `mcpUnsubscribe` 同款（幂等注册、活到 SW 结束，不必显式 dispose）。 */
+  private workerTeamUnsubscribe?: () => void;
+  /** `refreshAllSessionTools` 的单调序号：多轮重建并发时（MCP 刷新 + Fast/Team
+   *  快速连翻）只让最后启动的那轮落盘赋值，防止慢的先完成轮把旧工具集盖回去。 */
+  private refreshToolsSeq = 0;
 
   /**
    * 订阅 MCPManager 变更，把刷新后的工具集推给所有活跃会话。由 background 启动序列
@@ -325,6 +332,33 @@ class SessionManager {
     // reconciled — avoids racing two independent storage watchers.
     if (!this.mcpUnsubscribe) {
       this.mcpUnsubscribe = getMCPManager().subscribe(() => {
+        void this.refreshAllSessionTools();
+      });
+    }
+  }
+
+  /**
+   * 订阅 Worker Team 总开关（⚡Fast / 👥Team）翻转，立刻把刷新后的工具集推给
+   * 所有活跃会话。
+   *
+   * 为什么必须订阅：`delegate_task` 是按 `workerTeamEnabled` 在
+   * `buildSessionToolArray`（`lib/tools/index.ts`）里条件 push 的，而工具数组
+   * 只在 `createSessionTools`（新会话）与 MCP 变更时重建。不订阅这个 flag 的
+   * 话，用户在会话进行中翻到 Fast，`delegate_task` 仍留在活会话的
+   * `agent.state.tools` 里直到下次重建——prompt 侧（每次 composeSystemPrompt
+   * 即时读 flag）已经撤下 `<available-workers>`，tool 侧却没撤，两侧 gate
+   * 失步（LLM 仍看得见工具 schema，可能照旧委派）。翻转 → 重建，让
+   * 「tool 侧 + prompt 侧」由同一个 flag 真正同步驱动。
+   *
+   * 与 `watchMCPTools` 同款：幂等注册、退订句柄活到 SW 结束。
+   * 注意：`refreshAllSessionTools` 本身不去重（只有 `sessions.size === 0`
+   * 早退），真正的「同值不回调」来自 WXT storage driver 的 watch（内部
+   * dequal 比较 newValue/oldValue）；两轮重建交错的落盘竞争由
+   * `refreshToolsSeq` 兜底（见该方法）。
+   */
+  watchWorkerTeam(): void {
+    if (!this.workerTeamUnsubscribe) {
+      this.workerTeamUnsubscribe = workerTeamEnabled.watch(() => {
         void this.refreshAllSessionTools();
       });
     }
@@ -574,15 +608,19 @@ class SessionManager {
   }
 
   /**
-   * Rebuild every live session's tool array from current MCP config.
-   * Called when the user adds, removes, enables, disables, or edits an MCP
-   * server. The agent's `state.tools` setter accepts a fresh array, so a
-   * mid-run update is safe — the next assistant turn picks up the new tools.
+   * 依据**当前工具配置**（MCP servers + 条件工具，如按 `workerTeamEnabled`
+   * 决定进不进的 `delegate_task`）重建所有活会话的 tool array。由
+   * `watchMCPTools`（MCP 增删改）与 `watchWorkerTeam`（Fast/Team 翻转）调用。
+   * agent 的 `state.tools` setter 接受整数组替换，跑中刷新安全——下一个
+   * assistant turn 用新工具集。
    *
-   * Sessions refresh in parallel; manager-level dedup prevents fan-out reconnects.
+   * 会话并行刷新；`refreshToolsSeq` 保证「后启动的重建赢」——两次快速翻转
+   * （Fast/Team 芯片一键即翻）会让两轮 allSettled 交错，若先启的那轮反而先
+   * 完成，裸赋值会把旧 flag 的工具集盖回去。seq 落后者直接弃写。
    */
   private async refreshAllSessionTools(): Promise<void> {
     if (this.sessions.size === 0) return;
+    const seq = ++this.refreshToolsSeq;
     await Promise.allSettled(
       Array.from(this.sessions.values()).map(async (agentSession) => {
         try {
@@ -590,9 +628,12 @@ class SessionManager {
             agentSession.toolCtx,
             (msg) => broadcastToViewers(agentSession.sessionId, msg),
           );
+          // 已有更新的重建在跑/已完成 → 本次结果过期，弃写（弃的是赋值，
+          // 不中断构建本身——MCP discovery 的副作用已由 manager 层去重）。
+          if (seq !== this.refreshToolsSeq) return;
           agentSession.agent.state.tools = tools;
         } catch (err) {
-          console.warn(`[mcp] failed to refresh tools for session ${agentSession.sessionId}:`, err);
+          console.warn(`[tools] failed to refresh tools for session ${agentSession.sessionId}:`, err);
         }
       }),
     );

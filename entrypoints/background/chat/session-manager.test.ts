@@ -137,6 +137,12 @@ vi.mock('@/lib/persistence/storage', () => ({
   compactionModel: { getValue: vi.fn(async () => null) },
   userInstructions: { getValue: vi.fn(async () => '') },
   memorySettings: { getValue: vi.fn(async () => ({ enabled: false })) },
+  // watchWorkerTeam 会 .watch() 它；给最小 fake（watch 返回 noop 退订），
+  // 否则未来首个触达该路径的用例会撞 "No workerTeamEnabled export"。
+  workerTeamEnabled: {
+    getValue: vi.fn(async () => true),
+    watch: vi.fn(() => () => {}),
+  },
 }));
 
 vi.mock('@/lib/mcp/manager', () => ({

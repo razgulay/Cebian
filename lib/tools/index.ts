@@ -91,7 +91,9 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * the per-session `run_skill` instance (sessionId-bound so its vfs writes land
  * in the session's workspace).
  *
- * Used both at session creation and when MCP config changes mid-session.
+ * Used at session creation, when MCP config changes mid-session
+ * (`watchMCPTools`), and when the Worker Team master switch flips
+ * (`watchWorkerTeam` → immediate rebuild of live sessions' tool arrays).
  *
  * `delegate_dom` is ALWAYS included so the main agent sees it in its tool
  * list even when the user hasn't yet configured a sub-agent model. The tool
