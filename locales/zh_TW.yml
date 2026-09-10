@@ -1035,6 +1035,10 @@ chat:
       statusPass: "通過"
       statusWarn: "警告"
       statusFail: "失敗"
+    # Phase 2 UI 反饋：執行中卡片內的即時微串流 box。
+    # screen reader 朗讀的 ARIA 標籤（LiveStreamBox 始終 aria-live="polite"）。
+    liveStream:
+      label: "即時輸出"
 
 
 # ─── 供應商子元件（OAuth / API Key / 自訂）───

@@ -1069,6 +1069,11 @@ chat:
       statusPass: "pass"
       statusWarn: "warn"
       statusFail: "fail"
+    # Phase 2 UI feedback: live micro-stream box inside the running card.
+    # ARIA label cho screen reader when box mounts (LiveStreamBox always
+    # renders aria-live="polite"); aria-label = "Live stream".
+    liveStream:
+      label: "Live stream"
 
 
 # ─── Provider sub-components (OAuth / API Key / custom) ───

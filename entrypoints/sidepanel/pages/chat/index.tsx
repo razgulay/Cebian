@@ -830,6 +830,13 @@ export function ChatPage({
                                 partial: 0,
                                 cancelled: 0,
                               }}
+                              // Phase 2-D: batch mode shares one toolCallId across
+                              // all items (the outer delegate_task id); per
+                              // delegate-task.ts note, all items' streams show
+                              // in one card. Pass via outer `liveBuffer` prop
+                              // → DelegationCard forwards to each inner item
+                              // (shared buffer across items).
+                              {...(state.liveLines.get(tc.id) ? { liveBuffer: state.liveLines.get(tc.id) } : {})}
                             />
                           );
                         }
@@ -855,6 +862,7 @@ export function ChatPage({
                                 key={`tool-${tc.id}`}
                                 batch={enrichedItems}
                                 batchSummary={parsed.batchSummary}
+                                {...(state.liveLines.get(tc.id) ? { liveBuffer: state.liveLines.get(tc.id) } : {})}
                               />
                             );
                           }
@@ -950,6 +958,14 @@ export function ChatPage({
                           {...(attemptDurationMsNum !== undefined ? { attemptDurationMs: attemptDurationMsNum } : {})}
                           {...(attemptStartedAt !== undefined ? { attemptStartedAt } : {})}
                           {...(checklistRows ? { checklist: checklistRows } : {})}
+                          // Phase 2-D: live worker stream from useBackgroundAgent — keyed
+                          // by `tc.id` (the outer `delegate_task` toolCallId, same
+                          // key that `tool_pending` / `tool_resolved` use). Single-
+                          // flight: only mount the box when status='running' and
+                          // the buffer has content.
+                          {...(delegationStatus === 'running' && state.liveLines.get(tc.id)
+                            ? { liveBuffer: state.liveLines.get(tc.id) }
+                            : {})}
                           timeoutMs={resolveWorkerRoleTimeoutMs(safeRole, workerTimeouts)}
                         />
                       );

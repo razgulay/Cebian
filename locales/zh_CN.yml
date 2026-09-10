@@ -1035,6 +1035,10 @@ chat:
       statusPass: "通过"
       statusWarn: "警告"
       statusFail: "失败"
+    # Phase 2 UI 反馈：运行中卡片内的实时微流式 box。
+    # screen reader 朗读的 ARIA 标签（LiveStreamBox 始终 aria-live="polite"）。
+    liveStream:
+      label: "实时输出"
 
 
 # ─── 提供商子组件（OAuth / API Key / 自定义）───

@@ -268,6 +268,37 @@ export type SessionMeta = Omit<SessionRecord, 'messages'> & {
   isPinned?: boolean;
 };
 
+/** Worker-runner → 广播层的实时事件（`worker_stream` 的载荷）。
+ *  `AgentEvent` delta 类型的精简子集——只保留「能渲染成一行的内容」：
+ *  text / thinking delta + tool name。Args 原样透传给消费端（UI 走
+ *  `formatToolPath` 只读 `args.path` 顶层 string，不会把 25–135 KB 的
+ *  fs_create_file 参数序列化进 React）。
+ *
+ *  `toolCallId` 在 worker-runner 这一层永远是 `undefined`（runner 不知道外层
+ *  `delegate_task` 的 toolCallId），由 `lib/tools/delegate-task.ts` 闭包注入到
+ *  消息顶层的 `toolCallId`。放在 protocol 而非 worker-runner：这是跨上下文
+ *  的线上契约，UI 侧（hooks / components）只准依赖 `lib/`。 */
+export type WorkerLiveStreamEvent =
+  | {
+      kind: 'text_delta';
+      sessionId: string;
+      toolCallId: string | undefined;
+      delta: string;
+    }
+  | {
+      kind: 'thinking_delta';
+      sessionId: string;
+      toolCallId: string | undefined;
+      delta: string;
+    }
+  | {
+      kind: 'tool_start';
+      sessionId: string;
+      toolCallId: string | undefined;
+      toolName: string;
+      args: unknown;
+    };
+
 export type ServerMessage =
   | { type: 'connected' }
   | {
@@ -325,6 +356,19 @@ export type ServerMessage =
     }
   | { type: 'tool_pending'; sessionId: string; toolName: string; toolCallId: string; args: any }
   | { type: 'tool_resolved'; sessionId: string; toolName: string }
+  /** Worker 子代理的实时输出流（`delegate_task` 的 Phase 2 UI 反馈）：
+   *  `WorkerLiveStreamEvent`（text_delta / thinking_delta / tool_start）经
+   *  `broadcastToViewers` 扇出。sidepanel 按 toolCallId 累积——token 合并 +
+   *  50ms 节流见 `lib/agent/worker-live-stream.ts`。
+   *  `toolCallId` 是 outer `delegate_task` 的 toolCallId —— worker-runner 这层
+   *  不知道，由 `lib/tools/delegate-task.ts` 闭包注入。Session-scoped：
+   *  走 `broadcastToViewers`。 */
+  | {
+      type: 'worker_stream';
+      sessionId: string;
+      toolCallId: string;
+      ev: WorkerLiveStreamEvent;
+    }
   | { type: 'session_loaded'; sessionId: string; session: SessionSnapshot | null }
   | { type: 'session_list_result'; sessions: SessionMeta[] }
   /** `session_list` 失败。刻意不复用通用 `error`：那条会被聊天视图当成本轮对话出错，

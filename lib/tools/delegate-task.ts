@@ -37,6 +37,7 @@ import {
 import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 import type { ModelIdentity, WorkerRole } from '@/lib/persistence/storage';
 import type { WorkerHandoff } from '@/entrypoints/background/agent/worker-runner';
+import type { ServerMessage, WorkerLiveStreamEvent } from '@/lib/ipc/protocol';
 
 // ─── Parameters schema ───
 
@@ -618,12 +619,35 @@ async function resolveBatchItem(
  * 设计取舍：考虑过顶层 singleton 闭包 lazy 查 sessionId，但 pi-agent-core
  * 的 tool execute() 不传 session context；让 factory 在注册期固定 sessionId
  * 是最直白的做法，与 `run-skill` 工厂（`createSessionRunSkillTool(ctx.sessionId)`
- * 在 `lib/tools/index.ts:111`）同姿态。
+ * 在 `lib/tools/index.ts`）同姿态。
+ *
+ * `broadcast` 由 background 注入（见 `lib/tools/index.ts` 的
+ * `createSessionTools`）：本工具在 lib/ 层，不得 runtime-import
+ * `entrypoints/background` 的 `broadcastToViewers`（`lib-no-up-runtime`），
+ * 故把「发到哪」这条 IO 边界留给 caller。缺省即不广播 worker stream
+ * （worker 照跑，只是 UI 没有实时流）。
  */
 export function createDelegateTaskTool(options: {
   sessionId: string;
+  broadcast?: (msg: ServerMessage) => void;
 }): AgentTool<typeof DelegateTaskParameters> {
-  const { sessionId } = options;
+  const { sessionId, broadcast } = options;
+  // Phase 2 UI feedback: 把 worker-runner 的 text/thinking delta + tool_start
+  // 事件转成 `worker_stream` ServerMessage，经注入的 `broadcast` 发给 sidepanel。
+  // WorkerCard 拿到后做 token-coalesce + 50ms throttle 渲染 LiveStreamBox。
+  // `liveStreamBroadcaster` 是闭包：每次 tool execute 都生成新闭包（每次
+  // `delegate_task` 调用的 toolCallId 不同），保持单-call 隔离。
+  const liveStreamBroadcaster = (
+    toolCallId: string,
+    ev: WorkerLiveStreamEvent,
+  ): void => {
+    broadcast?.({
+      type: 'worker_stream',
+      sessionId,
+      toolCallId,
+      ev,
+    } satisfies ServerMessage);
+  };
   return {
     name: TOOL_DELEGATE_TASK,
     label: 'Delegate Task',
@@ -635,6 +659,10 @@ export function createDelegateTaskTool(options: {
       'not into the chat.',
     parameters: DelegateTaskParameters,
     async execute(_toolCallId, args, signal): Promise<AgentToolResult<Record<string, never>>> {
+      // Promote `_toolCallId` to first-class `toolCallId`：Phase 2 UI feedback
+      // 通过它把 worker live stream 关联回外层 delegate_task toolCallId。
+      // 下划线前缀移除：现在真在用了。
+      const toolCallId = _toolCallId;
       // Schema 层 task / role 是 Optional（见 DelegateTaskParameters 注释）——
       // 真正「必填」由下面的 mutual-exclusion 分支校验。这里 cast 成 Optional
       // 与 schema 1:1 对齐，避免 TS 错把 schema 放宽当作 contract drift。
@@ -683,6 +711,13 @@ export function createDelegateTaskTool(options: {
           sessionId,
           mainModel: null,
           ...(signal ? { signal } : {}),
+          // Phase 2 UI feedback: 给每个 batch item 共享同个 broadcaster 闭包；
+          // batch 内 worker 的 toolCallId 仍由本层 tool execute 决定（外层
+          // delegate_task toolCallId），所有 items 的 stream 统一显示在同一张卡里。
+          // 没注入 broadcast 时整个 onLiveStream 不接（runner 侧零 fan-out 开销）。
+          ...(broadcast
+            ? { onLiveStream: (ev: WorkerLiveStreamEvent) => liveStreamBroadcaster(toolCallId, ev) }
+            : {}),
         });
         return {
           content: [{ type: 'text', text: renderBatchToolResult(batchHandoff) }],
@@ -828,6 +863,11 @@ export function createDelegateTaskTool(options: {
         mainModel,
         ...(signal ? { signal } : {}),
         enableRetry: true,
+        // Phase 2 UI feedback：把 worker live stream 广播给 sidepanel。没注入
+        // broadcast 时整个 onLiveStream 不接（runner 侧零 fan-out 开销）。
+        ...(broadcast
+          ? { onLiveStream: (ev: WorkerLiveStreamEvent) => liveStreamBroadcaster(toolCallId, ev) }
+          : {}),
       });
 
       // ── 8. Runner-level 失败（model 解析失败 / abort / 异常） ────

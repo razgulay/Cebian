@@ -32,6 +32,14 @@ import { sessionListChannel } from '@/lib/agent/session-list-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
+// Worker live-stream 的纯逻辑（reducer + 节流队列）住在 lib/agent，hook 只持有
+// 队列实例并把 flush 结果并进 state —— 依赖方向保持 hooks → lib。
+import {
+  createStreamQueue,
+  mergeStreamBatch,
+  type StreamQueue,
+  type WorkerLiveStreamBuffer,
+} from '@/lib/agent/worker-live-stream';
 
 // ─── Helpers ───
 
@@ -77,6 +85,13 @@ export interface AgentPortState {
    *  点可能与 hook 端有毫秒级差异，权威值更可靠），下一次 messages 变化时
    *  本地值自然接管。空会话为 0。 */
   contextTokenEstimate: number;
+  /** Phase 2 UI feedback：worker 子代理的实时流 buffer，键 = 外层
+   *  `delegate_task` 的 toolCallId。50–100Hz 的 text/thinking delta 由
+   *  `lib/agent/worker-live-stream.ts` 的 reducer coalesce 进 `current` +
+   *  `lines`；UI 直接读 `liveLines.get(toolCallId)`，无 key 视为「没有流」
+   *  （box 不渲染）。`tool_resolved` 时清该 key；卸载 / 切会话 / New Chat
+   *  全清。 */
+  liveLines: Map<string, WorkerLiveStreamBuffer>;
 }
 
 // ─── Pending interactive tool info (for UI rendering) ───
@@ -123,6 +138,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     contextOverflow: null,
     contextWindow: null,
     contextTokenEstimate: 0,
+    liveLines: new Map(),
   });
 
   const [pendingTools, setPendingTools] = useState<Map<string, PendingToolInfo>>(new Map());
@@ -171,6 +187,30 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
   // the authoritative message's text content when it arrives.
   // Cleared as soon as it's been applied to an incoming broadcast.
   const pendingDisplayTextRef = useRef<Map<string, { sessionId: string; timestamp: number; displayText: string }>>(new Map());
+
+  // Phase 2 UI feedback：worker 实时流的累积器。`worker_stream` 事件以
+  // 50–100Hz（每条 1–3 chars）从 BG 到达，逐条 setState 会把 DelegationCard
+  // 打成 burst-render，故交给 `createStreamQueue`（纯逻辑在
+  // `lib/agent/worker-live-stream.ts`）：按 toolCallId 收进 Map + 单个 50ms
+  // trailing-edge timer，到点用 `mergeStreamBatch` 整批并进 state。结果：不论
+  // 上游多快，本 hook ≤20 renders/s。
+  //
+  // 队列实例存在 ref 里、只创建一次且永不替换，所以 mount effect（deps 为空）
+  // 里的 `handleMessage` 捕获 `streamQueue` 是安全的。`onFlush` 在构造时固定：
+  // 窗口内只有首个 event 会 arm timer，若回调随 event 传入，实际生效的永远是
+  // 那一条的回调——语义上误导。
+  //
+  // `rememberTool` / `resolveTool` 是队列内的 toolName → toolCallId 反查表：
+  // `tool_resolved` 的 wire message 只带 `toolName`，而 liveLines 以
+  // toolCallId 为键，故 `tool_pending` 时登记、`tool_resolved` 时反查（顺带
+  // 丢掉该 id 在节流窗口里尚未 flush 的事件）。
+  const streamQueueRef = useRef<StreamQueue | null>(null);
+  if (streamQueueRef.current === null) {
+    streamQueueRef.current = createStreamQueue((pending) => {
+      setState(prev => ({ ...prev, liveLines: mergeStreamBatch(prev.liveLines, pending) }));
+    });
+  }
+  const streamQueue = streamQueueRef.current;
 
   // Connect to background on mount, with auto-reconnect on disconnect.
   useEffect(() => {
@@ -360,6 +400,13 @@ case 'stream_ops':
           });
           setPendingTools(new Map());
           setPendingPermissions(new Map());
+          // Phase 2: 清 liveLines —— agent_end 后所有 in-flight worker stream
+          // 不再相关（worker 整个 turn 跑完），UI 不再显示 LiveStreamBox。
+          streamQueue.reset();
+          setState(prev => ({
+            ...prev,
+            liveLines: new Map(),
+          }));
           break;
 
         case 'tool_pending':
@@ -369,6 +416,9 @@ case 'stream_ops':
             next.set(msg.toolName, { toolCallId: msg.toolCallId, args: msg.args });
             return next;
           });
+          // Phase 2：登记 toolName → toolCallId，供 tool_resolved 反查
+          // （那条 wire message 只带 toolName，不带 toolCallId）。
+          streamQueue.rememberTool(msg.toolName, msg.toolCallId);
           break;
 
         case 'tool_resolved':
@@ -378,6 +428,29 @@ case 'stream_ops':
             next.delete(msg.toolName);
             return next;
           });
+          // Phase 2：worker 跑完 —— 清掉该 toolCallId 的 liveLines entry。
+          // wire 不带 toolCallId，故从队列的反查表（tool_pending 时登记）取；
+          // `resolveTool` 顺带把该 id 在节流窗口里待 flush 的事件丢掉。
+          {
+            const id = streamQueue.resolveTool(msg.toolName);
+            if (id) {
+              setState(prev => {
+                if (!prev.liveLines.has(id)) return prev;
+                const next = new Map(prev.liveLines);
+                next.delete(id);
+                return { ...prev, liveLines: next };
+              });
+            }
+          }
+          break;
+
+        case 'worker_stream':
+          if (!isCurrentSession(msg.sessionId)) break;
+          // 键取消息顶层的 `toolCallId`（外层 delegate_task 的 id，protocol
+          // 必填），不是 `msg.ev.toolCallId`——后者在 worker-runner 层永远是
+          // undefined，用它做键会让所有事件落到 fallback，ChatPage 的
+          // `liveLines.get(tc.id)` 永远取不到。
+          streamQueue.enqueue(msg.toolCallId, msg.ev);
           break;
 
         case 'session_created':
@@ -388,6 +461,10 @@ case 'stream_ops':
           // dropped because `sessionIdRef.current` lags the React commit.
           setPendingTools(new Map());
           setPendingPermissions(new Map());
+          // Phase 2：新会话 → 丢掉在途的 worker stream 事件并清空 liveLines，
+          // 覆盖「subscribe 与 session_created 之间到达一条 worker_stream」
+          // 的竞态。
+          streamQueue.reset();
           setState(prev => {
             // Detect fork / navigate-to-different-session: clear the
             // previous session's message list so the upcoming
@@ -409,6 +486,9 @@ case 'stream_ops':
               messages: isSessionChange ? [] : prev.messages,
               isAgentRunning: false,
               isCompacting: false,
+              // Phase 2：新会话 → liveLines 清空（worker stream buffer 不跨
+              // 会话继承）。
+              liveLines: new Map(),
             };
           });
           callbacksRef.current.onSessionCreated?.(msg.sessionId, msg.title);
@@ -638,6 +718,9 @@ case 'stream_ops':
       recorderChannel.setPort(null);
       mcpAppResourceChannel.setPort(null);
       sessionListChannel.setPort(null);
+      // Phase 2：组件卸载时取消节流 timer——否则 50ms 后仍会回调已卸载
+      // 组件的 setState（StrictMode 双挂载时尤其明显）。
+      streamQueue.reset();
     };
   }, []);
 
@@ -1014,12 +1097,17 @@ case 'stream_ops':
       // 模型的窗口；estimate 不在这里清——unsubscribe() 保留 prev.messages，
       // 估计仍属当前快照，clearSession() 才是真正全清的场景。
       contextWindow: null,
+      // Phase 2：清 liveLines —— 切到别的会话后旧 worker stream buffer 已无
+      // 关，同时避免与新会话的 toolCallId 撞车。
+      liveLines: new Map(),
     }));
     setPendingTools(new Map());
     setPendingPermissions(new Map());
     // 临时诊断：卸载会话——清掉残留的 t0 与首 token 哨兵，避免下一轮 stale 复用。
     pendingTraceT0Ref.current.clear();
     hookFirstTokenSeenRef.current.clear();
+    // Phase 2：丢掉在途的 stream 事件并取消节流窗口。
+    streamQueue.reset();
     postMessage({ type: 'unsubscribe' });
   }, [postMessage]);
 
@@ -1044,12 +1132,16 @@ case 'stream_ops':
       contextOverflow: null,
       contextWindow: null,
       contextTokenEstimate: 0,
+      liveLines: new Map(),
     });
     setPendingTools(new Map());
     setPendingPermissions(new Map());
     // 临时诊断：New Chat 导航——清掉残留 t0 与首 token 哨兵。
     pendingTraceT0Ref.current.clear();
     hookFirstTokenSeenRef.current.clear();
+    // Phase 2：清 worker stream buffer + 丢掉在途节流窗口，避免离开页面时
+    // 留下一个会回调 setState 的 `setTimeout`。
+    streamQueue.reset();
   }, []);
 
   /**

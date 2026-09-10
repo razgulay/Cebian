@@ -42,7 +42,7 @@
 //   加 item 不需要改 DelegationCard 编译；table 用 i18n lookup map 把 known 15
 //   id 翻成 label，未知 id fallback 成 kebab 原文。
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import {
   ChevronRight,
   Loader2,
@@ -60,6 +60,7 @@ import { t } from '@/lib/i18n';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import type { WorkerRole } from '@/lib/persistence/storage';
+import type { WorkerLiveLine, WorkerLiveStreamBuffer } from '@/lib/agent/worker-live-stream';
 
 /** 4 种角色对应 lucide icon —— `worker-roles.ts` 已为每个 role 定义 `i18nKey`
  *  指向 `chat.workerTeamRoster.role.<roleKey>`（Subtask 1 已 ship），这里复用。 */
@@ -172,6 +173,13 @@ export interface DelegationCardItemProps {
   /** Reviewer 静态 audit 的结构化结果（Subtask 2.2 `REVIEWER_HANDOFF_SCHEMA`）。
    *  非 reviewer role 永远 undefined —— 不渲染 mini-table。 */
   checklist?: readonly ChecklistItem[];
+  /** Phase 2 UI feedback：worker-runner 的实时流（已在
+   *  `lib/agent/worker-live-stream.ts` 里 coalesce 成 lines）。caller
+   *  （`<ChatPage>`，entrypoints/sidepanel/pages/chat/index.tsx）从
+   *  `useBackgroundAgent().state.liveLines.get(<外层 toolCallId>)` 取值传进来。
+   *  渲染条件与可见性契约见 `<LiveStreamBox>`。undefined / 空 = 没有流
+   *  （box 不渲染）。 */
+  liveBuffer?: WorkerLiveStreamBuffer;
 }
 
 interface DelegationStatusBadgeProps {
@@ -255,6 +263,72 @@ export type DelegationStatus =
   | 'cancelled'
   | 'timedOut';
 
+/** Phase 2 UI feedback（Subtask 9.0 Phase 2-D）：Live Micro-Stream Box ——
+ *  worker-runner 的 text / thinking / tool 事件经 coalesce 后的 4 行 mono
+ *  转录。finished 行数增加、或 in-progress 的 `current.text` 变化时自动滚到
+ *  最新一行。`aria-live="polite"` 让读屏软件播报更新而不打断用户。
+ *
+ *  可见性契约：caller（`DelegationCardItem`）只在
+ *  `status === 'running' && (buffer.lines.length > 0 || buffer.current)`
+ *  时挂载本组件——空 buffer 不渲染（timer + spinner 已经表达了「正在启动」）。
+ *
+ *  渲染契约：父组件每次 flush 都会重渲本组件（50ms trailing-edge 节流，见
+ *  `lib/agent/worker-live-stream.ts`），但布局稳定——`useLayoutEffect` 里把
+ *  `scrollTop` 置底，不闪。
+ *
+ *  防御：`tool` 行绝不 `JSON.stringify(args)` —— 代理缓冲的 payload 可达
+ *  25–135 KB 且可能含循环引用（会打爆 React）。args 到这一步之前已被 reducer
+ *  的 `formatToolPath` 压成 `toolName:path`。 */
+function LiveStreamBox({
+  buffer,
+}: {
+  buffer: WorkerLiveStreamBuffer;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll to newest whenever finished-line count grows or current text changes.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [buffer.lines.length, buffer.current?.text]);
+
+  // 按 kind 取行内 className：thinking=斜体灰、tool=加粗 primary、text=正文。
+  // 加 kind 时一并更新这里。
+  const lineClass = (kind: WorkerLiveLine['kind']): string =>
+    kind === 'thinking'
+      ? 'text-muted-foreground italic'
+      : kind === 'tool'
+        ? 'text-primary font-semibold'
+        : 'text-foreground/90';
+
+  return (
+    <div
+      ref={scrollRef}
+      // max-h-32 ≈ 128px：4 finished lines × ~14px + 1 in-progress ~16px。
+      // Mono + 10.5px 用来在视觉上把 box（转录）和正文（prose）区分开。
+      className="mt-2 max-h-32 overflow-y-auto rounded border border-border/60 bg-muted/30 p-2 font-mono text-[10.5px] leading-snug text-foreground/80"
+      aria-live="polite"
+      aria-label={t('chat.delegation.liveStream.label')}
+    >
+      {buffer.lines.map((line, i) => (
+        <div
+          // Key 含行号 + kind：reducer 对同一行内容稳定 line identity，
+          // 让 React 在可能时复用 DOM 节点，避免抖动。
+          key={`line-${i}-${line.kind}`}
+          className={lineClass(line.kind)}
+        >
+          {line.text || ' '}
+        </div>
+      ))}
+      {buffer.current && (
+        <div className={lineClass(buffer.current.kind)}>
+          {buffer.current.text || ' '}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DelegationCardItem({
   role,
   status,
@@ -269,6 +343,7 @@ export function DelegationCardItem({
   attemptStartedAt,
   timeoutMs,
   checklist,
+  liveBuffer,
 }: DelegationCardItemProps) {
   // 默认展开策略：running / failed / partial / timedOut 一律展开（用户在等结果 /
   // 要看错误 / 要看「换 model」提示），success + 有 output 折叠（点 header 看
@@ -301,6 +376,12 @@ export function DelegationCardItem({
     timeoutMs !== undefined ? Math.round(timeoutMs / 1000) : undefined;
 
   const RoleIcon = ROLE_ICONS[role] ?? PenLine;
+
+  // Phase 2-D live 模式开关：stream 一开始吐字就隐藏 Task 区，让 card 紧凑
+  // （只剩 header + LiveStreamBox）。首个事件之前（TTFT 1–5s）仍保留 Task，
+  // 避免 card 一片空白；worker 结束后 Task 重新出现，承接最终 summary。
+  const hasLive =
+    isRunning && !!liveBuffer && (liveBuffer.lines.length > 0 || !!liveBuffer.current);
 
   // 输出文件 → VFS 预览。`/vfs.html#<encoded workspace path>` 是项目里既定的
   // 「在新 tab 打开独立 vfs.html」协议（见 `App.tsx:152` 与 `vfs/lib/path-utils.ts`）。
@@ -382,15 +463,28 @@ export function DelegationCardItem({
 
       {open && (
         <div className="border-t border-border overflow-hidden">
-          {/* Task body — shown while running so the user can see what the worker was actually asked to do */}
-          <div className="px-3.5 py-2.5 bg-background">
-            <div className="text-[0.65rem] text-muted-foreground/60 mb-1 font-medium">
-              {t('chat.delegation.section.task')}
+          {/* Task body — shown while running so the user can see what the worker was actually asked to do.
+              Phase 2-D: hidden once the live stream starts emitting (hasLive) —
+              the transcript takes over the body; reappears when the attempt resolves. */}
+          {!hasLive && (
+            <div className="px-3.5 py-2.5 bg-background">
+              <div className="text-[0.65rem] text-muted-foreground/60 mb-1 font-medium">
+                {t('chat.delegation.section.task')}
+              </div>
+              <div className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                {task || <span className="italic text-muted-foreground/60">—</span>}
+              </div>
             </div>
-            <div className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
-              {task || <span className="italic text-muted-foreground/60">—</span>}
-            </div>
-          </div>
+          )}
+
+          {/* Phase 2-D Live Micro-Stream Box: 4-line mono transcript of the
+              worker-runner's coalesced text/thinking/tool events, auto-scrolled
+              to newest. Mounted only when running + has content (the timer /
+              spinner already cover the empty "starting" state). Collapse
+              contract: the parent re-renders when status flips to
+              success/failed/etc., and `liveBuffer` is cleared by `tool_resolved`
+              in the hook (no prop passed when not running = no re-render). */}
+          {hasLive && liveBuffer && <LiveStreamBox buffer={liveBuffer} />}
 
           {/* Model — small monospace label, helps debug "why is the result so poor this time" */}
           {modelKey && (
@@ -577,6 +671,14 @@ export interface DelegationCardProps {
   /** Reviewer 静态 audit（Subtask 2.3）—— 单 task mode 时挂在 outer card
    *  上而不是 inner item，因为这里 outer 自己也接受 inner 的全部字段。 */
   checklist?: readonly ChecklistItem[];
+  /** Phase 2-D：worker-runner 的实时流 buffer。
+   *  Single 模式：直接传到内层 `DelegationCardItem` 渲染 `<LiveStreamBox>`。
+   *  Batch 模式：runner 在 batch 内所有 item 共用同一个 outer `delegate_task`
+   *  toolCallId（一条 `worker_stream` 流的 key 来自外层 toolCallId，
+   *  不是 per-item 的）—— 故 batch 只渲染**一个**共享的 box，挂在外层
+   *  header 下方、内层 item 列表之上，不再 forward 到每个 item。
+   *  可见性契约见 `<LiveStreamBox>`。 */
+  liveBuffer?: WorkerLiveStreamBuffer;
   /** Batch 模式：per-item 渲染为内层 `DelegationCardItem`。
    *  传这个就忽略 outer single-task 字段（外层 header 改成 batchSummary）。 */
   batch?: readonly DelegationCardItemProps[];
@@ -635,6 +737,7 @@ export function DelegationCard(props: DelegationCardProps) {
         attemptStartedAt={props.attemptStartedAt}
         timeoutMs={props.timeoutMs}
         checklist={props.checklist}
+        liveBuffer={props.liveBuffer}
       />
     );
   }
@@ -653,6 +756,13 @@ export function DelegationCard(props: DelegationCardProps) {
     };
   const outerStatus = aggregateBatchStatus(items);
   const anyRunning = outerStatus === 'running';
+  // Batch mode：所有 item 共用同一个 outer `delegate_task` toolCallId（流事件
+  // 按外层 id 入 liveLines），所以也共用同一个 liveBuffer —— 只在 batch level
+  // 渲染一个共享 box，避免每个 item 都重复一遍并把已 resolve 的 task 也压住。
+  const batchHasLive =
+    anyRunning &&
+    !!props.liveBuffer &&
+    (props.liveBuffer.lines.length > 0 || !!props.liveBuffer.current);
 
   return (
     <div
@@ -691,6 +801,16 @@ export function DelegationCard(props: DelegationCardProps) {
           }
         />
       </div>
+
+      {/* Batch-level Live Micro-Stream Box — one shared box per batch because
+          all items share the same outer `delegate_task` toolCallId (the
+          `worker_stream` key is the outer id, not per-item). Mounted below
+          the batch header and above the per-item list. */}
+      {batchHasLive && props.liveBuffer && (
+        <div className="px-3.5 pb-2.5">
+          <LiveStreamBox buffer={props.liveBuffer} />
+        </div>
+      )}
 
       {/* Per-item body —— each inner card manages its own timer / output link /
           error fold; one item crashing/stuck does not affect the others' interactivity. */}

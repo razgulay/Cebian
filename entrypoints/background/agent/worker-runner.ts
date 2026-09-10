@@ -76,6 +76,7 @@ import {
   type WorkerRoleConfig,
 } from '@/lib/agent/worker-roles';
 import { TOOL_DELEGATE_DOM, TOOL_DELEGATE_TASK } from '@/lib/tools/names';
+import type { WorkerLiveStreamEvent } from '@/lib/ipc/protocol';
 import { vfs } from '@/lib/persistence/vfs';
 import { getActiveTabId, withDefaultTabId } from '../dom-sub-agent';
 import { debugLog, withSession } from '@/lib/debug/log';
@@ -162,6 +163,17 @@ export interface RunWorkerOptions {
   /** Single-pass retry 开关。默认 true；tool 层显式设 true，runner 内部
    *  retry 时不传（仅一次）。关闭后 3 类机械失败直接返回给 caller。 */
   enableRetry?: boolean;
+  /** Optional Phase 2 UI feedback hook: 接到 worker 的 text/thinking delta +
+   *  tool_execution_start 事件，caller 用它把实时 stream 广播给 chat sidebar
+   *  （典型用法：`delegate-task.ts` 的 `liveStreamBroadcaster` 走
+   *  `broadcastToViewers`）。未传 = 现有行为，零 IO。`toolCallId` 由 caller
+   *  透过 closure 注进 broadcast payload —— runner 这层不知道也不关心
+   *  外层 delegate_task toolCallId。
+   *
+   *  这里是**纯 fan-out**：不参与 IO、决策、retry，只保证「流出的事件频率合
+   *  理」（provider 自带 50–100Hz delta；tool_start 是离散事件）。渲染层的
+   *  token-coalesce + 50ms 节流在 `lib/agent/worker-live-stream.ts`。 */
+  onLiveStream?: (ev: WorkerLiveStreamEvent) => void;
 }
 
 export interface WorkerHandoff {
@@ -1215,6 +1227,9 @@ interface RunWorkerAttemptOptions {
   sessionId: string;
   /** Attempt 计数（1 或 2），透传到 handoff.attempts。 */
   attempt: 1 | 2;
+  /** Optional Phase 2 UI feedback hook（从 `RunWorkerOptions.onLiveStream`
+   *  透传下来；retry attempt 也必须传，UI 才有 attempt 2 的 stream）。 */
+  onLiveStream?: (ev: WorkerLiveStreamEvent) => void;
 }
 
 /** 一次 attempt 的完整 lifecycle：建 agent → 跑 → 抽文本 → 读 output →
@@ -1507,6 +1522,35 @@ async function runWorkerAttempt(
             markFirstToken();
             if (phase === 'before_ttft') enterPhase('emitting');
             else armPhaseTimer();
+            // Phase 2 UI feedback: 把 text/thinking delta 扇出给 caller。
+            // `assistantMessageEvent` 是 pi-ai 的 `AssistantMessageEvent` discriminated
+            // union（`text_delta` / `thinking_delta` / `toolcall_*` / …）；我们只
+            // 关心 text/thinking 的 delta（1–3 chars/token，rate 50–100Hz），渲染层
+            // 的 `reduceStreamEvents`（lib/agent/worker-live-stream.ts）负责
+            // token-coalesce + 50ms throttle。
+            if (opts.onLiveStream) {
+              const aev = ev.assistantMessageEvent;
+              if (aev.type === 'text_delta') {
+                opts.onLiveStream({
+                  kind: 'text_delta',
+                  sessionId: opts.sessionId,
+                  toolCallId: undefined,
+                  delta: aev.delta,
+                });
+              } else if (aev.type === 'thinking_delta') {
+                opts.onLiveStream({
+                  kind: 'thinking_delta',
+                  sessionId: opts.sessionId,
+                  toolCallId: undefined,
+                  delta: aev.delta,
+                });
+              }
+              // 其他 assistantMessageEvent type（text_start/thinking_start/
+              // text_end/thinking_end/toolcall_*）—— start/end 不渲染，
+              // toolcall_* 的 25–135KB args payload 不能流进 LiveStreamBox
+              // （tool args 只经 tool_start 的 `formatToolPath` 以顶层 `args.path`
+              //  的形式出现在 UI 上）。
+            }
             break;
           case 'message_end':
             if (ev.message.role === 'assistant') {
@@ -1539,6 +1583,19 @@ async function runWorkerAttempt(
               toolName: ev.toolName,
               elapsedMs: Math.round(performance.now() - attemptStartedAt),
             });
+            // Phase 2 UI feedback: 工具开始时给 caller 一条 self-contained
+            // 「● tool_name:path」线。`args` 原样透传——`liveStreamBroadcaster`
+            // 走 `formatToolPath` 只读 `args.path`（顶层 string），不会
+            // 触发 25–135 KB fs_create_file 序列化。
+            if (opts.onLiveStream) {
+              opts.onLiveStream({
+                kind: 'tool_start',
+                sessionId: opts.sessionId,
+                toolCallId: undefined,
+                toolName: ev.toolName,
+                args: ev.args,
+              });
+            }
             enterPhase('tool_running');
             // Site 2（debug + abort trigger）：连续 read-only 检测器。
             //   - 旧版 (Subtask 诊断阶段) 只发 WARN，不 abort——确认 hypothesis 后
@@ -2018,6 +2075,7 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
     signal,
     sessionId,
     attempt: 1,
+    ...(options.onLiveStream ? { onLiveStream: options.onLiveStream } : {}),
   });
 
   // 7. Optional retry（max 1 次；shouldRetry 在 retryable + ok + 非 attempt=2 时 true）
@@ -2041,6 +2099,7 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
       signal,
       sessionId,
       attempt: 2,
+      ...(options.onLiveStream ? { onLiveStream: options.onLiveStream } : {}),
     });
   }
 
@@ -2108,6 +2167,10 @@ export interface RunBatchWorkerOptions {
   /** 调用方（主代理）的 AbortSignal。已 abort → 早退所有 items；
    *  运行中 abort → 透传到每个 in-flight runWorker。 */
   signal?: AbortSignal;
+  /** Optional Phase 2 UI feedback hook（透传到每个 item 的 runWorker）。
+   *  单个 callback 共享给所有 batch items —— sidepanel 拿到 stream 时按
+   *  toolCallId 隔离即可（per-item 状态共享同张 WorkerCard）。 */
+  onLiveStream?: (ev: WorkerLiveStreamEvent) => void;
 }
 
 /** Batch dispatch 主入口：并行跑 N 个 `runWorker`，组装 outer handoff。
@@ -2152,6 +2215,7 @@ export async function runBatchWorker(
         sessionId,
         mainModel: options.mainModel ?? null,
         ...(signal ? { signal } : {}),
+        ...(options.onLiveStream ? { onLiveStream: options.onLiveStream } : {}),
       }),
     ),
   );
@@ -2240,3 +2304,4 @@ export function aggregateBatchHandoffs(
     batchSummary: { total, succeeded, failed, partial, cancelled },
   };
 }
+

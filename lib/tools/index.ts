@@ -25,6 +25,7 @@ import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
 import { debugLog, withSession } from '@/lib/debug/log';
+import type { ServerMessage } from '@/lib/ipc/protocol';
 import { workerTeamEnabled } from '@/lib/persistence/storage';
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
@@ -115,6 +116,11 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
+  /** 会话维度的广播通道，仅由 background 提供（见 `createSessionTools`）。
+   *  透传给 `createDelegateTaskTool` 让 worker live stream 走它而非 lib 直接
+   *  依赖 entrypoints 的 `broadcastToViewers`（`lib-no-up-runtime`）。缺省 =
+   *  无实时流，worker 仍正常跑。 */
+  broadcast?: (msg: ServerMessage) => void,
 ): Promise<AgentTool<any>[]> {
   // Cold-start profiling: MCP discovery and the lazy delegate_dom import are
   // the two async paths in this function. Log each so we can see which one
@@ -146,7 +152,7 @@ export async function buildSessionToolArray(
   // L1 block is also omitted from the system prompt (`prompt-composer.ts`).
   const delegateTaskStart = Date.now();
   const { createDelegateTaskTool } = await import('./delegate-task');
-  const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId });
+  const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId, broadcast });
   debugLog.info('tool', 'tool:init:delegate-task',
     withSession({
       durationMs: Date.now() - delegateTaskStart,
@@ -185,7 +191,12 @@ export async function buildSessionToolArray(
  * Async because MCP tool discovery may need to fetch from remote servers
  * (cached by the manager so subsequent sessions are fast).
  */
-export async function createSessionTools(sessionId: string): Promise<{
+export async function createSessionTools(
+  sessionId: string,
+  /** 见 `buildSessionToolArray` 的同名参数：由 background 注入的会话广播通道，
+   *  透传给 `delegate_task` 做 worker live stream。缺省 = 无实时流。 */
+  broadcast?: (msg: ServerMessage) => void,
+): Promise<{
   tools: AgentTool<any>[];
   ctx: SessionToolContext;
 }> {
@@ -196,7 +207,7 @@ export async function createSessionTools(sessionId: string): Promise<{
   const { tool: askUserTool, bridge: askUserBridge } = createSessionAskUserTool();
   ctx.register(TOOL_ASK_USER, askUserBridge, askUserTool);
 
-  const tools = await buildSessionToolArray(ctx);
+  const tools = await buildSessionToolArray(ctx, broadcast);
 
   // Final cold-start total. Pairs with the per-phase markers in
   // buildSessionToolArray so we can attribute the time to MCP discovery vs

@@ -586,7 +586,10 @@ class SessionManager {
     await Promise.allSettled(
       Array.from(this.sessions.values()).map(async (agentSession) => {
         try {
-          const tools = await buildSessionToolArray(agentSession.toolCtx);
+          const tools = await buildSessionToolArray(
+            agentSession.toolCtx,
+            (msg) => broadcastToViewers(agentSession.sessionId, msg),
+          );
           agentSession.agent.state.tools = tools;
         } catch (err) {
           console.warn(`[mcp] failed to refresh tools for session ${agentSession.sessionId}:`, err);
@@ -801,8 +804,12 @@ class SessionManager {
 
     const thinkingLvl = existingSession?.thinkingLevel || (await lastSelectedThinkingLevel.getValue());
 
-    // 每会话独立的工具 + bridge。
-    const { tools: sessionTools, ctx: toolCtx } = await createSessionTools(sessionId);
+    // 每会话独立的工具 + bridge。广播通道注入给 `delegate_task`（worker live
+    // stream 走它），lib 层不直接依赖本 entrypoint 的 broadcastToViewers。
+    const { tools: sessionTools, ctx: toolCtx } = await createSessionTools(
+      sessionId,
+      (msg) => broadcastToViewers(sessionId, msg),
+    );
 
     // 工具执行前授权门禁：每会话一个独立 bridge；用它构造绑定到本会话
     // `requestPermissionDecision` 的 beforeToolCall 闭包。requestDecision 在
