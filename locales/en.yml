@@ -915,6 +915,10 @@ chat:
     # Branch switcher ("‹ n/m ›") tooltips on messages with sibling versions.
     prevBranch: "Previous version"
     nextBranch: "Next version"
+    # Toggle that expands a collapsed over-long user message bubble.
+    expandLong: "Show more"
+    # Toggle that re-collapses an expanded over-long user message bubble.
+    collapseLong: "Show less"
   edit:
     # Dialog title when the user clicks the pencil on a prior user turn.
     title: "Edit message"

@@ -1,5 +1,5 @@
-import { Bot, ChevronDown, ChevronLeft, ChevronRight, Lightbulb, CheckCircle, Crosshair, FileText, Film, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
-import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
+import { Bot, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Lightbulb, CheckCircle, Crosshair, FileText, Film, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -66,6 +66,51 @@ export function BranchSwitcher({
   );
 }
 
+/* ─── Long user message collapse ─── */
+
+/** 折叠阈值（px）：user 气泡自然高度超过该值才给 Show more 入口。刻意是绝对
+ *  px 而非行数——字号 slider 改变后由 ResizeObserver 重新判定是否溢出。 */
+const COLLAPSED_BUBBLE_MAX_H = 240;
+
+/**
+ * 测量 user 气泡自然高度是否超过折叠阈值，并给出折叠态所需的 wrapper 属性。
+ * `ResizeObserver` 挂在**内层**（不被 max-height 截断的）节点上，故字号 slider、
+ * sidepanel 宽度变化引起的重排都会重新判定；而折叠 cap 本身不会反馈进测量
+ * （内层 scrollHeight 始终是全文高度），不会自我锁死。
+ */
+function useCollapsibleBubble(enabled: boolean) {
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = innerRef.current;
+    if (!enabled || !el) {
+      setOverflowing(false);
+      // 禁用（编辑态 / 无气泡）时一并复位展开态，避免从编辑返回后气泡默认展开。
+      setExpanded(false);
+      return;
+    }
+    const measure = () => setOverflowing(el.scrollHeight > COLLAPSED_BUBBLE_MAX_H);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // enabled 翻转（进入 / 退出内联编辑）时气泡节点重新挂载，需重新接 observer。
+  }, [enabled]);
+
+  const collapsed = enabled && overflowing && !expanded;
+  return {
+    innerRef,
+    collapsed,
+    overflowing,
+    expanded,
+    setExpanded,
+    // 仅折叠态才下发 cap；展开 / 未溢出时 wrapper 无内联样式。
+    collapseStyle: collapsed ? { maxHeight: COLLAPSED_BUBBLE_MAX_H } : undefined,
+  };
+}
+
 /* ─── User Message ─── */
 export function UserMessageBubble({
   msg,
@@ -109,6 +154,19 @@ export function UserMessageBubble({
   useEffect(() => {
     if (!canEdit) setEditing(false);
   }, [canEdit]);
+
+  // 携带的提示词就写成气泡里的第一段普通文字 `/名字`，与用户自己敲的话同一个样式——
+  // 它本来就是这一轮消息的一部分，不值得为它单开一块 UI。正文（模板展开后的那一大段）
+  // 不在气泡里露出：气泡只显示用户看得懂、也确实「打过」的那几个字。
+  const slashText = slashPrompt ? `/${slashPrompt.name}` : null;
+  const bubbleText = slashText ? (text ? `${slashText} ${text}` : slashText) : text;
+  const bubble = bubbleText ?? children;
+  // 一个字没打、也没挂提示词的空消息不渲染气泡框，免得留一个空壳。
+  const hasBubble = typeof bubble === 'string' ? bubble.length > 0 : bubble != null;
+
+  // 超长消息折叠：编辑态不折叠（textarea 自己有 rows 上限）；无气泡时不测量。
+  // children 形态（interactive tool result 等）同样参与——它们也可能很高。
+  const collapse = useCollapsibleBubble(!editing && hasBubble);
 
   const commitEdit = () => {
     const next = draft.trim();
@@ -156,15 +214,6 @@ export function UserMessageBubble({
       </div>
     );
   }
-
-  // 携带的提示词就写成气泡里的第一段普通文字 `/名字`，与用户自己敲的话同一个样式——
-  // 它本来就是这一轮消息的一部分，不值得为它单开一块 UI。正文（模板展开后的那一大段）
-  // 不在气泡里露出：气泡只显示用户看得懂、也确实「打过」的那几个字。
-  const slashText = slashPrompt ? `/${slashPrompt.name}` : null;
-  const bubbleText = slashText ? (text ? `${slashText} ${text}` : slashText) : text;
-  const bubble = bubbleText ?? children;
-  // 一个字没打、也没挂提示词的空消息不渲染气泡框，免得留一个空壳。
-  const hasBubble = typeof bubble === 'string' ? bubble.length > 0 : bubble != null;
 
   return (
     <div
@@ -245,9 +294,50 @@ export function UserMessageBubble({
       )}
 
       {hasBubble && (
-        <div className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-fit ml-auto whitespace-pre-wrap break-all">
-          {bubble}
-        </div>
+        <>
+          {/*
+            * 折叠态：外层 cap 高度并裁切（overflow-clip 而非 overflow-hidden——
+            * 后者会造出 scroll container，拖选文字越过裁切线时 Chrome 会程序性
+            * 滚动它，让 fade 底下露出正文）；内层保持自然高度供测量（见
+            * useCollapsibleBubble）。w-fit ml-auto 在外层，让渐隐只盖气泡自身
+            * 宽度（气泡右对齐，行内左侧是空白）。展开 / 未溢出时外层无内联
+            * 样式，气泡与原先完全同形。
+            */}
+          <div
+            className="relative overflow-clip rounded-2xl w-fit ml-auto"
+            style={collapse.collapseStyle}
+          >
+            <div
+              ref={collapse.innerRef}
+              className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-full whitespace-pre-wrap break-all"
+            >
+              {bubble}
+            </div>
+            {collapse.collapsed && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-2xl bg-gradient-to-t from-card to-transparent" />
+            )}
+          </div>
+          {collapse.overflowing && (
+            <div className="flex justify-end mt-1 pr-1">
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground"
+                aria-expanded={collapse.expanded}
+                onClick={() => collapse.setExpanded(!collapse.expanded)}
+              >
+                {collapse.expanded ? (
+                  <ChevronUp className="size-3" />
+                ) : (
+                  <ChevronDown className="size-3" />
+                )}
+                {collapse.expanded
+                  ? t('chat.message.collapseLong')
+                  : t('chat.message.expandLong')}
+              </Button>
+            </div>
+          )}
+        </>
       )}
 
       {hasAttachments && (

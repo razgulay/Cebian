@@ -897,6 +897,10 @@ chat:
     # 存在并列版本的消息上「‹ n/m ›」分支切换器的 tooltip
     prevBranch: "上一个版本"
     nextBranch: "下一个版本"
+    # 展开被折叠的超长 user 消息气泡
+    expandLong: "展开更多"
+    # 重新收起已展开的超长 user 消息气泡
+    collapseLong: "收起"
   edit:
     # 点击任意一条 user 消息上的铅笔后弹出的对话框标题
     title: "编辑消息"

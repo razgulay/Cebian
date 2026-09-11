@@ -897,6 +897,10 @@ chat:
     # 存在並列版本的訊息上「‹ n/m ›」分支切換器的 tooltip
     prevBranch: "上一個版本"
     nextBranch: "下一個版本"
+    # 展開被折疊的超長 user 訊息氣泡
+    expandLong: "展開更多"
+    # 重新收合已展開的超長 user 訊息氣泡
+    collapseLong: "收合"
   edit:
     # 點擊任意一條 user 訊息上的鉛筆後彈出的對話框標題
     title: "編輯訊息"
