@@ -21,6 +21,8 @@
 //   4. `args.skills` 每个名字都通过 skillRoot gate（isValidSkillName 兜底）。
 // 失败一律返回 text content（`{ content: [{ type: 'text', text }], details: {} }`），
 // 走「错误是 caller 可见的 tool result」通道，不抛 —— 与 `delegate_dom` 同姿态。
+// 例外：execute() 首部的开关复核（worker team disabled = policy 错，重新传参救不
+// 回）→ throw（is_error 进 LLM，与 rag-search.ts 同款）；「参数形状错」仍返回 text。
 //
 // 命名：exports 集中在文件末尾（per AGENTS.md "Exports at the bottom"）。
 
@@ -35,7 +37,7 @@ import {
   skillRoot,
 } from '@/lib/agent/path-safety';
 import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
-import type { ModelIdentity, WorkerRole } from '@/lib/persistence/storage';
+import { workerTeamEnabled, type ModelIdentity, type WorkerRole } from '@/lib/persistence/storage';
 import type { WorkerHandoff } from '@/entrypoints/background/agent/worker-runner';
 import type { ServerMessage, WorkerLiveStreamEvent } from '@/lib/ipc/protocol';
 
@@ -106,6 +108,13 @@ const DelegateTaskItem = Type.Object({
     description: 'Per-item anti-pattern list (same semantics as top-level `anti_patterns`).',
   })),
 }, { additionalProperties: false });
+
+/** Batch dispatch 上限。schema `tasks.maxItems` 与 `execute()` 里的 runtime
+ *  belt 共用此常量（single source of truth，漂移即测试红）。framework 层
+ *  已在 pi-agent-core `execute()` 前跑 `validateToolArguments` 拦过一遍——
+ *  runtime belt 兜的是 compat 怪 provider 不吃 schema enforcement 的情形：
+ *  LLM 拿到可行动的错误（拆调用），而不是 5+ worker 无声并跑。 */
+const MAX_BATCH_ITEMS = 4;
 
 /**
  * 8 个参数 + 第 9 个 `tasks`（batch）。
@@ -217,9 +226,9 @@ const DelegateTaskParameters = Type.Object({
   })),
   tasks: Type.Optional(Type.Array(DelegateTaskItem, {
     minItems: 1,
-    maxItems: 4,
+    maxItems: MAX_BATCH_ITEMS,
     description:
-      'Optional. Up to 4 INDEPENDENT tasks to dispatch in parallel. Each item mirrors the top-level ' +
+      `Optional. Up to ${MAX_BATCH_ITEMS} INDEPENDENT tasks to dispatch in parallel. Each item mirrors the top-level ` +
       'parameters (task / role / model_override / input_files / output_path / expected_schema / ' +
       'skills / anti_patterns). Items run concurrently via `Promise.allSettled` — one item failure ' +
       'does not cancel siblings. ' +
@@ -663,6 +672,20 @@ export function createDelegateTaskTool(options: {
       // 通过它把 worker live stream 关联回外层 delegate_task toolCallId。
       // 下划线前缀移除：现在真在用了。
       const toolCallId = _toolCallId;
+      // ── −1. Execute-time 开关复核（worker team 版「belt」） ────────
+      // 两侧 gate（tool 注册 + prompt 注入）由 `watchWorkerTeam` 同步刷新
+      // 活会话工具数组，但 `refreshAllSessionTools` 失败只 warn——若某会话
+      // 带着旧的 Team 工具数组在 Fast 模式下活着，这里是最后一道闸：重新
+      // 读开关，关闭 → throw（pi-agent-core 置 is_error 进 LLM，与
+      // rag-search.ts 的 disabled 复核同款；区别于本文件里「参数形状错 →
+      // text 返回」的那批校验——那不是重新传参能救的）。worker 绝不启动。
+      if (!(await workerTeamEnabled.getValue())) {
+        throw new Error(
+          'delegate_task refused: the worker team is currently disabled (Fast mode). ' +
+          'Produce this deliverable with the native tools (fs_create_file / fs_edit_file / read_page …), ' +
+          'or ask the user to switch to Team mode (composer chip or Settings → Advanced → Worker team).',
+        );
+      }
       // Schema 层 task / role 是 Optional（见 DelegateTaskParameters 注释）——
       // 真正「必填」由下面的 mutual-exclusion 分支校验。这里 cast 成 Optional
       // 与 schema 1:1 对齐，避免 TS 错把 schema 放宽当作 contract drift。
@@ -692,6 +715,18 @@ export function createDelegateTaskTool(options: {
             content: [{
               type: 'text',
               text: 'Error: `tasks` is mutually exclusive with top-level `task`/`role`. Pick one shape: single-task call or batch call, not both.',
+            }],
+            details: {},
+          };
+        }
+        // 尺寸 belt：framework 的 validateToolArguments 已按 schema maxItems
+        // 拦过一遍，这里兜不吃 enforcement 的 provider / 直连调用。形状错与
+        // 互斥错同族 → 同样 text 返回（重新拆参可救），早退于任何 IO。
+        if (a.tasks.length > MAX_BATCH_ITEMS) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Error: batch \`tasks\` supports at most ${MAX_BATCH_ITEMS} items (got ${a.tasks.length}). Split the work into multiple delegate_task calls.`,
             }],
             details: {},
           };

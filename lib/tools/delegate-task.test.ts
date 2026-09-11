@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createDelegateTaskTool } from './delegate-task';
 import { TOOL_DELEGATE_TASK } from './names';
+import { workerTeamEnabled } from '@/lib/persistence/storage';
 
 vi.mock('@/entrypoints/background/agent/worker-runner', () => ({
   runWorker: vi.fn(async () => ({
@@ -343,8 +344,9 @@ describe('Subtask 1.2 — delegate_task batch dispatch', () => {
   });
 
   it('size cap 守门在 typebox schema 层（提供 5 个 task → pi-agent-core 拦在 schema 校验阶段）', () => {
-    // 我们在 tool 层不需要重复 maxItems check —— typebox schema 自带守门。
-    // 这里只断言 schema 形状含 maxItems 4，让 reviewer 把这条压在 schema 上。
+    // schema maxItems 是主路径（pi-agent-core execute() 前跑 validateToolArguments）；
+    // execute() 里另有一条 runtime belt 兜不吃 schema enforcement 的 provider
+    //（见 delegate-task.ts 的 MAX_BATCH_ITEMS 注释 + 文件末 worker-team guards 用例）。
     const schema = batchTool.parameters;
     const json = JSON.stringify(schema);
     expect(json).toContain('"maxItems":4');
@@ -1022,5 +1024,46 @@ describe('Subtask 2.2 — reviewer auto-schema inject (batch per-item path)', ()
     const callArgs = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
     const items = callArgs.tasks as Array<{ expectedSchema?: string }>;
     expect(items[0].expectedSchema).toBeUndefined();
+  });
+});
+
+// ─── worker-team guards: execute-time 开关复核 + batch 尺寸 belt ────────────
+//
+// 两条 belt 的共同合同：被拒时 **零 IO、零 worker**（runner mock 必须从未被
+// 调用）。storage 走真 fakeBrowser（AGENTS.md：不 mock chrome.storage），
+// 测毕 setValue(true) 恢复，避免污染后续读取。
+
+describe('createDelegateTaskTool — worker-team guards', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // 显式前置条件：开关 belt 的放行依赖 Team=on；不依赖 fallback 默认值
+    //（storage.ts 若改 fallback 本组用例也不受影响），也让 (b) 不隐含
+    // 依赖 (a) 的 finally 恢复。
+    await workerTeamEnabled.setValue(true);
+  });
+
+  const guardTool = createDelegateTaskTool({ sessionId: SESSION_ID });
+
+  it('workerTeamEnabled=false → execute 抛错（is_error 进 LLM），worker 零启动', async () => {
+    await workerTeamEnabled.setValue(false);
+    await expect(
+      guardTool.execute('call-off', { task: 'x', role: 'content_writer' } as never, undefined),
+    ).rejects.toThrow(/worker team is (currently )?disabled \(Fast mode\)/i);
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(runBatchWorker).not.toHaveBeenCalled();
+  });
+
+  it('batch tasks 超上限 → text error（与互斥错同族：形状错可拆参重发）', async () => {
+    const five = Array.from({ length: 5 }, (_, i) => ({
+      task: `write one line to output/guard-${i}.md`,
+      role: 'content_writer' as const,
+    }));
+    const result = await guardTool.execute('call-big', { tasks: five } as never, undefined);
+    const first = result.content[0];
+    expect(first.type).toBe('text');
+    if (first.type === 'text') {
+      expect(first.text).toContain('at most 4 items (got 5)');
+    }
+    expect(runBatchWorker).not.toHaveBeenCalled();
   });
 });
