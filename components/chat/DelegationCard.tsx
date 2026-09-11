@@ -301,30 +301,77 @@ function LiveStreamBox({
         ? 'text-primary font-semibold'
         : 'text-foreground/90';
 
+  // 顶部状态：补上 Live Micro-Stream Box 之前那段"静默"——proxy buffer
+  // toolcall_delta 时，长时间不会再有 delta 进来（最长 100–170s for coder 的
+  // fs_create_file），仅靠 box 内的"text_delta 流"会让用户误以为 worker
+  // 卡死。这里从 buffer 状态推断出 3 段语义：thinking / writing / generating，
+  // generating 命中"刚 emit tool_start、还在等 tool_end"的隐性阶段。
+  // 注意：worker-runner 当前不在 worker_stream 里发 tool_end（只发 text/thinking
+  // delta + tool_start），所以 generating 阶段会一直显示到 handoff 抽出 / box
+  // 卸载——这正是想要的效果。`charTotal` 一类的累积字数先不上：reducer 在
+  // `lib/agent/worker-live-stream.ts` 里对 finished lines 做了 `MAX_LINES = 4`
+  // FIFO 淘汰，reduce 出来的总数会在淘汰点往下跌，给用户的"正在生成"信号
+  // 与实际反向。要做就得在 reducer 维护单调 charTotal —— 留作后续 subtask。
+  const active = buffer.current ?? buffer.lines[buffer.lines.length - 1];
+  const streamState: 'thinking' | 'writing' | 'generating' | null = active
+    ? active.kind === 'thinking'
+      ? 'thinking'
+      : active.kind === 'tool'
+        ? 'generating'
+        : 'writing'
+    : null;
+  const stateLabel =
+    streamState === 'thinking'
+      ? t('chat.delegation.liveStream.thinking')
+      : streamState === 'writing'
+        ? t('chat.delegation.liveStream.writing')
+        : streamState === 'generating'
+          ? t('chat.delegation.liveStream.generating')
+          : null;
+  const dotClass =
+    streamState === 'generating'
+      ? 'bg-primary animate-pulse'
+      : streamState === 'writing'
+        ? 'bg-primary'
+        : streamState === 'thinking'
+          ? 'bg-amber-500/80'
+          : 'bg-muted-foreground/40';
+
   return (
-    <div
-      ref={scrollRef}
-      // max-h-32 ≈ 128px：4 finished lines × ~14px + 1 in-progress ~16px。
-      // Mono + 10.5px 用来在视觉上把 box（转录）和正文（prose）区分开。
-      className="mt-2 max-h-32 overflow-y-auto rounded border border-border/60 bg-muted/30 p-2 font-mono text-[10.5px] leading-snug text-foreground/80"
-      aria-live="polite"
-      aria-label={t('chat.delegation.liveStream.label')}
-    >
-      {buffer.lines.map((line, i) => (
-        <div
-          // Key 含行号 + kind：reducer 对同一行内容稳定 line identity，
-          // 让 React 在可能时复用 DOM 节点，避免抖动。
-          key={`line-${i}-${line.kind}`}
-          className={lineClass(line.kind)}
-        >
-          {line.text || ' '}
-        </div>
-      ))}
-      {buffer.current && (
-        <div className={lineClass(buffer.current.kind)}>
-          {buffer.current.text || ' '}
+    // 外层包住 header —— 否则 header 会被 scroller 在长 transcript 时一起
+    // 滚走，正好与"静默期要给用户看的提示"的目标相反。
+    <div className="mt-2 rounded border border-border/60 bg-muted/30 p-2 font-mono text-[10.5px] leading-snug text-foreground/80">
+      {stateLabel && (
+        <div className="mb-1.5 flex items-center gap-1.5 text-[9.5px] uppercase tracking-wide text-muted-foreground/70">
+          <span
+            className={`size-1.5 shrink-0 rounded-full ${dotClass}`}
+            aria-hidden
+          />
+          <span>{stateLabel}</span>
         </div>
       )}
+      <div
+        ref={scrollRef}
+        className="max-h-32 overflow-y-auto"
+        aria-live="polite"
+        aria-label={t('chat.delegation.liveStream.label')}
+      >
+        {buffer.lines.map((line, i) => (
+          <div
+            // Key 含行号 + kind：reducer 对同一行内容稳定 line identity，
+            // 让 React 在可能时复用 DOM 节点，避免抖动。
+            key={`line-${i}-${line.kind}`}
+            className={lineClass(line.kind)}
+          >
+            {line.text || ' '}
+          </div>
+        ))}
+        {buffer.current && (
+          <div className={lineClass(buffer.current.kind)}>
+            {buffer.current.text || ' '}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

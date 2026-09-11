@@ -1074,6 +1074,9 @@ chat:
     # renders aria-live="polite"); aria-label = "Live stream".
     liveStream:
       label: "Live stream"
+      thinking: "Thinking…"
+      writing: "Writing…"
+      generating: "Generating file…"
 
 
 # ─── Provider sub-components (OAuth / API Key / custom) ───

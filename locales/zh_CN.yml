@@ -1039,6 +1039,9 @@ chat:
     # screen reader 朗读的 ARIA 标签（LiveStreamBox 始终 aria-live="polite"）。
     liveStream:
       label: "实时输出"
+      thinking: "思考中…"
+      writing: "撰写中…"
+      generating: "正在生成文件…"
 
 
 # ─── 提供商子组件（OAuth / API Key / 自定义）───
