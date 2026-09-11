@@ -87,8 +87,8 @@ export async function collectStorage(opts: {
  * 1. 普通设置（settings-class，含混合 item 的 safe 配置）：
  *    - `replace`：用备份 safe 覆盖（config 视为不可信输入，混合 item 先重新剥一次，
  *      丢弃任何残留密钥，只写 safe，token 留空）。
- *    - `merge`：仅对声明了 `fillMissing` 的 item（列表型，如 customProviders /
- *      mcpServers）按 id 补缺；未声明的标量项保留本地、不写。
+ *    - `merge`：仅对声明了 `fillMissing` 的 item（集合型，如 customProviders /
+ *      mcpServers 列表按 id、workerModels 等 map 按 key）补缺；未声明的标量项保留本地、不写。
  * 2. 密钥（随 credentials 分类，独立于 settings）：
  *    - credentials-class item：`replace` 覆盖；`merge` 调 `fillMissing` 补缺。
  *    - 混合 item（settings-class 但 secret 在 credentials.json）：调 `restoreSecret`
@@ -106,8 +106,8 @@ export async function restoreStorage(
 
   // ── 步骤 1：写 settings 的 safe 配置 ──
   // replace：用备份 safe 覆盖。
-  // merge：仅对声明了 `fillMissing` 的 item 做「按 id 补缺」（如 customProviders /
-  //        mcpServers 列表）；未声明的标量（theme / thinkingLevel 等）保留本地、不写。
+  // merge：仅对声明了 `fillMissing` 的 item 做「补缺」（列表按 id、map 按 key，
+  //        如 customProviders / mcpServers / workerModels）；未声明的标量（theme / thinkingLevel 等）保留本地、不写。
   if (plan.settings) {
     for (const entry of BACKUP_REGISTRY) {
       if (entry.storageClass !== 'settings') continue;
@@ -121,7 +121,7 @@ export async function restoreStorage(
         await entry.item.setValue(backupSafe);
         settingsWritten++;
       } else if (entry.fillMissing) {
-        // 合并：本地优先、按 id 补缺备份里多出来的。
+        // 合并：本地优先、按钩子粒度补缺（列表按 id、map 按 key）备份里多出来的。
         const local = await entry.item.getValue();
         await entry.item.setValue(entry.fillMissing(local, backupSafe));
         settingsWritten++;

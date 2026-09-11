@@ -12,9 +12,13 @@ import {
   mcpServers,
   providerCredentials,
   webdavConfig,
+  workerModels,
+  workerRoleTimeouts,
   type MCPServerConfig,
   type ProviderCredentials,
   type CustomProviderConfig,
+  type WorkerModelMap,
+  type WorkerTimeoutMap,
 } from '@/lib/persistence/storage';
 
 const SK = {
@@ -24,6 +28,8 @@ const SK = {
   mcpServers: 'local:mcpServers',
   providerCredentials: 'local:providerCredentials',
   webdavConfig: 'local:webdavConfig',
+  workerModels: 'local:workerModels',
+  workerRoleTimeouts: 'local:workerRoleTimeouts',
 };
 
 function bearerServer(id: string, token: string): MCPServerConfig {
@@ -392,5 +398,72 @@ describe('restoreStorage — merge', () => {
       { strategy: 'merge', settings: false, credentials: true },
     );
     expect((await webdavConfig.getValue())!.url).toBe('https://dav');
+  });
+
+  // worker maps 的 merge 补缺：修复「恢复后 worker 模型 / 超时全部落回默认」的回归
+  // 锚点——本地为空（新 profile）时备份必须整体生效，而不是被 merge 静默丢弃。
+  it('workerModels 补缺：本地为空时备份整体生效（新 profile 恢复不丢模型）', async () => {
+    const backup: WorkerModelMap = {
+      content_writer: { provider: 'gw', modelId: 'flash-med' },
+      reviewer: { provider: 'gw', modelId: 'flash-high' },
+    };
+    // 本地保持 fallback {}（新 profile 形态）。
+    expect(await workerModels.getValue()).toEqual({});
+
+    await restoreStorage(
+      { config: { [SK.workerModels]: backup } },
+      { strategy: 'merge', settings: true, credentials: false },
+    );
+
+    expect(await workerModels.getValue()).toEqual(backup);
+  });
+
+  it('workerModels 补缺：本地已有的 role 保留本地、缺失的 role 从备份补入', async () => {
+    const local: WorkerModelMap = {
+      content_writer: { provider: 'local-p', modelId: 'local-m' },
+      // 仅本地有、备份没有的 role——merge「只增不减」，必须原样保留。
+      frontend_coder: { provider: 'local-p', modelId: 'local-fe' },
+    };
+    await workerModels.setValue(local);
+
+    const backup: WorkerModelMap = {
+      content_writer: { provider: 'gw', modelId: 'flash-med' },
+      researcher: { provider: 'gw', modelId: 'flash' },
+    };
+    await restoreStorage(
+      { config: { [SK.workerModels]: backup } },
+      { strategy: 'merge', settings: true, credentials: false },
+    );
+
+    const result = await workerModels.getValue();
+    // 同 role 本地优先，不被备份旧选择覆盖。
+    expect(result.content_writer).toEqual({ provider: 'local-p', modelId: 'local-m' });
+    // 本地缺的 role 补入。
+    expect(result.researcher).toEqual({ provider: 'gw', modelId: 'flash' });
+    // 备份里没有的本地 role 不被 merge 删掉。
+    expect(result.frontend_coder).toEqual({ provider: 'local-p', modelId: 'local-fe' });
+    // 两侧都没有的 role 不凭空出现。
+    expect(result.reviewer).toBeUndefined();
+  });
+
+  it('workerRoleTimeouts 补缺：本地为空时备份整体生效、同 role 本地优先', async () => {
+    const backup: WorkerTimeoutMap = { frontend_coder: 300000, reviewer: 90000 };
+    expect(await workerRoleTimeouts.getValue()).toEqual({});
+
+    await restoreStorage(
+      { config: { [SK.workerRoleTimeouts]: backup } },
+      { strategy: 'merge', settings: true, credentials: false },
+    );
+    expect(await workerRoleTimeouts.getValue()).toEqual(backup);
+
+    // 本地调过的 role 保留本地，缺失的 role 补入。
+    await workerRoleTimeouts.setValue({ frontend_coder: 600000 });
+    await restoreStorage(
+      { config: { [SK.workerRoleTimeouts]: backup } },
+      { strategy: 'merge', settings: true, credentials: false },
+    );
+    const result = await workerRoleTimeouts.getValue();
+    expect(result.frontend_coder).toBe(600000);
+    expect(result.reviewer).toBe(90000);
   });
 });

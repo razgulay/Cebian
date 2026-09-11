@@ -43,6 +43,8 @@ import {
   type ProviderCredentials,
   type WebDavConfig,
   type CustomProviderConfig,
+  type WorkerModelMap,
+  type WorkerTimeoutMap,
 } from '@/lib/persistence/storage';
 import { ragSettings, ragCollections } from '@/lib/rag/settings';
 import type { RagSettings, RagCollection } from '@/lib/rag/types';
@@ -60,8 +62,9 @@ export type StorageClass = 'settings' | 'credentials' | 'exclude';
  * 拆出无密钥的 `safe`（进 settings）与抽离的 `secret`（进 credentials）。
  * `restoreSecret` 在恢复 credentials 分类时，把备份 secret 按策略写进本地完整值。
  * `fillMissing` 是合并模式的「补缺」钩子，与 storageClass 解耦：credentials 类 item 必
- * 须声明；settings 类的列表项（customProviders / mcpServers）可选声明以获得「按 id
- * 补缺」；未声明的标量 settings 项在 merge 下保留本地。
+ * 须声明；settings 类的集合项可选声明以获得「补缺」（列表项如 customProviders /
+ * mcpServers 按元素 id，map 项如 workerModels 按 role key）；未声明的标量 settings
+ * 项在 merge 下保留本地。
  */
 export interface BackupEntry<T> {
   item: WxtStorageItem<T, any>;
@@ -76,8 +79,9 @@ export interface BackupEntry<T> {
   restoreSecret?: (local: T, secret: unknown, strategy: RestoreStrategy) => T;
   /**
    * 合并模式恢复时如何「补缺」：给定本地现值 `local` 与备份值 `backup`，返回写回
-   * 的值。语义是「只增不减」——本地有的全保留，备份里本地没有的补入。与
-   * storageClass 解耦：credentials 类必须声明；settings 类的列表项可选声明。
+   * 的值。语义是「只增不减」——本地有的全保留，备份里本地没有的补入（补缺粒度由
+   * 钩子自定：列表按元素 id、map 按 key）。与 storageClass 解耦：credentials 类必须
+   * 声明；settings 类的集合项可选声明。
    */
   fillMissing?: (local: T, backup: T) => T;
 }
@@ -343,17 +347,38 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastSelectedModel, storageClass: 'settings' }),
   entry({ item: compactionModel, storageClass: 'settings' }),
   entry({ item: domSubAgentModel, storageClass: 'settings' }),
-  // Worker team per-role 模型映射（4 个 worker role 各自的专用模型；同主模型走
-  // followMain 时为 null。无密钥）。
-  entry({ item: workerModels, storageClass: 'settings' }),
+  // Worker team per-role 模型映射（4 个 worker role 各自的专用模型；key 缺失 = 该
+  // role 未配置 / 跟随主模型，UI 以 delete key 表达。无密钥）。
+  entry({
+    item: workerModels,
+    storageClass: 'settings',
+    // 合并：按 role key 补缺——本地 map 里已有的 role 保留本地，缺失的 role 从备份
+    // 补入；本地为空（新 profile / 全新安装）时备份整体生效，避免恢复后 worker 模型
+    // 全部落回默认、用户被迫重选。注意：本地无法区分「用户主动关掉（Off / 跟随主
+    // 模型）」与「从未配置」（两者都是 key 缺失），故前者会被备份重新填回——merge
+    // 「只增不减」契约使然。
+    fillMissing: (local: WorkerModelMap, backup: WorkerModelMap) => ({
+      ...backup,
+      ...local,
+    }),
+  }),
   // Worker Team 总开关（Fast / Team 模式）。用户偏好，按 settings 分类同步到
   // 备份里——恢复后无需重新点击 chip。无密钥、无 fillMissing（merge 下保留
   // 本地偏好，避免恢复旧备份意外覆盖用户当前选择）。
   entry({ item: workerTeamEnabled, storageClass: 'settings' }),
   // Worker Team per-role 超时覆盖（用户 UI 调整后存这里）。同 settings 分类：
-  // 是用户偏好而非密钥。无 fillMissing——merge 下保留本地调整，避免旧备份把
-  // 用户精心调过的 ceiling 重置成 role registry 默认。
-  entry({ item: workerRoleTimeouts, storageClass: 'settings' }),
+  // 是用户偏好而非密钥。
+  entry({
+    item: workerRoleTimeouts,
+    storageClass: 'settings',
+    // 合并：按 role key 补缺，语义同 workerModels（含「Off / Default 以 delete key
+    // 表达、merge 下会被备份填回」的 caveat）；本地为空时备份整体生效（否则新
+    // profile 恢复后 ceiling 全落回 role registry 默认）。
+    fillMissing: (local: WorkerTimeoutMap, backup: WorkerTimeoutMap) => ({
+      ...backup,
+      ...local,
+    }),
+  }),
   entry({
     item: customProviders,
     storageClass: 'settings',
