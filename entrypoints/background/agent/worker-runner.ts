@@ -2115,6 +2115,22 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
     missingInputsBlock,
   });
 
+  // Observability（context-handoff hardening）：debug log không ghi nội dung
+  // prompt / delegate_task args, nên mắt thường không thể verify từ export
+  // rằng main agent có điền `context` hay runner có nhúng `<missing-inputs>`
+  // hay không. Event này chỉ ghi **shape** của prompt đã compose (có/không
+  // từng block + đếm số file), đủ để QA sau nhìn thấy block nào fire, mà
+  // không leak nội dung vào log. Không đổi hành vi.
+  debugLog.info('sub_agent', 'sub_agent:worker:prompt:blocks', {
+    role,
+    hasContextBrief: contextBlock !== '',
+    hasMissingInputs: missingInputsBlock !== '',
+    inputFilesCount: (options.inputFiles ?? []).length,
+    missingCount: inputResult.missing.length,
+    hasSkills: skillBlocks !== '',
+    hasAntiPatterns: antiPatternsBlock !== '',
+  });
+
   // 6. First attempt
   let handoff = await runWorkerAttempt({
     role,
