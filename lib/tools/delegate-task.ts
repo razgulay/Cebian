@@ -37,6 +37,7 @@ import {
   skillRoot,
 } from '@/lib/agent/path-safety';
 import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
+import { roleWritesDeliverable } from '@/lib/agent/worker-roles';
 import { workerTeamEnabled, type ModelIdentity, type WorkerRole } from '@/lib/persistence/storage';
 import type { WorkerHandoff } from '@/entrypoints/background/agent/worker-runner';
 import type { ServerMessage, WorkerLiveStreamEvent } from '@/lib/ipc/protocol';
@@ -199,7 +200,9 @@ const DelegateTaskParameters = Type.Object({
       'e.g. "content.json" or "studio.html"). Relative paths are auto-resolved to `/workspaces/<sessionId>/...`; ' +
       'the worker receives the absolute path. The runner verifies the file exists after the worker ' +
       'completes and attaches the (truncated) content to the handoff. If the worker declares success ' +
-      'but the file is missing, the runner auto-retries once.',
+      'but the file is missing, the runner auto-retries once. ' +
+      'Ignored for read-only roles (reviewer / researcher) — they return findings as text in the handoff, ' +
+      'and their `output_file` field names the file they audited/read, not a file they wrote.',
   })),
   expected_schema: Type.Optional(Type.String({
     description:
@@ -611,7 +614,10 @@ async function resolveBatchItem(
       role: raw.role,
       ...(modelOverride ? { modelOverride } : {}),
       ...(resolvedInputFiles ? { inputFiles: resolvedInputFiles } : {}),
-      ...(resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
+      // `roleWritesDeliverable` 从 role registry 的 whitelist 派生：只能写交付物的
+      // role 才把 outputPath 交给 runner 做产物存在性检查。reviewer / researcher
+      // 的 output_file 是输入目标路径，不能当作它们写出的文件检查。
+      ...(roleWritesDeliverable(raw.role) && resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
       ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
       ...(raw.skills ? { skills: raw.skills } : {}),
       ...(raw.anti_patterns ? { antiPatterns: raw.anti_patterns } : {}),
@@ -890,7 +896,9 @@ export function createDelegateTaskTool(options: {
         // fs_* 工具写入 /workspaces/<sessionId>/...，而非 VFS root
         // /content.json 这种「猜测根目录」（E2E 实测 bug）。
         ...(resolvedInputFiles ? { inputFiles: resolvedInputFiles } : {}),
-        ...(resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
+        // 同 resolveBatchItem：只有能写交付物的 role 才把 outputPath 交给 runner
+        //（`a.role` 在 single-task 分支已被互斥校验保证非空，见上方 cast）。
+        ...(roleWritesDeliverable(a.role!) && resolvedOutputPath ? { outputPath: resolvedOutputPath } : {}),
         ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
         ...(a.skills ? { skills: a.skills } : {}),
         ...(a.anti_patterns ? { antiPatterns: a.anti_patterns } : {}),

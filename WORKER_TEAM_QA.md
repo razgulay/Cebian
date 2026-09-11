@@ -58,10 +58,10 @@ Category luôn là `sub_agent`; prefix `sub_agent:worker:`. Nguồn: `entrypoint
 - Chip: 👥Team · Role: mỗi role 1 lượt
 - Prompt (lần lượt 4 cái):
   > Have the **content_writer** worker draft a ~150-word product blurb for a fictional coffee brand, save it to `output/blurb.md`.
-  > Have the **researcher** worker summarize the pros/cons of IndexedDB vs localStorage into `output/storage-notes.md`.
+  > Have the **researcher** worker summarize the pros/cons of IndexedDB vs localStorage and return the summary as structured text in its handoff (researcher is read-only — it writes no file).
   > First save a small file `output/sample.html` with a heading, then have the **reviewer** worker audit it for accessibility issues.
   > Have the **frontend_coder** worker create a self-contained `output/card.html` with one button.
-- Kỳ vọng UI: 4 card thành công, output file mở được bằng nút preview.
+- Kỳ vọng UI: 4 card thành công; các card có output file (content_writer / frontend_coder) mở được bằng nút preview; reviewer / researcher trả text trong handoff (read-only, không file).
 - Log soi: mỗi role có `attempt:start → stream:first_token (Δ nhỏ) → stream:phase=emitting → done{ok:true,status:success,attempts:1}`.
 - Pass nếu: `durationMs` ≪ ceiling mỗi role, `attempts:1`, `status:success`.
 - [ ] Pass  [ ] Fail · ghi chú: ____
@@ -103,7 +103,7 @@ Category luôn là `sub_agent`; prefix `sub_agent:worker:`. Nguồn: `entrypoint
 ### B1 · Batch 2 item đều thành công  `[deterministic]`
 - Chip: 👥Team
 - Prompt:
-  > Using the worker team, run these two tasks **in parallel**: (1) content_writer drafts a haiku into `output/b1-haiku.md`; (2) researcher lists 3 benefits of HTTP/3 into `output/b1-http3.md`.
+  > Using the worker team, run these two tasks **in parallel**: (1) content_writer drafts a haiku into `output/b1-haiku.md`; (2) researcher lists 3 benefits of HTTP/3 as text in its handoff (read-only, no file).
 - Kỳ vọng UI: **1 batch card** với 2 item; aggregate "2 succeeded"; chỉ **1 LiveStreamBox chung** ở đầu card.
 - Log soi: 2 `attempt:start` với `role` khác nhau **chồng lấn** về thời gian (parallel), 2 `done{ok:true}`; batchSummary `succeeded:2, failed:0`.
 - Pass nếu: chạy song song (không tuần tự), tổng hợp đúng, không crosstalk giữa 2 item.
@@ -195,7 +195,7 @@ Category luôn là `sub_agent`; prefix `sub_agent:worker:`. Nguồn: `entrypoint
 ### D2 · input file không tồn tại  `[deterministic]`
 - Chip: 👥Team
 - Prompt:
-  > Have the **researcher** worker summarize the contents of its input file `output/no-such-input-d2.md` into `output/d2-out.md`.
+  > Have the **researcher** worker summarize the contents of its input file `output/no-such-input-d2.md` and return the summary as text (researcher writes no output file).
 - Kỳ vọng UI: item fail với thông điệp input thiếu; không crash.
 - Log soi: hoặc `input:missing{path:'output/no-such-input-d2.md'}` (runner), hoặc bị chặn sớm ở `assertInputFilesReadable` (tool layer) → **ghi rõ nhánh nào** xảy ra.
 - [ ] Pass  [ ] Fail · ghi chú (nhánh nào chặn): ____

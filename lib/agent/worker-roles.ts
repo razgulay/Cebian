@@ -258,13 +258,14 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
   },
 
   // ── researcher ──────────────────────────────────────────────
-  // 信息搜集与综合。读 VFS + 查 RAG collection；产物为结构化文本或文件。
+  // 信息搜集与综合。读 VFS + 查 RAG collection；产物只走 structured text
+  // reply，不写交付文件（toolWhitelist 没有 fs_create_file / fs_edit_file）。
   researcher: {
     systemPrompt:
       'You are a researcher. Find and synthesize information by reading VFS ' +
       'files (fs_read_file / fs_list / fs_search) and querying RAG collections ' +
-      '(rag_inspect). Output either structured text in your reply or a new VFS ' +
-      'file via fs_create_file. Do not invoke browser-side tools.',
+      '(rag_inspect). Output structured text in your reply. You are read-only: ' +
+      'do not claim to create or modify VFS files. Do not invoke browser-side tools.',
     toolWhitelist: [FS_READ, FS_LIST, FS_SEARCH, RAG_INSPECT],
     displayName: 'Researcher',
     i18nKey: 'chat.workerTeamRoster.role.researcher',
@@ -418,6 +419,20 @@ export function getRoleConfig(role: WorkerRole): WorkerRoleConfig {
  *  关心 config 的其它字段。 */
 export function getWorkerToolNames(role: WorkerRole): readonly string[] {
   return getRoleConfig(role).toolWhitelist;
+}
+
+/** Role 是否有能力写交付物文件（白名单含 fs_create_file / fs_edit_file）。
+ *  `delegate_task` 用它决定要不要把 `outputPath` 透传给 runner：read-only
+ *  role（reviewer / researcher）不写交付物——它们 handoff 里的
+ *  `output_file` 是「被审计 / 被研究的目标文件」（模型自填），不是 runner 该
+ *  验证存在的产物；传了会让 runner 的「Worker reported success but output
+ *  file is missing」retry 分支误触发（vilao-landing review 实测：coder 写
+ *  workspace 根、reviewer 填 `output/...` 前缀 → retry 一次 → 仍 fail）。
+ *  从白名单派生而非按 role 名硬编码：新增 role 自动继承正确行为（registry
+ *  头部契约：role 字段都来此处查，不在调用方硬编码）。 */
+export function roleWritesDeliverable(role: WorkerRole): boolean {
+  const tools = getWorkerToolNames(role);
+  return tools.includes(FS_WRITE) || tools.includes(FS_EDIT);
 }
 
 /**
@@ -639,10 +654,9 @@ const META: Record<WorkerRole, WorkerL1Meta> = {
   researcher: {
     description:
       'Finds and synthesizes information by reading VFS files and querying RAG collections. ' +
-      'Output is structured text in the reply or a new VFS file.',
+      'Read-only: output is structured text in the reply — it cannot create or modify files.',
     example:
       `delegate_task({ role: 'researcher', task: 'Summarize the structure of ` +
-      `content.json into a markdown outline', input_files: ['content.json'], ` +
-      `output_path: 'outline.md' })`,
+      `content.json into a markdown outline', input_files: ['content.json'] })`,
   },
 };

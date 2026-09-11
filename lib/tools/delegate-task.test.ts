@@ -1066,4 +1066,55 @@ describe('createDelegateTaskTool — worker-team guards', () => {
     }
     expect(runBatchWorker).not.toHaveBeenCalled();
   });
+
+  it('read-only role (reviewer) + output_path → runWorker 不拿 outputPath（掐掉 "success 但 output missing" retry 的触发器）', async () => {
+    // 实测 bug（vilao-landing review）：coder 写 workspace 根，reviewer 的
+    // handoff.output_file 填 `output/...` 前缀 → runner 的 declaredOutputPath
+    // 校验文件不存在 → retry 一次 → 仍 fail。修法是 read-only role 不传 outputPath。
+    await guardTool.execute('call-rev', {
+      task: 'audit the html file',
+      role: 'reviewer',
+      output_path: 'output/x.html',
+    } as never, undefined);
+    const call = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.outputPath).toBeUndefined();
+    // reviewer auto-schema 注入不受影响（与 outputPath 无关）。
+    expect(call.expectedSchema).toBeDefined();
+  });
+
+  it('read-only role (researcher) + output_path → 同样不拿 outputPath（capability 派生，非按名硬编码）', async () => {
+    // researcher 的 whitelist 没有 fs_create_file / fs_edit_file（registry 派生），
+    // 与 reviewer 同族：output_file 是「被研究的文件」，不是它写的交付物。
+    await guardTool.execute('call-res', {
+      task: 'summarize content.json',
+      role: 'researcher',
+      output_path: 'output/outline.md',
+    } as never, undefined);
+    const call = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.outputPath).toBeUndefined();
+  });
+
+  it('batch item read-only role → runBatchWorker 的 item 也不带 outputPath', async () => {
+    // resolveBatchItem 是第二个被改的 call-site（喂 runBatchWorker 的 items），
+    // 单测必须覆盖到，否则 batch 半边静默回归。
+    await guardTool.execute('call-batch-rev', {
+      tasks: [
+        { task: 'audit it', role: 'reviewer', output_path: 'output/y.html' },
+        { task: 'write one line', role: 'content_writer', output_path: 'output/z.md' },
+      ],
+    } as never, undefined);
+    const items = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0].tasks;
+    expect(items[0].outputPath).toBeUndefined();
+    expect(items[1].outputPath).toContain('z.md');
+  });
+
+  it('content_writer + output_path → outputPath 照传（writer 仍受 output-missing 保护）', async () => {
+    await guardTool.execute('call-cw', {
+      task: 'write one line',
+      role: 'content_writer',
+      output_path: 'output/cw-guard.md',
+    } as never, undefined);
+    const call = (runWorker as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.outputPath).toContain('cw-guard.md');
+  });
 });
