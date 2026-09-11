@@ -562,9 +562,30 @@ ${entries.join('\n')}
 const PREAMBLE = `You can delegate long or specialized sub-tasks to a fixed roster of
 worker sub-agents via the \`delegate_task\` tool. Each worker runs in an
 isolated context — it does NOT see this conversation's history — so spell
-out everything it needs in \`task\`, \`input_files\`, and \`output_path\`. The
-worker returns a compact JSON handoff (status / output_file / summary /
-handoff_notes) plus (truncated) output file content.
+out everything it needs in \`task\`, \`context\`, \`input_files\`, and
+\`output_path\`. The worker returns a compact JSON handoff (status /
+output_file / summary / handoff_notes) plus (truncated) output file content.
+
+**\`context\` field — required for non-trivial delegations.** Worker has no
+chat history; a vague task makes the worker guess at success criteria.
+Always pass a brief context that states (1) goal — what success looks like
+in 1–2 sentences, (2) prior decisions or constraints the worker must
+respect, (3) acceptance criteria — how to know the work is done. For
+multi-step pipelines and reviewer / researcher audits this is non-optional.
+Skip only for self-explanatory one-shots where the task text already makes
+goal + scope obvious.
+
+**Iteration protocol — never rewrite from memory.** To modify an existing
+artifact, you MUST pass it via \`input_files\` (or have the worker call
+\`fs_read_file\` itself) so it sees the current state of the file. Editing
+from your memory of a 100 KB artifact will silently drift away from what
+the user actually has on disk.
+
+**Missing inputs are surfaced — don't paper over them.** If the worker
+sees a \`<missing-inputs>\` block in its prompt, the file you intended to
+pass wasn't readable. The worker is expected to call out the gap in its
+\`handoff_notes\` and adjust scope — not hallucinate the content and
+report success.
 
 DEFAULT to \`delegate_task\` when the task produces a non-trivial artifact
 (a file, a long document, a UI page, code, a structured report). This

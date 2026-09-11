@@ -233,12 +233,22 @@ const DelegateTaskParameters = Type.Object({
     description:
       `Optional. Up to ${MAX_BATCH_ITEMS} INDEPENDENT tasks to dispatch in parallel. Each item mirrors the top-level ` +
       'parameters (task / role / model_override / input_files / output_path / expected_schema / ' +
-      'skills / anti_patterns). Items run concurrently via `Promise.allSettled` — one item failure ' +
+      'skills / anti_patterns / context). Items run concurrently via `Promise.allSettled` — one item failure ' +
       'does not cancel siblings. ' +
       '**Use only for independent tasks.** If task B reads task A\'s output (e.g. content_writer → ' +
       'frontend_coder reads content.json → reviewer reads studio.html), do NOT batch them: worker B ' +
       'may `fs_read_file` before worker A writes the file. Split into separate `delegate_task` calls. ' +
       'Mutually exclusive with the top-level `task`/`role` — pick one shape, not both.',
+  })),
+  context: Type.Optional(Type.String({
+    description:
+      'Optional. Context brief the worker has no other way to learn (it cannot see this chat\'s ' +
+      'history). State: (1) goal — what success looks like in 1–2 sentences, (2) prior decisions ' +
+      'or constraints the worker must respect, (3) acceptance criteria — how to know the work is done. ' +
+      'When provided, the runner wraps this in a `<context-brief>` block ahead of `input_files` so ' +
+      'the worker reads WHY before WHAT. Strongly recommended for multi-step pipelines and for ' +
+      'reviewer/researcher audits; optional for single-shot content_writer / frontend_coder tasks ' +
+      'where `task` itself is self-explanatory.',
   })),
 }, {
   // Subtask 8.9：在 top-level description 加 Fast Lane routing 提点（一行，
@@ -476,6 +486,7 @@ interface BatchItemInput {
   expected_schema?: string;
   skills?: readonly string[];
   anti_patterns?: readonly string[];
+  context?: string;
 }
 
 /** Per-item resolved 形态（绝对路径 + modelOverride parsed）—— 喂给
@@ -489,6 +500,7 @@ type BatchItemResolved = {
   expectedSchema?: string;
   skills?: readonly string[];
   antiPatterns?: readonly string[];
+  context?: string;
 };
 
 /** 单个 batch item 的 gate 结果。成功返回 `{ item }`；失败返回 `{ error }`。
@@ -621,6 +633,7 @@ async function resolveBatchItem(
       ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
       ...(raw.skills ? { skills: raw.skills } : {}),
       ...(raw.anti_patterns ? { antiPatterns: raw.anti_patterns } : {}),
+      ...(raw.context ? { context: raw.context } : {}),
     },
   };
 }
@@ -704,6 +717,7 @@ export function createDelegateTaskTool(options: {
         expected_schema?: string;
         skills?: readonly string[];
         anti_patterns?: readonly string[];
+        context?: string;
         tasks?: readonly BatchItemInput[];
       };
 
@@ -902,6 +916,7 @@ export function createDelegateTaskTool(options: {
         ...(resolvedExpectedSchema ? { expectedSchema: resolvedExpectedSchema } : {}),
         ...(a.skills ? { skills: a.skills } : {}),
         ...(a.anti_patterns ? { antiPatterns: a.anti_patterns } : {}),
+        ...(a.context ? { context: a.context } : {}),
         sessionId,
         mainModel,
         ...(signal ? { signal } : {}),

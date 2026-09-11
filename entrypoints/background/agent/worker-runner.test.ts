@@ -959,6 +959,42 @@ describe('composePrompt', () => {
         'and end with the literal line END OF HANDOFF.',
     );
   });
+
+  // ── context-handoff hardening #1+#2: <context-brief> + <missing-inputs>
+  //  顺序与 envelope 形状——<context-brief> 在 anti-patterns 之后、
+  //  input-files 之前；<missing-inputs> 在 input-files 之后、task 之前；
+  // 契约 reminder 永远最末。Worker 看不到会话历史，所以 context-brief
+  //  是它唯一的「为什么做」来源；missing-inputs fail-loud 防 hallucinate。
+
+  it('contextBlock 在 antiPatterns 之后、inputFiles 之前', () => {
+    const out = composePrompt('Do the thing', {
+      antiPatternsBlock: 'a',
+      contextBlock: 'ctx',
+      inputFilesBlock: '<input-files>file</input-files>',
+    });
+    expect(out.indexOf('a')).toBeLessThan(out.indexOf('ctx'));
+    expect(out.indexOf('ctx')).toBeLessThan(out.indexOf('<input-files>'));
+  });
+
+  it('missingInputsBlock 在 inputFiles 之后、task 之前', () => {
+    const out = composePrompt('Do the thing', {
+      inputFilesBlock: '<input-files>file</input-files>',
+      missingInputsBlock: '<missing-inputs>p</missing-inputs>',
+    });
+    expect(out.indexOf('<input-files>')).toBeLessThan(out.indexOf('<missing-inputs>'));
+    expect(out.indexOf('<missing-inputs>')).toBeLessThan(out.indexOf('Do the thing'));
+  });
+
+  it('空 context / 空 missing 仍 omit（向后兼容：旧调用无 context 字段）', () => {
+    // `context: ''` 与 `missingInputs: []` 都视为缺失——composePrompt 不留
+    // 空 wrapper。这条守住契约 reminder 不会被空块撑出空行。
+    const base = composePrompt('t', { inputFilesBlock: '<input-files>x</input-files>' });
+    expect(base).toBe(composePrompt('t', {
+      inputFilesBlock: '<input-files>x</input-files>',
+      contextBlock: '',
+      missingInputsBlock: '',
+    }));
+  });
 });
 
 // ─── composeRetryPrompt (Subtask 5.2.C — retry feedback 块) ───

@@ -134,7 +134,9 @@ export interface RunWorkerOptions {
   role: WorkerRole;
   /** LLM 显式指定的模型身份（最高优先级）。 */
   modelOverride?: ModelIdentity;
-  /** 任务开始前从 VFS 预读并嵌入 task 的文件列表。文件缺失静默跳过（warn）。 */
+  /** 任务开始前从 VFS 预读并嵌入 task 的文件列表。文件缺失会在 prompt 末尾
+   *  追加 `<missing-inputs>` block（fail-loud），而不是静默跳过——worker 必须知道
+   *  它本该有这些文件才能正确标出 scope gap。 */
   inputFiles?: readonly string[];
   /** worker 应写入的输出文件路径。runner 跑完后读回内容（截断）挂到 handoff。 */
   outputPath?: string;
@@ -143,6 +145,10 @@ export interface RunWorkerOptions {
   /** 主会话当前模型（workerModels[role] 解析失败时回退）。由 delegate_task
    *  工具在 session-manager 上下文里注入；runner 不主动查 session DB。 */
   mainModel?: ModelIdentity | null;
+  /** 调用方（主代理）写的「上下文简报」：goal / 约束 / 先前决定 / 验收标准。
+   *  Worker 看不到会话历史，这是它唯一的「为什么做」来源（context-handoff
+   *  hardening #1：把写 prompt 的纪律变成 schema 契约）。 */
+  context?: string;
   /** 调用方（主代理）的 AbortSignal。已 abort → 早退；运行中 abort → 透传
    *  到 agent.abort()。 */
   signal?: AbortSignal;
@@ -625,19 +631,29 @@ export function buildWorkspaceBlock(sessionId: string, absoluteOutputPath?: stri
   return lines.join('\n');
 }
 
-/** composePrompt 的输入 ctx。四个 block 都可选；缺失/空 → omit。 */
+/** composePrompt 的输入 ctx。六个 block 都可选；缺失/空 → omit。 */
 export interface PromptContext {
   /** Worker 的 session workspace 上下文（`<workspace>` block）——必须放最前，
    *  让 worker 在读 skill / 红线 / 数据 / 任务之前就知道「文件该落在哪」。 */
   workspaceBlock?: string;
   skillBlocks?: string;
   antiPatternsBlock?: string;
+  /** 主代理写的「上下文简报」（`<context-brief>` block）：goal / 约束 / 先前
+   *  决定 / 验收标准。Worker 看不到会话历史，这是它唯一的「为什么做」来源——
+   *  把写 prompt 的纪律变成 schema 契约（Subtask context-handoff #1）。 */
+  contextBlock?: string;
   inputFilesBlock?: string;
+  /** 请求了但读不到的 input 清单（`<missing-inputs>` block）——fail-loud：
+   *  worker 必须知道它**本该**有这些文件，而不是静默少读后照报 success
+   *  （Subtask context-handoff #2）。 */
+  missingInputsBlock?: string;
 }
 
-/** 把 workspace / skill / anti-patterns / input-files block 与 task 按顺序拼成
- *  完整 prompt，末尾附 handoff JSON 契约 reminder。顺序是 hard-coded：
- *    workspace → skills → anti-patterns → input-files → task → HANDOFF_CONTRACT_REMINDER。
+/** 把 workspace / skill / anti-patterns / context-brief / input-files /
+ *  missing-inputs block 与 task 按顺序拼成完整 prompt，末尾附 handoff JSON
+ *  契约 reminder。顺序是 hard-coded：
+ *    workspace → skills → anti-patterns → context-brief → input-files →
+ *    missing-inputs → task → HANDOFF_CONTRACT_REMINDER。
  *  理由：
  *  - workspace 根（文件该落在哪）是所有后续动作的前提，必须最先出现；
  *  - guardrails（anti-patterns）应在数据（input-files）之前出现，让 worker 在读
@@ -652,7 +668,9 @@ export function composePrompt(task: string, ctx: PromptContext = {}): string {
   if (ctx.workspaceBlock) parts.push(ctx.workspaceBlock);
   if (ctx.skillBlocks) parts.push(ctx.skillBlocks);
   if (ctx.antiPatternsBlock) parts.push(ctx.antiPatternsBlock);
+  if (ctx.contextBlock) parts.push(ctx.contextBlock);
   if (ctx.inputFilesBlock) parts.push(ctx.inputFilesBlock);
+  if (ctx.missingInputsBlock) parts.push(ctx.missingInputsBlock);
   parts.push(task);
   parts.push(HANDOFF_CONTRACT_REMINDER);
   return parts.join('\n\n');
@@ -1116,16 +1134,22 @@ async function buildSkillBlocks(skills: readonly string[]): Promise<string> {
   return blocks.join('\n');
 }
 
-/** Read inputFiles，wrap 在 `<input-files>` envelope。File missing / read
- *  fail → `debugLog.warn` + skip（与原 buildWorkerPrompt 同姿态）。 */
-async function buildInputFilesBlock(inputFiles: readonly string[]): Promise<string> {
-  if (!inputFiles || inputFiles.length === 0) return '';
+/** Read inputFiles，wrap 在 `<input-files>` envelope；同时把读不到的 path 收集
+ *  成 missing 清单（fail-loud，见 `buildMissingInputsBlock`）。File missing /
+ *  read fail → `debugLog.warn` + skip（与原 buildWorkerPrompt 同姿态），但不再
+ *  静默：missing 清单会进 prompt 让 worker 知道它本该有这些文件。 */
+async function buildInputFilesBlock(
+  inputFiles: readonly string[],
+): Promise<{ block: string; missing: string[] }> {
+  if (!inputFiles || inputFiles.length === 0) return { block: '', missing: [] };
   const blocks: string[] = [];
+  const missing: string[] = [];
   for (const path of inputFiles) {
     try {
       const data = await vfs.readFile(path);
       if (data == null) {
         debugLog.warn('sub_agent', 'sub_agent:worker:input:missing', { path });
+        missing.push(path);
         continue;
       }
       const text =
@@ -1135,10 +1159,35 @@ async function buildInputFilesBlock(inputFiles: readonly string[]): Promise<stri
       blocks.push(`<file path="${path}">\n${text}\n</file>`);
     } catch {
       debugLog.warn('sub_agent', 'sub_agent:worker:input:read_error', { path });
+      missing.push(path);
     }
   }
-  if (blocks.length === 0) return '';
-  return `<input-files>\n${blocks.join('\n')}\n</input-files>`;
+  const block =
+    blocks.length === 0 ? '' : `<input-files>\n${blocks.join('\n')}\n</input-files>`;
+  return { block, missing };
+}
+
+/** 把主代理写的上下文简报 wrap 成 `<context-brief>` envelope。Worker 看不到
+ *  会话历史——这段是它唯一的「为什么做 / 之前决定了什么 / 怎么算合格」来源。
+ *  空串 / undefined → 空串（composePrompt omit），保持向后兼容（旧调用不传
+ *  就完全没有这个 block）。 */
+function buildContextBriefBlock(context: string | undefined): string {
+  if (!context || context.trim() === '') return '';
+  return `<context-brief>\n${context.trim()}\n</context-brief>`;
+}
+
+/** 把读不到的 input path 列表 wrap 成 `<missing-inputs>` envelope。Worker 看到
+ *  这个 block 就知道：caller 请求了这些文件但它们不存在 / 读失败——它**不该**
+ *  假装读到了，也不该静默忽略后照报 success。空清单 → 空串（composePrompt omit）。 */
+function buildMissingInputsBlock(missing: readonly string[]): string {
+  if (!missing || missing.length === 0) return '';
+  return (
+    `<missing-inputs>\nThe caller asked you to read these files but they were ` +
+    `missing or unreadable at task start. Do NOT pretend you read them; note ` +
+    `the gap in your handoff_notes and adjust scope accordingly:\n` +
+    missing.map((p) => `- ${p}`).join('\n') +
+    `\n</missing-inputs>`
+  );
 }
 
 /** 读 outputPath（如有）→ 存在则挂内容到 handoff；不存在则触发「worker 自称
@@ -2044,22 +2093,26 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
     tools = tools.map((t) => withDefaultTabId(t, tabId));
   }
 
-  // 5. Prompt 组合：workspace / skills / anti-patterns / input-files 全部可选，
-  //    缺失即 omit。IO 部分（skill / input file 读 VFS）并行跑——互不依赖；
-  //    anti-patterns 与 workspace 是纯函数，直接调用。
-  //    `options.outputPath` 来自 tool layer，已 resolve 成绝对路径
-  //    （`/workspaces/<sessionId>/...`），直接钉进 `<workspace>` block。
-  const [skillBlocks, inputFilesBlock] = await Promise.all([
+  // 5. Prompt 组合：workspace / skills / anti-patterns / context-brief /
+  //    input-files / missing-inputs 全部可选，缺失即 omit。IO 部分（skill /
+  //    input file 读 VFS）并行跑——互不依赖；anti-patterns 与 workspace 是纯
+  //    函数，直接调用。`options.outputPath` 来自 tool layer，已 resolve 成绝对
+  //    路径（`/workspaces/<sessionId>/...`），直接钉进 `<workspace>` block。
+  const [skillBlocks, inputResult] = await Promise.all([
     buildSkillBlocks(options.skills ?? []),
     buildInputFilesBlock(options.inputFiles ?? []),
   ]);
   const antiPatternsBlock = buildAntiPatternsBlock(options.antiPatterns ?? []);
   const workspaceBlock = buildWorkspaceBlock(sessionId, options.outputPath);
+  const contextBlock = buildContextBriefBlock(options.context);
+  const missingInputsBlock = buildMissingInputsBlock(inputResult.missing);
   const initialPrompt = composePrompt(task, {
     workspaceBlock,
     skillBlocks,
     antiPatternsBlock,
-    inputFilesBlock,
+    contextBlock,
+    inputFilesBlock: inputResult.block,
+    missingInputsBlock,
   });
 
   // 6. First attempt
@@ -2143,10 +2196,13 @@ export interface BatchWorkerItem {
   role: WorkerRole;
   /** LLM 显式指定的模型身份（最高优先级）。 */
   modelOverride?: ModelIdentity;
-  /** 任务开始前从 VFS 预读并嵌入 task 的文件列表。文件缺失静默跳过（warn）。 */
+  /** 任务开始前从 VFS 预读并嵌入 task 的文件列表。文件缺失会在 prompt 末尾
+   *  追加 `<missing-inputs>` block（fail-loud）。 */
   inputFiles?: readonly string[];
   /** worker 应写入的输出文件路径。runner 跑完后读回内容（截断）挂到 handoff。 */
   outputPath?: string;
+  /** 调用方（主代理）写的「上下文简报」：goal / 约束 / 先前决定 / 验收标准。 */
+  context?: string;
   /** Worker 输出 JSON schema（字符串）。runner 抽完 JSON 后用 typebox/value
    *  校验；失败 → retryable failure。Malformed schema（本身不是合法 JSON）
    *  → runner error（不 retry）。 */
