@@ -114,9 +114,114 @@ export async function assertInputFilesReadable(
     try {
       await vfs.access(p);
     } catch {
-      throw new Error(`File not found: ${p}`);
+      // Sibling-name suggestions 防 main agent 自创「近似名字」文件来兜底
+      // （QA 见过 main agent 收到 file thiếu → tạo file fake → worker đọc nội
+      // dung bịa；hard gate ở đây cắt luồng đó bằng error + suggestions, agent
+      // buộc báo lại cho user thay vì tự cứu）。
+      const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+      let dirListing: readonly string[] = [];
+      try {
+        dirListing = dir ? await vfs.readdir(dir) : [];
+      } catch {
+        // parent dir missing / unreadable: chỉ có thể báo missing, không kèm suggestion.
+        dirListing = [];
+      }
+      const suggestions = suggestFileMatches(
+        p.slice(p.lastIndexOf('/') + 1),
+        dirListing,
+      );
+      throw new FileNotFoundError(p, suggestions);
     }
   }
+}
+
+/** Caller 传了不存在的文件路径时抛出的硬错误——比 `Error("File not found: …")`
+ *  多带一份 `suggestions: string[]`（同级目录里的近似名字），让 tool-layer
+ *  可以直接 surface 给 main agent 当 structured detail。AGENTS.md: "permission
+ *  denied / missing resources → throw new Error"；本错误对应「missing
+ *  resources」一族，所以走 throw 路径而非 text return。 */
+export class FileNotFoundError extends Error {
+  readonly suggestions: readonly string[];
+
+  constructor(path: string, suggestions: readonly string[]) {
+    super(
+      suggestions.length > 0
+        ? `File not found: "${path}". Did you mean: ${suggestions.join(' | ')}?`
+        : `File not found: "${path}".`,
+    );
+    this.name = 'FileNotFoundError';
+    this.suggestions = suggestions;
+  }
+}
+
+/** 把缺失的 basename 跟同级目录的 listing 做模糊匹配，返回 top-N 候选。
+ *  Pure：测试可以脱离 VFS 直接喂字符串数组验证。规则：
+ *  - exact basename match → 返回 []（理论上 caller 不该走到这：路径全等就该
+ *    vfs.access 过了；但保留这条 guard 防 caller 把 basename 错配成 display 名）；
+ *  - Levenshtein 编辑距离 ≤ maxDistance（默认 3），或
+ *  - 公共前缀 ≥ 3 chars（捕获前缀一致 + 后续差异的场景，如 `faq-final.json` vs
+ *    `faq-khachhang.json`），
+ *  满足任一即可入选；按距离升序、字母序 tiebreak，返回前 maxResults（默认 3）。
+ *
+ *  选 3-char prefix 而非 2-char 是为了防噪音：`output/abc.md` vs `output/abx.md`
+ *  距离 2 但可能只是合法的两个文件；3-char 阈值同时仍是常见 typo "faq.json" vs
+ *  "faq_khachhang.json" 的舒适距离。 */
+export function suggestFileMatches(
+  missingBasename: string,
+  dirListing: readonly string[],
+  opts?: { maxDistance?: number; maxResults?: number },
+): string[] {
+  if (!missingBasename) return [];
+  const maxDistance = opts?.maxDistance ?? 3;
+  const maxResults = opts?.maxResults ?? 3;
+
+  // exact basename match → 空（同名文件已存在，caller 不该要 suggestion）。
+  if (dirListing.includes(missingBasename)) return [];
+
+  const scored: Array<{ name: string; distance: number }> = [];
+  for (const candidate of dirListing) {
+    const distance = levenshtein(missingBasename, candidate);
+    const prefixLen = commonPrefix(missingBasename, candidate);
+    // 距离 ≤ 阈值 OR 前缀 ≥ 3 → 入选；距离更小的优先（距离严格小于；
+    // 否则按字母序 tiebreak，由 sort 保证稳定）。
+    if (distance <= maxDistance || prefixLen >= 3) {
+      scored.push({ name: candidate, distance });
+    }
+  }
+  scored.sort((a, b) => a.distance - b.distance || a.name.localeCompare(b.name));
+  return scored.slice(0, maxResults).map((s) => s.name);
+}
+
+/** Iterative Levenshtein，纯 JS 无依赖。O(m·n)，但输入是 basename（≤
+ *  256 chars），目录 listing 通常几十条，跑一次 gate 成本 < 1ms。 */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const prev = new Array<number>(b.length + 1);
+  const curr = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        curr[j - 1] + 1, // insertion
+        prev[j] + 1, // deletion
+        prev[j - 1] + cost, // substitution
+      );
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+/** 公共前缀长度（字符级）。空串时返回 0。 */
+function commonPrefix(a: string, b: string): number {
+  const len = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < len && a[i] === b[i]) i++;
+  return i;
 }
 
 // ─── Skills scope ─────────────────────────────────────────────────────────

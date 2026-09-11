@@ -15,5 +15,12 @@ export default defineConfig({
   test: {
     include: ['**/*.test.ts'],
     exclude: ['**/node_modules/**', '.wxt/**', '.output/**', 'dist/**', 'site/**', '.claude/**'],
+    // lightning-fs（vfs 间接依赖）在初始化时探测 IndexedDB；node test 环境
+    // 不提供，会抛 unhandled rejection 让 pnpm check exit 1。fake-indexeddb
+    // shim 在 vitest 启动早期挂一个最小空 IndexedDB（只让构造通过，测试
+    // 走 fake-browser 时覆盖）。这条 unhandled rejection 是 test env 噪音，
+    // 不代表产品 bug——生产里 lightning-fs 只在真实 sidepanel/background
+    // 跑，浏览器内置 IndexedDB。
+    setupFiles: ['./test/setup/idb-shim.ts'],
   },
 });

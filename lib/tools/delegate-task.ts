@@ -30,6 +30,7 @@ import { Type } from 'typebox';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
 import { VfsScopeError } from '@/lib/tools/vfs-whitelist';
+import { FileNotFoundError } from '@/lib/agent/path-safety';
 import {
   assertInputFilesReadable,
   assertWithinSessionRoot,
@@ -504,10 +505,15 @@ type BatchItemResolved = {
 };
 
 /** 单个 batch item 的 gate 结果。成功返回 `{ item }`；失败返回 `{ error }`。
- *  `error` 是已构造好的 text content，主代理 execute() 直接 `return result.error`。 */
+ *  `error` 是已构造好的 text content，主代理 execute() 直接 `return result.error`。
+ *  `details` 在 FileNotFoundError 路径下承载 `{ suggestions: string[] }`——sibling-name
+ *  模糊匹配候选，让 caller 知道「该读谁」而非「自己造一份」。
+ *  AGENTS.md: details 是 per-tool structured side channel，不进 LLM context
+ *  但 UI 可以消费——这里 widen BatchItemResult 的 details type，从 `{}` 升到
+ *  `Record<string, never>` 的超集 `{ suggestions?: string[] }`。 */
 type BatchItemResult =
   | { item: BatchItemResolved }
-  | { error: AgentToolResult<Record<string, never>> };
+  | { error: AgentToolResult<{ suggestions?: string[] }> };
 
 async function resolveBatchItem(
   sessionId: string,
@@ -572,6 +578,17 @@ async function resolveBatchItem(
               text: `Error: one or more \`${label}.input_files\` paths are outside the session workspace.`,
             }],
             details: {},
+          },
+        };
+      }
+      // File-not-found 路径：throw 自带 message（可能含 Did-you-mean）+ .suggestions。
+      // 这条命中是 QA 防「main agent 自创文件」的核心——文本把 sibling-name
+      // 候选直接喂回 agent，agent 没有理由再 bịa 一份。
+      if (e instanceof FileNotFoundError) {
+        return {
+          error: {
+            content: [{ type: 'text', text: e.message }],
+            details: e.suggestions.length ? { suggestions: [...e.suggestions] } : {},
           },
         };
       }
@@ -686,7 +703,7 @@ export function createDelegateTaskTool(options: {
       'Use this to keep the main agent\'s context lean: large content goes into VFS files, ' +
       'not into the chat.',
     parameters: DelegateTaskParameters,
-    async execute(_toolCallId, args, signal): Promise<AgentToolResult<Record<string, never>>> {
+    async execute(_toolCallId, args, signal): Promise<AgentToolResult<{ suggestions?: string[] }>> {
       // Promote `_toolCallId` to first-class `toolCallId`：Phase 2 UI feedback
       // 通过它把 worker live stream 关联回外层 delegate_task toolCallId。
       // 下划线前缀移除：现在真在用了。
@@ -848,6 +865,12 @@ export function createDelegateTaskTool(options: {
                 text: 'Error: one or more `input_files` paths are outside the session workspace.',
               }],
               details: {},
+            };
+          }
+          if (e instanceof FileNotFoundError) {
+            return {
+              content: [{ type: 'text', text: e.message }],
+              details: e.suggestions.length ? { suggestions: [...e.suggestions] } : {},
             };
           }
           // 其它错误是「File not found」类（assertInputFilesReadable 内部抛），

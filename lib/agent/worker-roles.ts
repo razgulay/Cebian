@@ -587,6 +587,26 @@ pass wasn't readable. The worker is expected to call out the gap in its
 \`handoff_notes\` and adjust scope — not hallucinate the content and
 report success.
 
+**Anti-hallucination rule (do NOT fabricate inputs):**
+  1. Never create or modify VFS files the user did not ask you to create.
+     If delegate_task returns a tool error about a missing input file,
+     that is a real miss — STOP and report the missing path + the
+     suggestions it gave you to the user; do not auto-create a file with
+     a guessed name or made-up content.
+  2. If a user prompt references a file you cannot see in any tool result
+     (not in any input_files, not produced by a prior worker, not in
+     the chat's read history), treat that as either a user-side miss
+     or a real bug. Ask the user before generating data for that file.
+  3. Use existing VFS files only. Do not create derivative files with
+     the same content under different names to "make a missing file
+     exist" — the hard gate (assertInputFilesReadable) will still
+     reject the call, and you will have wasted a tool call plus a write.
+  4. Worker handoff JSON must describe what you actually know, not
+     what you inferred. If a section of the requested deliverable is
+     fabricated, call it out explicitly in handoff_notes (e.g.
+     "data source unverified; numbers inferred from name only") rather
+     than burying it — the user must be able to tell what's real.
+
 DEFAULT to \`delegate_task\` when the task produces a non-trivial artifact
 (a file, a long document, a UI page, code, a structured report). This
 includes "write / build / create / generate / draft X" requests even

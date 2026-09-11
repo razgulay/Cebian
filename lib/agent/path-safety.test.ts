@@ -8,11 +8,13 @@ import {
   assertInputFilesReadable,
   assertWithinSessionRoot,
   assertWithinSkillsRoot,
+  FileNotFoundError,
   isWithinSessionRoot,
   isWithinSkillsRoot,
   resolveSessionPath,
   sessionRoot,
   skillRoot,
+  suggestFileMatches,
 } from '@/lib/agent/path-safety';
 
 const SID = '01234567-89ab-cdef-0123-456789abcdef';
@@ -335,5 +337,80 @@ describe('assertWithinSkillsRoot', () => {
 
   it('非法 skill name → 抛 VfsScopeError', () => {
     expect(() => assertWithinSkillsRoot('..', `${SKILL_ROOT}/x`)).toThrow(VfsScopeError);
+  });
+});
+
+// ─── suggestFileMatches + FileNotFoundError — QA 防 main agent 自创文件 ───
+//
+// 触发条件：caller 传一个不存在的文件路径给 `delegate_task.input_files`，
+// 但同级目录里有近似名字。hard gate 在 `assertInputFilesReadable`（lib/agent/path-safety.ts）
+// 内调用 sibling-name 模糊匹配，返回 top-3 候选 → agent 收到带 "Did you mean: a | b | c?"
+// 的 text + 结构化 `details.suggestions`，逼 agent 报告用户而不是 bịa file。
+
+describe('suggestFileMatches', () => {
+  it('exact basename match → []（理论上 caller 不该走到这：同名文件就该 access 通过）', () => {
+    expect(suggestFileMatches('faq.json', ['faq.json', 'other.md'])).toEqual([]);
+  });
+
+  it('Levenshtein ≤ 3 → 命中且按距离升序', () => {
+    const out = suggestFileMatches('faq-json.json', [
+      'faq-json.md',  // 距离 2（删 .1）
+      'faq_json.json', // 距离 1（- → _）
+      'other.json',   // 距离 7+，排除
+    ]);
+    expect(out[0]).toBe('faq_json.json'); // 距离 1 优先
+  });
+
+  it('公共前缀 ≥ 3 → 命中（即便编辑距离 > maxDistance）', () => {
+    // 'faq-khachhang.json' vs 'faq-final.json'：编辑距离 ~7，但前缀 'faq-' = 4 → 命中。
+    const out = suggestFileMatches(
+      'faq-khachhang.json',
+      ['faq-final.json', 'other.txt'],
+      { maxDistance: 1 },
+    );
+    expect(out).toContain('faq-final.json');
+    expect(out).not.toContain('other.txt');
+  });
+
+  it('字母序 tiebreak：距离相同时按字母升序', () => {
+    const out = suggestFileMatches('z.json', ['c.json', 'b.json']);
+    // 编辑距离：z↔c=1，z↔b=1，按 localeCompare('b') < localeCompare('c')。
+    expect(out[0]).toBe('b.json');
+    expect(out[1]).toBe('c.json');
+  });
+
+  it('top-N cap：候选 > maxResults 时截断', () => {
+    const out = suggestFileMatches(
+      'faq.json',
+      ['faq1.json', 'faq2.json', 'faq3.json', 'faq4.json', 'faq5.json'],
+      { maxResults: 2 },
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it('no candidates → []', () => {
+    expect(suggestFileMatches('faq.json', ['other.md', 'completely-different.json'])).toEqual([]);
+  });
+
+  it('empty missing path → []（防御 caller 传空串）', () => {
+    expect(suggestFileMatches('', ['x.json', 'y.json'])).toEqual([]);
+  });
+});
+
+describe('FileNotFoundError', () => {
+  it('message 含 path + 候选（Did you mean）', () => {
+    const e = new FileNotFoundError('/workspaces/s/faq_khachhang.json', ['faq.json', 'faq-final.json']);
+    expect(e).toBeInstanceOf(Error);
+    expect(e.suggestions).toEqual(['faq.json', 'faq-final.json']);
+    expect(e.message).toContain('faq_khachhang.json');
+    expect(e.message).toContain('Did you mean:');
+    expect(e.message).toContain('faq.json');
+    expect(e.message).toContain('faq-final.json');
+  });
+
+  it('无候选时 message 只含 path（不写空 Did you mean 子句）', () => {
+    const e = new FileNotFoundError('/x.txt', []);
+    expect(e.message).toBe('File not found: "/x.txt".');
+    expect(e.suggestions).toEqual([]);
   });
 });
