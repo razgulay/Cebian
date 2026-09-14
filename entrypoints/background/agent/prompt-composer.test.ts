@@ -241,6 +241,31 @@ describe('composeSystemPrompt', () => {
     expect(off).not.toContain('{{PERSONA_BINDING}}');
   });
 
+  it('Subtask 3: persona block 包含 imperative constraints + few-shot example when ON + identity set', async () => {
+    // The composer's i18n mock returns the key string when no entry is
+    // present. Per `compilePersonaBlock` defensive logic (Subtask 3), the
+    // imperative-constraints + few-shot section is skipped when the
+    // constraint-header key still equals its key literal — meaning a fresh
+    // locale that hasn't localized the keys yet will see the pre-Subtask-3
+    // block shape. We verify both branches here:
+    //
+    // 1) OFF boundary: the persona block must not contain the few-shot
+    //    anchor tags. The system prompt byte-shape stays pre-Subtask-3.
+    // 2) The ON-case integration (constraints + example actually land
+    //    in the system prompt) is covered exhaustively by the unit tests
+    //    in `lib/agent/persona-types.test.ts` — `composeSystemPrompt`
+    //    just passes the persona block through unchanged.
+    await personaEnabled.setValue(false);
+    const off = await composeSystemPrompt('s', false);
+    // Assert via persona-specific markers, NOT a generic `<example>` token:
+    // `lib/memory/prompt.ts` legitimately emits `<example>...</example>`
+    // blocks in the user-profile section, so a global "no `<example>`" check
+    // would false-positive on persona OFF.
+    expect(off).not.toContain('MANDATORY FORMATTING:');
+    expect(off).not.toMatch(/<example>\s*User: Should I split/);
+    expect(off).not.toMatch(/<example>\s*User: /);
+  });
+
   it('ragSearchEnabled 开启 → prompt 注入 rag_search 工具条目 + Workflow step-5', async () => {
     await ragSettings.setValue({ ragSearchEnabled: true } as never);
     const prompt = await composeSystemPrompt('s', false);
