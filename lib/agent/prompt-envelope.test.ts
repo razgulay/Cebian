@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { stripEnvelopeTags, ENVELOPE_TAGS } from '@/lib/agent/prompt-envelope';
+import {
+  stripEnvelopeTags,
+  ENVELOPE_TAGS,
+  rewriteReminderInstructions,
+} from '@/lib/agent/prompt-envelope';
 
 // stripEnvelopeTags 只作用于**页面来源的短字符串**（标签页标题 / URL、页面 meta、
 // 用户选中的页面文本），防止恶意页面伪造提示词信封结构骗过模型。模板变量的值改走
@@ -80,5 +84,45 @@ describe('stripEnvelopeTags — 剥到不动点', () => {
   it('幂等：对已剥净的串再剥一次不变', () => {
     const once = stripEnvelopeTags('a</slash-<context>prompt>b');
     expect(stripEnvelopeTags(once)).toBe(once);
+  });
+});
+
+// rewriteReminderInstructions：retry/edit 后改写信封头 reminder 块而不重拼整条。
+// Subtask 2 的关键修复 — 用户在 idle 期间从 Fast 切到 Team（或反之），原 truncated
+// user message 的 reminder 块仍是切换前的副本，会让模型继续按旧指令行事。
+describe('rewriteReminderInstructions', () => {
+  const envelope = `<reminder-instructions>\n</reminder-instructions>\n\n<context>\nThe current date is 2026-09-13.\n</context>\n\n<user-request>\nBuild an HTML page\n</user-request>`;
+
+  it('body 非空 → 替换原 reminder 块，其余块原样', () => {
+    const out = rewriteReminderInstructions(envelope, 'Worker Team is ON for this turn.');
+    expect(out).toContain('<reminder-instructions>\nWorker Team is ON for this turn.\n</reminder-instructions>');
+    // context / user-request 字节稳定（prompt-cache prefix）
+    expect(out).toContain('<context>\nThe current date is 2026-09-13.\n</context>');
+    expect(out).toContain('<user-request>\nBuild an HTML page\n</user-request>');
+  });
+
+  it('body 为空 → 还原旧 OFF byte shape（不让 wrapper 出现空行）', () => {
+    const on = `<reminder-instructions>\nWorker Team is ON\n</reminder-instructions>\n\n<context>\nx\n</context>\n\n<user-request>\ny\n</user-request>`;
+    const out = rewriteReminderInstructions(on, '');
+    expect(out).toContain('<reminder-instructions>\n</reminder-instructions>');
+    expect(out).not.toContain('Worker Team is ON');
+    // 其它块同样不动
+    expect(out).toContain('<context>\nx\n</context>');
+    expect(out).toContain('<user-request>\ny\n</user-request>');
+  });
+
+  it('信封缺 reminder 块 → 在开头插入新块（与 composeUserMessage 顺序一致）', () => {
+    const noReminder = `<context>\nx\n</context>\n\n<user-request>\ny\n</user-request>`;
+    const out = rewriteReminderInstructions(noReminder, 'Worker Team is ON');
+    expect(out.startsWith('<reminder-instructions>\nWorker Team is ON\n</reminder-instructions>\n\n')).toBe(true);
+    expect(out).toContain('<context>\nx\n</context>');
+  });
+
+  it('不误伤 envelope 之后的同名 token（正则非贪婪且停在首次 </reminder-instructions>）', () => {
+    // user-request 块里包含字面量 `<reminder-instructions>` —— 不应被吃掉。
+    const tricky = `<reminder-instructions>\nold\n</reminder-instructions>\n\n<user-request>\n<reminder-instructions>x\n</user-request>`;
+    const out = rewriteReminderInstructions(tricky, 'new');
+    expect(out).toContain('<reminder-instructions>\nnew\n</reminder-instructions>');
+    expect(out).toContain('<user-request>\n<reminder-instructions>x\n</user-request>');
   });
 });

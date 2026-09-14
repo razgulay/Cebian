@@ -100,6 +100,16 @@ describe('composeSystemPrompt', () => {
     expect(prompt).not.toContain('DEFAULT to `delegate_task`');
   });
 
+  it('workerTeamOn 参数存在时优先于 storage，供单轮 dispatch 复用同一快照', async () => {
+    await workerTeamEnabled.setValue(false);
+    const forcedOn = await composeSystemPrompt('s', false, true);
+    expect(forcedOn).toContain('<available-workers>');
+
+    await workerTeamEnabled.setValue(true);
+    const forcedOff = await composeSystemPrompt('s', false, false);
+    expect(forcedOff).not.toContain('<available-workers>');
+  });
+
   it('<available-workers> 位于 <skills> 之后、<user-instructions> 之前', async () => {
     // 顺序约定：base → skills（domain packs）→ workers（通用能力菜单）→
     // user-instructions（用户偏好）。任何一项错位都会让 model 的注意力
@@ -178,6 +188,21 @@ describe('composeUserMessage', () => {
     const msg = await composeUserMessage('你好', [], false);
     expect(msg).not.toContain('<slash-prompt');
     expect(msg).toContain('<user-request>\n你好\n</user-request>');
+  });
+
+  it('workerTeamOn=true → reminder-instructions 提醒 HTML 交付物优先派给 frontend_coder', async () => {
+    const msg = await composeUserMessage('build an HTML dashboard', [], false, undefined, true);
+    expect(msg).toContain('<reminder-instructions>');
+    expect(msg).toContain('Worker Team is ON for this turn');
+    expect(msg).toContain('delegate_task');
+    expect(msg).toContain("role: 'frontend_coder'");
+  });
+
+  it('workerTeamOn=false → 不注入 Team routing reminder，保持旧 byte shape', async () => {
+    const msg = await composeUserMessage('build an HTML dashboard', [], false, undefined, false);
+    expect(msg).toContain('<reminder-instructions>\n</reminder-instructions>');
+    expect(msg).not.toContain('Worker Team is ON for this turn');
+    expect(msg).not.toContain('Worker Team');
   });
 
   // 块必须在请求块之前：信封的不变式是「<user-request> 永远置末」。

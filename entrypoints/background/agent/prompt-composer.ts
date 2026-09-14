@@ -14,7 +14,7 @@ import { buildTextPrefix, type Attachment } from '@/lib/agent/attachments';
 import { scanSkillIndex, buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { buildAvailableWorkersBlock } from '@/lib/agent/worker-roles';
 import { buildSlashPromptBlock, SLASH_PROMPT_ONLY_REQUEST, type SlashPrompt } from '@/lib/ai-config/slash-prompt';
-import { wrapUserRequest } from '@/lib/agent/prompt-envelope';
+import { wrapUserRequest, wrapReminderInstructions } from '@/lib/agent/prompt-envelope';
 import { MEMORY_INSTRUCTIONS, memoryLimitationLine } from '@/lib/memory/prompt';
 import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/lib/memory/index-scan';
 import { ragSettings } from '@/lib/rag';
@@ -175,11 +175,16 @@ async function composeUserMessage(
   attachments: Attachment[],
   memoryEnabled: boolean,
   slashPrompt?: SlashPrompt,
+  workerTeamOn?: boolean,
 ): Promise<string> {
   const parts: string[] = [];
 
-  // ① Tool/behavior reminders (placeholder)
-  parts.push('<reminder-instructions>\n</reminder-instructions>');
+  // ① Tool/behavior reminders：贴近本轮用户请求，降低“先 native 写再被 gate 拦”的额外往返。
+  // wrapper 形状由 prompt-envelope 的 wrapReminderInstructions 单一来源决定，
+  // retry/edit 路径下的 rewriteReminderInstructions 复用同一 helper，确保
+  // prompt-cache prefix 字节稳定。
+  const reminders = workerTeamOn ? TEAM_REMINDER_COPY : '';
+  parts.push(wrapReminderInstructions(reminders));
 
   // ② Attachments (elements + files; images go via multimodal content blocks)
   const attachmentBlock = buildTextPrefix(attachments);
@@ -219,12 +224,16 @@ async function composeUserMessage(
  * 出变化、击穿缓存一次（= 装/卸 skill 的实时性代价）。因此无需写「skills 是否变
  * 化」的 diff 逻辑。
  */
-async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): Promise<string> {
-  const [instructions, skillMetas, currentRagSettings, teamEnabled] = await Promise.all([
+async function composeSystemPrompt(
+  sessionId: string,
+  memoryEnabled?: boolean,
+  workerTeamOn?: boolean,
+): Promise<string> {
+  const [instructions, skillMetas, currentRagSettings, storedTeamEnabled] = await Promise.all([
     userInstructionsStorage.getValue(),
     scanSkillIndex(),
     ragSettings.getValue(),
-    workerTeamEnabled.getValue(),
+    workerTeamOn === undefined ? workerTeamEnabled.getValue() : Promise.resolve(workerTeamOn),
   ]);
   // memoryEnabled 由调用方传入时复用其快照（让同一轮的 system / user 注入读同一个值）；
   // 未传时（如初始建会话路径）自行读取。
@@ -252,7 +261,7 @@ async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): 
       // 工具但不知道何时用，或反之。字符串形态因为本文件用 `Record<string, string>`
       // ——这里把 boolean 显式 'true' / 'false' 字面化进变量表，buildSystemPrompt
       // 那边只比对 `=== 'true'` 即可，不引入新分支类型。
-      workerTeamEnabled: String(teamEnabled),
+      workerTeamEnabled: String(storedTeamEnabled),
     }),
   );
 }
@@ -260,3 +269,16 @@ async function composeSystemPrompt(sessionId: string, memoryEnabled?: boolean): 
 // ─── 公开 API ───
 
 export { composeSystemPrompt, composeUserMessage };
+
+// 模块级常量：把 reminder 文本放到模块级（不在 buildUserMessage 里 inline）
+// 让 prompt-envelope 的 wrapReminderInstructions 与 retry 路径下的
+// rewriteReminderInstructions 在同一份常量上对齐，避免一处改了一处没改。
+/** LLM-facing reminder copy (English only — schema/contract text per project rule).
+ *  Positioned next to <user-request> so it overrides the native-tool default the
+ *  LLM learned from the system prompt. Don't i18n-ify without also reviewing
+ *  what the reminder needs to say. */
+export const TEAM_REMINDER_COPY =
+  'Worker Team is ON for this turn. If the user asks you to create, build, generate, ' +
+  'or substantially rewrite a non-trivial HTML page, dashboard, or interactive demo, ' +
+  'call `delegate_task` first with `role: \'frontend_coder\'` and an `output_path`. ' +
+  'Use native fs tools yourself only for brief answers, reads/searches, or small follow-up edits.';

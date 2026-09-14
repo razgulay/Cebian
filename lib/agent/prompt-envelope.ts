@@ -67,3 +67,44 @@ export const USER_REQUEST_CLOSE = '</user-request>';
 export function wrapUserRequest(text: string): string {
   return `${USER_REQUEST_OPEN}\n${text}\n${USER_REQUEST_CLOSE}`;
 }
+
+/**
+ * 包出信封头部的 `<reminder-instructions>` 块。`composeUserMessage` 与
+ * `rewriteReminderInstructions` 共用这个 byte shape，避免一边改了一边没改让
+ * prompt-cache prefix 静默破裂。OFF 时 body 为空 → wrapper 内只留 `\n`，
+ * 与 prompt-composer 旧 byte shape 完全一致。
+ */
+export function wrapReminderInstructions(body: string): string {
+  return body
+    ? `<reminder-instructions>\n${body}\n</reminder-instructions>`
+    : '<reminder-instructions>\n</reminder-instructions>';
+}
+
+// 与模块级 ENVELOPE_TAG_RE 共用同样语义：模块级 /g 正则每次 String.replace 前
+// 会归零 lastIndex（详 prompt-envelope.test.ts 内 comment）。本正则非 /g，
+// 共享更安全。
+const REMINDER_BLOCK_RE = /<reminder-instructions>[\s\S]*?<\/reminder-instructions>/;
+
+/**
+ * 只替换信封头部 `<reminder-instructions>` 块里的内容，其他块（attachments /
+ * context / memories / slash-prompt / user-request）保持原样。
+ *
+ * 用例：retry/edit 后用户从 Fast 切到 Team（或反之），需要把 envelope 的
+ * reminder 块改成新的 snapshot，又不想重新拼一遍整条 user message
+ * （避免 date / page-context / memories / attachments 等再次跑读 — 这些
+ * 在 idle 窗口里可能已经 stale，且重拼会破坏 prompt-cache prefix 对
+ * `<user-request>` 之前的字节稳定性）。
+ *
+ * 行为：
+ * - 信封存在 `<reminder-instructions>` 开标签 → 用新 body 替换该块；
+ *   若 body 为空，整段还原成旧 byte shape `<reminder-instructions>\n</reminder-instructions>`。
+ * - 信封没有该块 → 在开头插入一个新块（与 composeUserMessage 的位置一致）。
+ * - 其余块不动。
+ */
+export function rewriteReminderInstructions(raw: string, body: string): string {
+  if (REMINDER_BLOCK_RE.test(raw)) {
+    return raw.replace(REMINDER_BLOCK_RE, wrapReminderInstructions(body));
+  }
+  // 信封缺该块时插在最前（与 composeUserMessage 的拼装顺序一致）。
+  return `${wrapReminderInstructions(body)}\n\n${raw}`;
+}

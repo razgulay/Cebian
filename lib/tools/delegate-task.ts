@@ -675,8 +675,9 @@ async function resolveBatchItem(
 export function createDelegateTaskTool(options: {
   sessionId: string;
   broadcast?: (msg: ServerMessage) => void;
+  getMainModel?: () => ModelIdentity | null;
 }): AgentTool<typeof DelegateTaskParameters> {
-  const { sessionId, broadcast } = options;
+  const { sessionId, broadcast, getMainModel } = options;
   // Phase 2 UI feedback: 把 worker-runner 的 text/thinking delta + tool_start
   // 事件转成 `worker_stream` ServerMessage，经注入的 `broadcast` 发给 sidepanel。
   // WorkerCard 拿到后做 token-coalesce + 50ms throttle 渲染 LiveStreamBox。
@@ -781,7 +782,7 @@ export function createDelegateTaskTool(options: {
         const batchHandoff = await runBatchWorker({
           tasks: resolvedItems,
           sessionId,
-          mainModel: null,
+          mainModel: getMainModel?.() ?? null,
           ...(signal ? { signal } : {}),
           // Phase 2 UI feedback: 给每个 batch item 共享同个 broadcaster 闭包；
           // batch 内 worker 的 toolCallId 仍由本层 tool execute 决定（外层
@@ -912,12 +913,11 @@ export function createDelegateTaskTool(options: {
         };
       }
 
-      // ── 6. mainModel：留 null，runner 自有 per-role + override 兜底 ──
-      // 真正的 mainModel 解析需要 session DB（按 chatId 查 lastSelectedModel
-      // 的覆盖），留到 Subtask 6/7 的 DelegationCard UI 或 session-manager
-      // 集成时再补——届时把 mainModel 注入到 tool 闭包或 session-context。
-      // 现在传 null，runner 还能走「modelOverride → workerModels[role]」两层。
-      const mainModel: ModelIdentity | null = null;
+      // ── 6. mainModel：由 session-manager 注入当前主会话模型 ─────────
+      // runner 的兜底顺序是 modelOverride → workerModels[role] → mainModel。
+      // 这里不反查 session DB，避免 lib/ 反向依赖 background；只读 tool factory
+      // 闭包里传进来的语义回调。缺省仍为 null，保留单测 / 旧调用兼容。
+      const mainModel: ModelIdentity | null = getMainModel?.() ?? null;
 
       // ── 7. Lazy import + 调 runner ──────────────────────────────
       const { runWorker } = await import('@/entrypoints/background/agent/worker-runner');

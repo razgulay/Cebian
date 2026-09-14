@@ -22,7 +22,7 @@ import {
 import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-ai';
 import { clampThinkingLevel } from '@earendil-works/pi-ai';
 import { createCebianAgent } from '../agent/factory';
-import { composeUserMessage, composeSystemPrompt } from '../agent/prompt-composer';
+import { composeUserMessage, composeSystemPrompt, TEAM_REMINDER_COPY } from '../agent/prompt-composer';
 import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import { resolveProviderApiKey } from '../providers/credentials';
 import {
@@ -64,12 +64,15 @@ import {
   createPermissionRequestMessage,
   isPermissionRequest,
   PERMISSION_DECISION_CUSTOM_TYPE,
+  type BeforeToolCallHook,
   type PermissionRequest,
   type PermissionDecision,
   type ToolGate,
 } from '@/lib/agent/tool-permissions';
 import type { BroadcastMessage, TurnSettings } from '@/lib/ipc/protocol';
 import { replaceUserText, truncateForRetry, sanitizeAgentMessages, extractUserText, getAssistantText } from '@/lib/agent/message-helpers';
+import { rewriteReminderInstructions } from '@/lib/agent/prompt-envelope';
+import { createWorkerTeamRoutingHook } from '@/lib/agent/worker-team-routing';
 import {
   providerCredentials,
   customProviders as customProvidersStorage,
@@ -193,6 +196,8 @@ interface AgentSession {
    */
   compactionController?: AbortController;
   modelKey: string;
+  /** 当前主会话模型身份；worker role 未单独配置 model 时用它兜底。 */
+  modelIdentity: ModelIdentity;
   /**
    * 活 agent 当前挂的是「兜底模型」——会话行里的模型身份解析不出（被下架 / provider
    * 被删），`createAgent` 用全局种子顶上，好让打开旧会话、切分支这类不发请求的操作
@@ -620,13 +625,20 @@ class SessionManager {
    */
   private async refreshAllSessionTools(): Promise<void> {
     if (this.sessions.size === 0) return;
+    // 与 prompt()/rewindAndResume() 对齐：单 snapshot 喂给所有活会话的 tool rebuild，
+    // 避免不同会话读出不同 Team 状态导致工具数组与 system prompt 不一致。
+    const teamOn = await workerTeamEnabled.getValue();
     const seq = ++this.refreshToolsSeq;
     await Promise.allSettled(
       Array.from(this.sessions.values()).map(async (agentSession) => {
         try {
           const tools = await buildSessionToolArray(
             agentSession.toolCtx,
-            (msg) => broadcastToViewers(agentSession.sessionId, msg),
+            {
+              broadcast: (msg) => broadcastToViewers(agentSession.sessionId, msg),
+              workerTeamOn: teamOn,
+              getMainModel: () => agentSession.modelIdentity,
+            },
           );
           // 已有更新的重建在跑/已完成 → 本次结果过期，弃写（弃的是赋值，
           // 不中断构建本身——MCP discovery 的副作用已由 manager 层去重）。
@@ -845,11 +857,21 @@ class SessionManager {
 
     const thinkingLvl = existingSession?.thinkingLevel || (await lastSelectedThinkingLevel.getValue());
 
+    // Forward-declared：getMainModel 闭包被下方 createSessionTools() 捕获，
+    // 当时 agentSession 尚未建好；赋值在本函数末尾，闭包在 delegate_task execute
+    // 时才被读，永远读到 live ref。prompt() 直接闭包 agentSession.modelIdentity，
+    // 因为那时 agentSession 已在作用域。
+    let agentSessionRef: AgentSession | undefined;
+    const getMainModel = (): ModelIdentity | null => agentSessionRef?.modelIdentity ?? null;
+
     // 每会话独立的工具 + bridge。广播通道注入给 `delegate_task`（worker live
     // stream 走它），lib 层不直接依赖本 entrypoint 的 broadcastToViewers。
     const { tools: sessionTools, ctx: toolCtx } = await createSessionTools(
       sessionId,
-      (msg) => broadcastToViewers(sessionId, msg),
+      {
+        broadcast: (msg) => broadcastToViewers(sessionId, msg),
+        getMainModel,
+      },
     );
 
     // 工具执行前授权门禁：每会话一个独立 bridge；用它构造绑定到本会话
@@ -857,10 +879,21 @@ class SessionManager {
     // gate 真正触发时才按 sessionId 反查 `AgentSession`（那时一定已入 map），因此
     // 这里不构成与 agent / AgentSession 的循环依赖。
     const permissionBridge = createInteractiveBridge<PermissionRequest, PermissionDecision>();
-    const beforeToolCall = createPermissionGate(
+    const permissionGate = createPermissionGate(
       PERMISSION_GATES,
       (request, signal) => this.requestPermissionDecision(sessionId, request, signal),
     );
+    // Worker Team 路由门禁：装在 permission gate 之前，命中直接返回
+    // `{ block: true, reason }` 而不弹授权卡。worker agent（runWorkerAttempt
+    // 里另起的 createCebianAgent）不传这个 hook，所以 frontend_coder 自己写
+    // HTML 不会被拦。getWorkerTeamOn 每次调用才读 storage，让 hook 永远用
+    // 当前快照——与 prompt/tool snapshot 同一份 workerTeamEnabled。
+    const workerTeamRoutingHook = createWorkerTeamRoutingHook(() => workerTeamEnabled.getValue());
+    const beforeToolCall: BeforeToolCallHook = async (context, signal) => {
+      const blocked = await workerTeamRoutingHook(context);
+      if (blocked) return blocked;
+      return permissionGate(context, signal);
+    };
 
     // systemPrompt 一次成形（含 skills 索引 + 用户指令）。composeSystemPrompt 是
     // systemPrompt 的单一来源，与切模型 / retry / 派发前刷新走同一条路径，保证四处
@@ -884,6 +917,7 @@ class SessionManager {
       sessionCreated,
       phase: 'idle',
       modelKey: `${resolved.provider}/${resolved.modelId}`,
+      modelIdentity: { provider: resolved.provider, modelId: resolved.modelId },
       ...(usedFallback ? { modelFallback: true } : {}),
       toolCtx,
       permissionBridge,
@@ -899,6 +933,7 @@ class SessionManager {
       // SW 重启后变回 false，但 `assistantCount === 1` 仍能挡住重发。
       titleGenerated: false,
     };
+    agentSessionRef = agentSession;
     this.wireSubscriptions(agentSession);
     this.sessions.set(sessionId, agentSession);
     return agentSession;
@@ -1382,6 +1417,7 @@ class SessionManager {
         if (!resolved) throw new Error(t('errors.modelUnavailable'));
         agentSession.agent.state.model = resolved.model;
         agentSession.modelKey = turnKey!;
+        agentSession.modelIdentity = { provider: resolved.provider, modelId: resolved.modelId };
       }
       // 思考档：把 turn 携带的原始偏好对（可能刚换的）当前模型夹成 effective 档，只有
       // effective 变了才更新 + 落库。这样「只换模型、档位没跟着换但新模型不支持现档」也会
@@ -1411,10 +1447,24 @@ class SessionManager {
       if (clearedFallback) agentSession.modelFallback = false;
     }
 
-    // 本轮记忆开关的单一快照：同时喂给 user 消息注入与 system prompt 刷新，
-    // 保证一轮内两处读同一个值（原子门控，避免读到两个快照而前后不一致）。
-    const memoryEnabled = (await memorySettings.getValue()).enabled;
-    const enriched = await composeUserMessage(text, attachments, memoryEnabled, slashPrompt);
+    // 本轮开关的单一快照：memory 同时喂给 user/system prompt；Team 同时喂给
+    // tool array / system prompt / user reminder，避免一轮内 prompt 说能用 worker
+    // 但 tools 里还没有 delegate_task（或反之）。
+    const [memoryEnabled, workerTeamOn] = await Promise.all([
+      memorySettings.getValue().then((settings) => settings.enabled),
+      workerTeamEnabled.getValue(),
+    ]);
+    const tools = await buildSessionToolArray(agentSession.toolCtx, {
+      broadcast: (msg) => broadcastToViewers(sessionId, msg),
+      workerTeamOn,
+      getMainModel: () => agentSession.modelIdentity,
+    });
+    if (this.sessions.get(sessionId) !== agentSession) {
+      this.releaseTrace(sessionId);
+      return;
+    }
+    agentSession.agent.state.tools = tools;
+    const enriched = await composeUserMessage(text, attachments, memoryEnabled, slashPrompt, workerTeamOn);
     const images = extractImages(attachments);
     trace.mark('bg:prompt_composed', { textLen: enriched.length, imgCount: images.length });
 
@@ -1432,7 +1482,7 @@ class SessionManager {
       return;
     }
 
-    const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled);
+    const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled, workerTeamOn);
     if (this.sessions.get(sessionId) !== agentSession) {
       this.releaseTrace(sessionId);
       return;
@@ -2192,6 +2242,37 @@ class SessionManager {
         return;
       }
 
+      // Retry/edit 的 Worker Team 快照：与 normal send 一致——同一份 `workerTeamOn`
+      // 喂给 tool array 与 system prompt，避免用户空闲时从 Team 切到 Fast（或反之）
+      // 后立即按 Retry/Edit，prompt 里还在写「DEFAULT to delegate_task」但 tool list
+      // 已经看不到 `delegate_task`（或反之），LLM 幻觉调工具 / 不知何时用 worker。
+      const workerTeamOn = await workerTeamEnabled.getValue();
+      const refreshedTools = await buildSessionToolArray(agentSession.toolCtx, {
+        broadcast: (msg) => broadcastToViewers(sessionId, msg),
+        workerTeamOn,
+        getMainModel: () => agentSession.modelIdentity,
+      });
+      agentSession.agent.state.tools = refreshedTools;
+      const refreshedSystemPrompt = await composeSystemPrompt(sessionId, undefined, workerTeamOn);
+      agentSession.agent.state.systemPrompt = refreshedSystemPrompt;
+
+      // 同步最后一条 user message 的 reminder 块：用户原 turn 是用当时的 Team/Fast
+      // 拍的，`<reminder-instructions>` 块在 prompt-composer 里只插一次。
+      // 切换后只刷 systemPrompt 仍然会让模型继续按旧 reminder 行事（例如从 Fast 切
+      // 到 Team 后重试，reminder 还是空的，agent 不会去调 delegate_task）。这里直接
+      // 在 envelope 头部改 reminder 块，不重拼整条 user message（避免 attachments /
+      // context / memories / slash-prompt 再次读 stale 状态，也保护 `<user-request>`
+      // 之前的 prompt-cache prefix 字节稳定）。
+      // 就地重写 truncated（而非赋新变量）：catch 分支会用 busySnapshot 还原
+      // state.messages——让「成功路径写新 reminder + 失败路径回滚到新 reminder」
+      // 行为一致；后者避免 agent 看到「系统 prompt 已更新但 user message 还是
+      // 旧 reminder」这种半新半旧的混合状态。
+      const reminderBody = workerTeamOn ? TEAM_REMINDER_COPY : '';
+      const rewritten = this.rewriteUserMessageReminder(truncated, reminderBody);
+      for (let i = 0; i < truncated.length; i++) {
+        truncated[i] = rewritten[i];
+      }
+
       // Apply the refreshed state onto the live agent. `cancelAll` defensively
       // drops any stale pending interactive request (the UI hides retry while
       // a tool is pending, but a late port message could still arrive).
@@ -2205,6 +2286,7 @@ class SessionManager {
       if (resolved) {
         agentSession.agent.state.model = resolved.model;
         agentSession.modelKey = turnKey!;
+        agentSession.modelIdentity = { provider: resolved.provider, modelId: resolved.modelId };
       }
       // 思考档：把 turn 携带的原始偏好对（可能刚换的）当前模型夹成 effective 档，只有
       // effective 变了才更新 + 落库——覆盖「只换模型、现档不被新模型支持」的情形，并避免
@@ -2695,6 +2777,52 @@ class SessionManager {
     const pending = agentSession.permissionBridge.getPending();
     if (!pending || pending.toolCallId !== toolCallId) return; // stale / mismatched
     agentSession.permissionBridge.resolve(decision);
+  }
+
+  /**
+   * 仅重写最后一条 user message 的 `<reminder-instructions>` 块，其它块保持原样。
+   * 用例：retry/edit 后用户切换 Team/Fast，需要让 envelope 头部的 reminder 与
+   * 当前的 `workerTeamOn` 同步——若整条 user message 重新跑 compose，会同时重读
+   * attachments / context / memories / slash-prompt，idle 窗口里这些 stale 值会
+   * 污染 prompt，并且会击穿 prompt-cache prefix。
+   *
+   * 行为：找到 truncated 中最后一条 user message（retry/edit 路径下它就是被重发
+   * 的那条），把它 content 数组里第一个 text 块视为 envelope 文本；对该文本调用
+   * `rewriteReminderInstructions`；若没有 text 块或该消息根本没出现 user 角色，
+   * 原样返回。返回值是新数组，老数组被浅拷——上层 (`rewindAndResume`) 负责
+   * 把 truncated 元素就地替换为返回值里的元素。
+   */
+  private rewriteUserMessageReminder(
+    truncated: AgentMessage[],
+    reminderBody: string,
+  ): AgentMessage[] {
+    if (truncated.length === 0) return truncated;
+    const lastIdx = truncated.length - 1;
+    const last = truncated[lastIdx];
+    if (last.role !== 'user') return truncated;
+    const content = last.content;
+    if (typeof content === 'string') {
+      const next: AgentMessage = {
+        ...last,
+        content: rewriteReminderInstructions(content, reminderBody),
+      } as AgentMessage;
+      const out = truncated.slice();
+      out[lastIdx] = next;
+      return out;
+    }
+    if (!Array.isArray(content)) return truncated;
+    const textIdx = content.findIndex(
+      (b): b is { type: 'text'; text: string } =>
+        typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text',
+    );
+    if (textIdx < 0) return truncated;
+    const block = content[textIdx] as { type: 'text'; text: string };
+    const nextContent = content.slice();
+    nextContent[textIdx] = { ...block, text: rewriteReminderInstructions(block.text, reminderBody) };
+    const next: AgentMessage = { ...last, content: nextContent } as AgentMessage;
+    const out = truncated.slice();
+    out[lastIdx] = next;
+    return out;
   }
 
   /** Get current state for a session (for reconnecting clients).

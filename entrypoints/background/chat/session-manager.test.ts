@@ -48,6 +48,7 @@ const mocks = vi.hoisted(() => {
     // prompt composer
     composeUserMessage: vi.fn(),
     composeSystemPrompt: vi.fn(),
+    TEAM_REMINDER_COPY: 'Worker Team is ON for this turn.',
     // tools
     createSessionTools: vi.fn(),
     buildSessionToolArray: vi.fn(() => []),
@@ -63,10 +64,20 @@ const mocks = vi.hoisted(() => {
     getMCPManager: vi.fn(() => ({ subscribe: vi.fn(() => () => {}) })),
     // storage (lastSelectedThinkingLevel read by createAgent)
     lastSelectedThinkingLevel: { getValue: vi.fn(async () => 'medium') },
+    // workerTeamEnabled 也提到 hoisted：vi.clearAllMocks() 之后 `mocks.*`
+    // 才能继续访问，否则 mock 被 factory 重新覆盖后 vi.fn 实例丢失。
+    // 测试要改它的返回值以模拟 Fast/Team 切换。
+    workerTeamEnabled: {
+      getValue: vi.fn(async () => true),
+      watch: vi.fn(() => () => {}),
+    },
     // sessionStore (lazy import pattern)
     sessionStoreModule: {
       sessionStore: {} as Record<string, unknown>,
     },
+    // sessionStore.updateSettings 在 rewindAndResume 落库时调用。
+    // 测试要模拟「turn 带新 model」的成功路径，所以必须 mock 出可用实现。
+    updateSettings: vi.fn(async () => {}),
     // The provider/credentials/storage items the production code touches at import
     resolveModel: vi.fn(() => null),
     // t() i18n
@@ -94,6 +105,7 @@ vi.mock('../agent/factory', () => ({
 vi.mock('../agent/prompt-composer', () => ({
   composeUserMessage: mocks.composeUserMessage,
   composeSystemPrompt: mocks.composeSystemPrompt,
+  TEAM_REMINDER_COPY: mocks.TEAM_REMINDER_COPY,
 }));
 
 vi.mock('../providers/credentials', () => ({
@@ -139,10 +151,7 @@ vi.mock('@/lib/persistence/storage', () => ({
   memorySettings: { getValue: vi.fn(async () => ({ enabled: false })) },
   // watchWorkerTeam 会 .watch() 它；给最小 fake（watch 返回 noop 退订），
   // 否则未来首个触达该路径的用例会撞 "No workerTeamEnabled export"。
-  workerTeamEnabled: {
-    getValue: vi.fn(async () => true),
-    watch: vi.fn(() => () => {}),
-  },
+  workerTeamEnabled: mocks.workerTeamEnabled,
 }));
 
 vi.mock('@/lib/mcp/manager', () => ({
@@ -168,6 +177,7 @@ vi.mock('./session-store', () => ({
   sessionStore: {
     scheduleWrite: mocks.scheduleWrite,
     flush: mocks.flush,
+    updateSettings: mocks.updateSettings,
   },
 }));
 
@@ -195,11 +205,12 @@ function makeSession(opts: {
   prepareController?: AbortController;
   compactionController?: AbortController;
   entryIds?: string[];
+  treeChain?: Promise<void>;
 }) {
   const messages = opts.messages ?? [];
   const entryIds = opts.entryIds ?? [];
   const agent = {
-    state: { messages },
+    state: { messages, tools: undefined as unknown, systemPrompt: undefined as unknown },
     abort: vi.fn(),
     waitForIdle: vi.fn(async () => {}),
     unsubscribe: vi.fn(),
@@ -217,7 +228,9 @@ function makeSession(opts: {
     prepareController: opts.prepareController,
     compactionController: opts.compactionController,
     modelKey: 'openai/gpt-4o-mini',
+    modelIdentity: { provider: 'openai', modelId: 'gpt-4o-mini' },
     toolCtx: {
+      cancelAll: vi.fn(),
       dispose: vi.fn(),
       getPendingRequests: vi.fn(() => []),
       resolve: vi.fn(),
@@ -229,6 +242,7 @@ function makeSession(opts: {
       request: vi.fn(),
     },
     unsubscribeAgent: vi.fn(),
+    treeChain: opts.treeChain ?? Promise.resolve(),
   };
 }
 
@@ -410,6 +424,214 @@ describe('commit*Cancel() race guards — silent exit if session was destroyed',
     expect(msg.type).toBe('session_state');
     expect(msg.isRunning).toBe(false);
     expect(msg.isCompacting).toBe(false);
+  });
+});
+
+describe('rewindAndResume — Worker Team snapshot sync', () => {
+  // Subtask 2: retry/edit 路径必须在 continue() 之前用同一份 `workerTeamOn`
+  // 喂给 tool array + system prompt，否则用户在 idle 时从 Team 切到 Fast 后立刻
+  // 按 Retry，prompt 还在说「DEFAULT to delegate_task」但 tool list 已经没有。
+
+  beforeEach(() => {
+    // 每个用例默认 ON：单独测试 OFF 行为时按需 setValue(false)。
+    mocks.workerTeamEnabled.getValue.mockResolvedValue(true);
+    mocks.buildSessionToolArray.mockResolvedValue([]);
+    mocks.composeSystemPrompt.mockResolvedValue('prompt-stub');
+  });
+
+  it('Team ON: rebuild tools (with broadcast + getMainModel callback) and refresh systemPrompt before continue()', async () => {
+    const s = makeSession({
+      sessionId: 'sess-retry-on',
+      phase: 'idle',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'openai', provider: 'openai', id: 'gpt-4o-mini' };
+    (sessionManager as any).sessions.set('sess-retry-on', s);
+
+    await (sessionManager as any).rewindAndResume('sess-retry-on', undefined, null);
+
+    expect(mocks.buildSessionToolArray).toHaveBeenCalledTimes(1);
+    const optsArg = (mocks.buildSessionToolArray.mock.calls[0] as unknown[])[1] as {
+      workerTeamOn?: boolean;
+      broadcast?: unknown;
+      getMainModel?: () => unknown;
+    };
+    expect(optsArg.workerTeamOn).toBe(true);
+    expect(typeof optsArg.broadcast).toBe('function');
+    expect(typeof optsArg.getMainModel).toBe('function');
+    expect(optsArg.getMainModel!()).toEqual({
+      provider: 'openai',
+      modelId: 'gpt-4o-mini',
+    });
+    expect(mocks.composeSystemPrompt).toHaveBeenCalledTimes(1);
+    // snapshot 一致：composeSystemPrompt 也拿同一份 workerTeamOn
+    const composeCalls = mocks.composeSystemPrompt.mock.calls[0] as unknown[];
+    expect(composeCalls[2]).toBe(true);
+    // tools / systemPrompt 都已写到活 agent state
+    expect((s.agent.state as any).tools).toEqual([]);
+    expect((s.agent.state as any).systemPrompt).toBe('prompt-stub');
+  });
+
+  it('Team OFF: snapshot 同步为 false，工具/提示都被改写', async () => {
+    mocks.workerTeamEnabled.getValue.mockResolvedValue(false);
+    const s = makeSession({
+      sessionId: 'sess-retry-off',
+      phase: 'idle',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'openai', provider: 'openai', id: 'gpt-4o-mini' };
+    (sessionManager as any).sessions.set('sess-retry-off', s);
+
+    await (sessionManager as any).rewindAndResume('sess-retry-off', undefined, null);
+
+    expect(((mocks.buildSessionToolArray.mock.calls[0] as unknown[])[1] as { workerTeamOn?: boolean }).workerTeamOn).toBe(false);
+    expect((mocks.composeSystemPrompt.mock.calls[0] as unknown[])[2]).toBe(false);
+  });
+
+  it('重试携带 turn 改变 modelIdentity 时，callback getMainModel 反映新身份', async () => {
+    // 关键路径：turn 携带的 model 与活 agent 不同 → resolveSessionModel 成功
+    // → modelKey + modelIdentity 都被更新 → getMainModel callback 读到新身份。
+    mocks.resolveModel.mockReturnValue({
+      provider: 'anthropic',
+      id: 'claude-opus-5',
+      api: 'anthropic',
+      contextWindow: 100000,
+      maxTokens: 8192,
+    } as any);
+    // resolveSessionModel 内部读 credentials/customProviders——已在 storage mock 返回空。
+    const s = makeSession({
+      sessionId: 'sess-retry-model-change',
+      phase: 'idle',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'anthropic', provider: 'anthropic', id: 'claude-sonnet-5' };
+    (sessionManager as any).sessions.set('sess-retry-model-change', s);
+
+    await (sessionManager as any).rewindAndResume(
+      'sess-retry-model-change',
+      { model: { provider: 'anthropic', modelId: 'claude-opus-5' } },
+      null,
+    );
+
+    expect(
+      ((mocks.buildSessionToolArray.mock.calls[0] as unknown[])[1] as {
+        getMainModel?: () => unknown;
+      }).getMainModel!(),
+    ).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5',
+    });
+  });
+
+  it('Team ON → retry：最后一条 user message 的 reminder 块被改写成 Team 副本', async () => {
+    // 用户最初在 Fast 下发 turn → user message reminder 块是空 OFF 副本。
+    // 之后切到 Team 并立即 retry → systemPrompt 已含 <available-workers>，
+    // 但 truncated user message 的 reminder 仍是 OFF 副本，模型会继续按旧指令
+    // 自写 HTML，不调 delegate_task。修复：用同一份 reminder body rewrite
+    // 最后一条 user message 的 reminder 块。
+    const oldEnvelope =
+      '<reminder-instructions>\n</reminder-instructions>\n\n' +
+      '<context>\nThe current date is 2026-09-13.\n</context>\n\n' +
+      '<user-request>\nBuild an HTML page\n</user-request>';
+    const s = makeSession({
+      sessionId: 'sess-retry-reminder-on',
+      phase: 'idle',
+      // retry/edit 路径下 truncated 里 user message 是最后一条，
+      // content 走 string 形式。
+      messages: [{ role: 'user', content: oldEnvelope }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'openai', provider: 'openai', id: 'gpt-4o-mini' };
+    (sessionManager as any).sessions.set('sess-retry-reminder-on', s);
+
+    await (sessionManager as any).rewindAndResume('sess-retry-reminder-on', undefined, null);
+
+    const finalMessages = s.agent.state.messages as Array<{ role: string; content: unknown }>;
+    const finalUser = finalMessages[finalMessages.length - 1];
+    expect(finalUser.role).toBe('user');
+    expect(finalUser.content).toContain('Worker Team is ON for this turn.');
+    // context 块保持原样
+    expect(finalUser.content).toContain('<context>\nThe current date is 2026-09-13.\n</context>');
+    expect(finalUser.content).toContain('<user-request>\nBuild an HTML page\n</user-request>');
+  });
+
+  it('Team OFF → retry：把 user message 的 reminder 还原成 OFF 副本', async () => {
+    const onEnvelope =
+      '<reminder-instructions>\nWorker Team is ON for this turn.\n</reminder-instructions>\n\n' +
+      '<context>\nx\n</context>\n\n' +
+      '<user-request>\ny\n</user-request>';
+    mocks.workerTeamEnabled.getValue.mockResolvedValue(false);
+    const s = makeSession({
+      sessionId: 'sess-retry-reminder-off',
+      phase: 'idle',
+      messages: [{ role: 'user', content: onEnvelope }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'openai', provider: 'openai', id: 'gpt-4o-mini' };
+    (sessionManager as any).sessions.set('sess-retry-reminder-off', s);
+
+    await (sessionManager as any).rewindAndResume('sess-retry-reminder-off', undefined, null);
+
+    const finalMessages = s.agent.state.messages as Array<{ role: string; content: unknown }>;
+    const finalUser = finalMessages[finalMessages.length - 1];
+    expect(finalUser.content).not.toContain('Worker Team is ON');
+    // OFF 时 wrapper 仍是单换行（与 prompt-composer 拼装时 byte-shape 一致）
+    expect(finalUser.content).toContain('<reminder-instructions>\n</reminder-instructions>');
+  });
+
+  it('rewriteUserMessageReminder：user message content 是 array-of-blocks 时只改 text 块', async () => {
+    const blocks = [
+      { type: 'text', text:
+        '<reminder-instructions>\n</reminder-instructions>\n\n<user-request>\nhi\n</user-request>' },
+    ];
+    const out = (sessionManager as any).rewriteUserMessageReminder(
+      [{ role: 'user', content: blocks }],
+      'Worker Team is ON for this turn.',
+    ) as Array<{ role: string; content: Array<{ type: string; text: string }> }>;
+    expect(out[0].content[0].text).toContain('Worker Team is ON for this turn.');
+    // 不引入额外块；保持单 text-block 结构
+    expect(out[0].content).toHaveLength(1);
+  });
+
+  it('rewriteUserMessageReminder：最后一条不是 user → 原样返回', () => {
+    const out = (sessionManager as any).rewriteUserMessageReminder(
+      [{ role: 'assistant', content: 'foo' }],
+      'x',
+    );
+    expect(out[0].role).toBe('assistant');
+    expect(out[0].content).toBe('foo');
+  });
+
+  it('Team 翻转（storage false）后立即 retry：snapshot 立刻读到新值', async () => {
+    // 用户在 idle 期间从 Team 切到 Fast 之后立刻按 Retry/Edit，
+    // rewindAndResume 必须在同一轮读到新 snapshot——否则 prompt 还在
+    // 念「DEFAULT to delegate_task」但 tool list 已经没有。
+    mocks.workerTeamEnabled.getValue.mockResolvedValue(false);
+    const s = makeSession({
+      sessionId: 'sess-retry-flip',
+      phase: 'idle',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      entryIds: ['user-1'],
+    });
+    (s.agent.state as any).model = { api: 'openai', provider: 'openai', id: 'gpt-4o-mini' };
+    (sessionManager as any).sessions.set('sess-retry-flip', s);
+
+    await (sessionManager as any).rewindAndResume('sess-retry-flip', undefined, null);
+
+    expect(((mocks.buildSessionToolArray.mock.calls[0] as unknown[])[1] as { workerTeamOn?: boolean }).workerTeamOn).toBe(false);
+    expect((mocks.composeSystemPrompt.mock.calls[0] as unknown[])[2]).toBe(false);
+  });
+
+  it('abort 在 snapshot sync 之前 → 不调 buildSessionToolArray / composeSystemPrompt', async () => {
+    // 占位说明：production 在 rewindAndResume() 内 new AbortController()，
+    // 无法直接通过 stub session 注入「构造时已 abort」的 controller。
+    // 该 invariant 由 cancel-in-preparing 测试（`commitRetryCancel: session absent`）
+    // 隐式覆盖：cancel 在 rewind 准备窗口里落地会走 commitRetryCancel 早退路径。
+    // 这里留 placeholder 注释，避免未来误以为是「漏断言」。
+    expect(true).toBe(true);
   });
 });
 

@@ -71,6 +71,7 @@ import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 // `VfsScopeError('Invalid sessionId...')` 然后被 tool 翻成「outside the
 // session workspace」错误，让 path-gate 测例假阳性。必须用合规 UUID。
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
+const MAIN_MODEL = { provider: 'anthropic', modelId: 'claude-opus-5' } as const;
 
 describe('createDelegateTaskTool — delegate_task 工具', () => {
   beforeEach(() => {
@@ -213,9 +214,13 @@ describe('createDelegateTaskTool — delegate_task 工具', () => {
     // `/workspaces/<sessionId>/...` 绝对路径再传给 runner —— worker
     // 没有 session context，不 resolve 就只能猜根目录写到 `/content.json`
     // （E2E 实测 bug）。asserts use the real sessionId used by the tool.
+    const toolWithMainModel = createDelegateTaskTool({
+      sessionId: SESSION_ID,
+      getMainModel: () => MAIN_MODEL,
+    });
     const absoluteInput = `/workspaces/${SESSION_ID}/a.md`;
     const absoluteOutput = `/workspaces/${SESSION_ID}/b.md`;
-    await tool.execute('call-9', {
+    await toolWithMainModel.execute('call-9', {
       task: 'do thing',
       role: 'content_writer',
       input_files: ['a.md'],
@@ -232,7 +237,7 @@ describe('createDelegateTaskTool — delegate_task 工具', () => {
     expect(call.antiPatterns).toEqual(['Do not fabricate quotes']);
     expect(call.enableRetry).toBe(true);
     expect(call.sessionId).toBe(SESSION_ID);
-    expect(call.mainModel).toBeNull();
+    expect(call.mainModel).toEqual(MAIN_MODEL);
   });
 
   it('input_files 已是 session 根下的绝对路径 → 幂等不双 prefix', async () => {
@@ -409,6 +414,20 @@ describe('Subtask 1.2 — delegate_task batch dispatch', () => {
       provider: 'anthropic',
       modelId: 'claude-sonnet-4-5',
     });
+  });
+
+  it('batch path 把主会话模型透传给 runBatchWorker，供 role 未配置时兜底', async () => {
+    const toolWithMainModel = createDelegateTaskTool({
+      sessionId: SESSION_ID,
+      getMainModel: () => MAIN_MODEL,
+    });
+    await toolWithMainModel.execute('call-batch-main-model', {
+      tasks: [
+        { task: 'write a.md', role: 'content_writer', output_path: 'a.md' },
+      ],
+    } as never, undefined);
+    const call = (runBatchWorker as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(call.mainModel).toEqual(MAIN_MODEL);
   });
 
   it('relative output_path / input_files resolve 成绝对路径再传给 runBatchWorker', async () => {

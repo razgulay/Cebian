@@ -26,7 +26,16 @@ import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
 import { debugLog, withSession } from '@/lib/debug/log';
 import type { ServerMessage } from '@/lib/ipc/protocol';
-import { workerTeamEnabled } from '@/lib/persistence/storage';
+import { workerTeamEnabled, type ModelIdentity } from '@/lib/persistence/storage';
+
+interface SessionToolOptions {
+  /** 会话维度的广播通道，仅由 background 提供（见 `createSessionTools`）。 */
+  broadcast?: (msg: ServerMessage) => void;
+  /** 本轮已读取的 Team 快照；缺省时由 builder 自行读取 storage。 */
+  workerTeamOn?: boolean;
+  /** 当前主会话模型，供 worker 未配置 per-role model 时继承。 */
+  getMainModel?: () => ModelIdentity | null;
+}
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
@@ -118,12 +127,14 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
-  /** 会话维度的广播通道，仅由 background 提供（见 `createSessionTools`）。
-   *  透传给 `createDelegateTaskTool` 让 worker live stream 走它而非 lib 直接
-   *  依赖 entrypoints 的 `broadcastToViewers`（`lib-no-up-runtime`）。缺省 =
-   *  无实时流，worker 仍正常跑。 */
-  broadcast?: (msg: ServerMessage) => void,
+  /** 兼容旧调用：直接传 broadcast callback；新调用传 options 以携带 Team 快照和主模型。 */
+  optionsOrBroadcast?: SessionToolOptions | ((msg: ServerMessage) => void),
 ): Promise<AgentTool<any>[]> {
+  const options: SessionToolOptions = typeof optionsOrBroadcast === 'function'
+    ? { broadcast: optionsOrBroadcast }
+    : optionsOrBroadcast ?? {};
+  const { broadcast, getMainModel } = options;
+  const teamOn = options.workerTeamOn ?? (await workerTeamEnabled.getValue());
   // Cold-start profiling: MCP discovery and the lazy delegate_dom import are
   // the two async paths in this function. Log each so we can see which one
   // dominates when `createSessionTools` is slow on a fresh session. Pure
@@ -154,13 +165,13 @@ export async function buildSessionToolArray(
   // L1 block is also omitted from the system prompt (`prompt-composer.ts`).
   const delegateTaskStart = Date.now();
   const { createDelegateTaskTool } = await import('./delegate-task');
-  const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId, broadcast });
+  const delegateTaskTool = createDelegateTaskTool({ sessionId: ctx.sessionId, broadcast, getMainModel });
   debugLog.info('tool', 'tool:init:delegate-task',
     withSession({
       durationMs: Date.now() - delegateTaskStart,
-      workerTeamEnabled: await workerTeamEnabled.getValue(),
+      workerTeamEnabled: teamOn,
     }, ctx.sessionId));
-  if (await workerTeamEnabled.getValue()) {
+  if (teamOn) {
     base.push(delegateTaskTool);
   }
 
@@ -195,9 +206,8 @@ export async function buildSessionToolArray(
  */
 export async function createSessionTools(
   sessionId: string,
-  /** 见 `buildSessionToolArray` 的同名参数：由 background 注入的会话广播通道，
-   *  透传给 `delegate_task` 做 worker live stream。缺省 = 无实时流。 */
-  broadcast?: (msg: ServerMessage) => void,
+  /** 见 `buildSessionToolArray` 的同名参数：由 background 注入的会话 options。 */
+  optionsOrBroadcast?: SessionToolOptions | ((msg: ServerMessage) => void),
 ): Promise<{
   tools: AgentTool<any>[];
   ctx: SessionToolContext;
@@ -209,7 +219,7 @@ export async function createSessionTools(
   const { tool: askUserTool, bridge: askUserBridge } = createSessionAskUserTool();
   ctx.register(TOOL_ASK_USER, askUserBridge, askUserTool);
 
-  const tools = await buildSessionToolArray(ctx, broadcast);
+  const tools = await buildSessionToolArray(ctx, optionsOrBroadcast);
 
   // Final cold-start total. Pairs with the per-phase markers in
   // buildSessionToolArray so we can attribute the time to MCP discovery vs
