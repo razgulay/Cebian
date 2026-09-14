@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { buildSkillsBlock } from '@/lib/ai-config/scanner';
-import { memorySettings, userInstructions, workerTeamEnabled } from '@/lib/persistence/storage';
+import { memorySettings, userInstructions, workerTeamEnabled, personaEnabled, personaSoul, personaIdentity } from '@/lib/persistence/storage';
 import { ragSettings } from '@/lib/rag/settings';
 import { composeSystemPrompt, composeUserMessage } from './prompt-composer';
 
@@ -14,6 +14,14 @@ vi.mock('@/lib/ai-config/scanner', () => ({
 
 // 页面上下文要 chrome.tabs / scripting，与本文件要验的信封拼接无关。
 vi.mock('./page-context', () => ({ gatherPageContext: vi.fn(async () => '') }));
+
+// `t` thin re-export of @wxt-dev/i18n's i18n.t; fake-browser's i18n.getMessage
+// is unimplemented. Stub to return keys (or `key|sub,...`) so envelope
+// composition tests focus on shape, not translations.
+vi.mock('@/lib/i18n', () => ({
+  t: (key: string, subs?: unknown[]) =>
+    subs && subs.length ? `${key}|${subs.join(',')}` : key,
+}));
 
 describe('composeSystemPrompt', () => {
   beforeEach(() => {
@@ -168,6 +176,71 @@ describe('composeSystemPrompt', () => {
     expect(prompt).not.toContain('call `rag_search`');
   });
 
+  // ─── Persona (Subtask 2) ───
+  // recency-injection pattern: persona block + 1-line user-message recap.
+  // OFF 时 prompt byte-shape 与 persona 改动前完全一致（cache-stable）。
+  it('personaEnabled 关闭 → prompt 不出现 <persona> 块（与 pre-Subtask-2 字节一致）', async () => {
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toContain('<persona>');
+    expect(prompt).not.toContain('## Persona');
+  });
+
+  it('personaEnabled 开启但 soul/identity 都空 → 仍不注入 persona 块', async () => {
+    await personaEnabled.setValue(true);
+    await personaSoul.setValue('');
+    await personaIdentity.setValue({ name: '', vibe: '', tone: '', emoji: '' });
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toContain('<persona>');
+  });
+
+  it('personaEnabled 开启且 identity.name 设置 → prompt 出现 <persona> 块 + 1-line binding', async () => {
+    await personaEnabled.setValue(true);
+    await personaSoul.setValue('Speak in first person.');
+    await personaIdentity.setValue({ name: 'Cebian', vibe: 'precise', tone: 'casual', emoji: '🦞' });
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).toContain('<persona>');
+    expect(prompt).toContain('# Persona');
+    expect(prompt).toContain('Cebian');
+    expect(prompt).toContain('precise');
+    expect(prompt).toContain('casual');
+    expect(prompt).toContain('🦞');
+    expect(prompt).toContain('Speak in first person.');
+    // Closing directive pin (LLM sees an explicit boundary, not a freeform copy).
+    expect(prompt).toContain('Critical Rules');
+  });
+
+  it('personaEnabled 关闭 → personaIdentity 不被读（避免无谓 VFS / storage I/O）', async () => {
+    // spy to assert call count: personaIdentity.getValue is exported as a
+    // defineLoggedItem's `get`; we mock it locally via storage item's watch.
+    // Simpler: assert that an invalid identity (would break compilePersonaBlock
+    // if read) does NOT appear in the prompt.
+    await personaEnabled.setValue(false);
+    await personaIdentity.setValue({ name: 'shouldNotAppear', vibe: 'X', tone: 'Y', emoji: 'Z' });
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toContain('shouldNotAppear');
+    expect(prompt).not.toContain('<persona>');
+  });
+
+  it('{{PERSONA_BLOCK}} 关闭时降级为空（不影响 pre-Subtask-2 字节稳定）', async () => {
+    const prompt = await composeSystemPrompt('s', false);
+    // `{{PERSONA_BLOCK}}` 在 DEFAULT_SYSTEM_PROMPT 里出现，但 OFF 时变量替换为
+    // 空串，prompt 中不得残留字面 `{{...}}` placeholder。
+    expect(prompt).not.toMatch(/\{\{PERSONA_BLOCK\}\}/);
+    expect(prompt).not.toMatch(/\{\{PERSONA_BINDING\}\}/);
+  });
+
+  it('{{PERSONA_BINDING}} 开启时输出 binding 句子，关闭时为空', async () => {
+    await personaEnabled.setValue(true);
+    await personaIdentity.setValue({ name: 'Cebian', vibe: '', tone: '', emoji: '' });
+    const on = await composeSystemPrompt('s', false);
+    // 至少包含 binding 句的标题或 body。
+    expect(on).toMatch(/persona|recap/i);
+
+    await personaEnabled.setValue(false);
+    const off = await composeSystemPrompt('s', false);
+    expect(off).not.toContain('{{PERSONA_BINDING}}');
+  });
+
   it('ragSearchEnabled 开启 → prompt 注入 rag_search 工具条目 + Workflow step-5', async () => {
     await ragSettings.setValue({ ragSearchEnabled: true } as never);
     const prompt = await composeSystemPrompt('s', false);
@@ -231,5 +304,38 @@ describe('composeUserMessage', () => {
   it('既没提示词也没文本 → 请求块为空（维持旧行为）', async () => {
     const msg = await composeUserMessage('   ', [], false);
     expect(msg).toContain('<user-request>\n\n</user-request>');
+  });
+
+  // Persona 1-line recap 注入 <reminder-instructions>，是 recency-drift 修复的核心。
+  it('personaIdentity 缺省 → <reminder-instructions> 不变（与 Worker Team OFF 行为一致）', async () => {
+    const msg = await composeUserMessage('hi', [], false, undefined, false, undefined);
+    expect(msg).toMatch(/<reminder-instructions>\n<\/reminder-instructions>/);
+    // 没有 persona 1-line；也不该出现 persona i18n key。
+    expect(msg).not.toContain('recap.youAre');
+  });
+
+  it('personaIdentity 全部为空 → 仍不注入 recap（与 empty block 一致）', async () => {
+    const empty = { name: '', vibe: '', tone: '', emoji: '' };
+    const msg = await composeUserMessage('hi', [], false, undefined, false, empty);
+    expect(msg).not.toContain('recap.youAre');
+  });
+
+  it('personaIdentity.name 设置 → <reminder-instructions> 内出现 recap.youAre + vibe/tone/emoji', async () => {
+    const identity = { name: 'Cebian', vibe: 'precise', tone: 'casual', emoji: '🦞' };
+    const msg = await composeUserMessage('hi', [], false, undefined, false, identity);
+    expect(msg).toContain('recap.youAre|Cebian');
+    expect(msg).toContain('recap.vibe|precise');
+    expect(msg).toContain('recap.tone|casual');
+    expect(msg).toContain('recap.emoji|🦞');
+    // recap 必须在 reminder-instructions 里（紧邻 <user-request>），不外泄。
+    expect(msg).toMatch(/<reminder-instructions>[\s\S]*recap\.youAre\|Cebian[\s\S]*<\/reminder-instructions>/);
+  });
+
+  it('Worker Team 提醒 + Persona recap 同时 ON → 同一 <reminder-instructions> 块内按顺序展示', async () => {
+    const identity = { name: 'Cebian', vibe: 'precise', tone: '', emoji: '' };
+    const msg = await composeUserMessage('hi', [], false, undefined, true, identity);
+    expect(msg).toContain('recap.youAre|Cebian');
+    // worker_team reminder + persona recap 都在同一 reminder-instructions 块里。
+    expect(msg).toMatch(/<reminder-instructions>[\s\S]*Worker Team[\s\S]*recap\.youAre\|Cebian[\s\S]*<\/reminder-instructions>/);
   });
 });

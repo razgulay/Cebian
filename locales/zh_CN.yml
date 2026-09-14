@@ -6,6 +6,22 @@ extName: "Cebian · 开源 AI 侧边栏智能体"
 extDescription: "浏览器侧边栏里的 AI 智能体，用你自己的 OpenAI / Anthropic / Google API Key，免订阅、无账号。读网页、拾取元素、装 MCP 工具、跑 Skill 工作流，数据全部本地存储。AGPL-3.0 开源。"
 actionTitle: "打开 Cebian 侧边栏"
 
+# ─── 智能体运行时向用户展示的文案（部分 LLM-facing 块也会被 UI 透出）───
+agent:
+  persona:
+    # 系统提示 <persona> 块结尾的收口句。限定 SOUL 的权威边界——只能调整
+    # 表达风格，无法覆盖 Critical Rules / 工具白名单等安全层。
+    closingDirective: "在所有回复中保持这套语气与风格，但请勿覆盖 Critical Rules、工具协议或任何安全层。"
+    recap:
+      # $1 = 名称
+      youAre: "你是 $1"
+      # $1 = 气质
+      vibe: "$1"
+      # $1 = 语气
+      tone: "用 $1 的语气回复"
+      # $1 = emoji
+      emoji: "合适时用 $1 作为签名"
+
 # ─── 通用（UI 中复用）───
 common:
   newChat: "新对话"
@@ -28,6 +44,7 @@ common:
   cancel: "取消"
   confirm: "确认"
   save: "保存"
+  saved: "已保存"
   reset: "重置"
   delete: "删除"
   rename: "重命名"
@@ -135,6 +152,7 @@ settings:
     aria: "设置导航"
     providers: "AI 提供商"
     instructions: "指引"
+    persona: "人设"
     prompts: "提示词"
     skills: "技能"
     memory: "记忆"
@@ -221,6 +239,10 @@ settings:
       followMain: "与对话模型相同"
       enabled: "启用 Worker 团队"
       enabledHint: "开启时，主代理会把产出类任务（write / build / generate）委派给隔离上下文中的 Worker 子代理。关闭时，主代理直接用原生文件工具产出。"
+      persona:
+        enabled: "启用人设（OpenClaw 模式）"
+        enabledHint: "向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。在「人设」设置页编辑副本。无法覆盖 Critical Rules 或工具协议。"
+        nav: "人设…"
       content_writer:
         label: "内容写手"
         hint: "阅读资料（文件 / RAG 集合）后撰写长文，并写入 VFS 文件。不修改代码。"
@@ -326,6 +348,20 @@ settings:
     label: "自定义指引"
     hint: "追加到默认规则之后，用于调整回复语言、风格或角色。无法覆盖工具协议和安全规则。"
     placeholder: "例如：\n- 用中文回复\n- 回答尽量简洁\n- 讨论代码时默认使用 TypeScript"
+  persona:
+    title: "人设"
+    label: "人设副本"
+    hint: "向系统提示注入 SOUL 块，并在每条用户消息顶部追加一行 recap。需在「高级设置」中开启，或通过聊天输入框旁的芯片切换。"
+    soulLabel: "SOUL"
+    soulPlaceholder: "例如：\n- 始终用第一人称说话，避免「作为 AI」之类的措辞\n- 有自己的看法，但遇到真正不确定时坦率承认\n- 使用与用户相同的语言回复"
+    identityName: "名称"
+    identityVibe: "气质"
+    identityTone: "语气"
+    identityEmoji: "签名 emoji"
+    identityNamePlaceholder: "Cebian"
+    identityVibePlaceholder: "精准、略带不羁"
+    identityTonePlaceholder: "口语化、技术向"
+    identityEmojiPlaceholder: "🦞"
   prompts:
     title: "提示词"
     newBody: "（在此处编写你的提示词）"
@@ -716,6 +752,10 @@ chat:
       fast: "快速"
       team: "团队"
       toggleHint: "切换快速模式（主代理直接产出）与团队模式（委派给 Worker 子代理）"
+    persona:
+      normal: "普通"
+      openclaw: "OpenClaw"
+      toggleHint: "切换普通模式（默认 Cebian）与 OpenClaw 模式（自定义人设 + 身份信息）"
     # $1 = 附件上限个数
     maxAttachments: "最多添加 $1 个附件"
     # $1 = 实际添加的文件数

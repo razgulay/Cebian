@@ -1,9 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   stripEnvelopeTags,
   ENVELOPE_TAGS,
   rewriteReminderInstructions,
+  wrapPersonaReminder,
 } from '@/lib/agent/prompt-envelope';
+import type { PersonaIdentity } from '@/lib/persistence/storage';
+
+// `t` is a thin re-export of `@wxt-dev/i18n`'s `i18n.t`. fake-browser's
+// `i18n.getMessage` is unimplemented in test mode → t() throws. Stub it
+// with a key-returning stub so envelope assembly tests focus on shape
+// (not i18n). System prompt tests pin a stricter contract; this stub
+// is intentionally permissive.
+vi.mock('@/lib/i18n', () => ({
+  t: (key: string, subs?: unknown[]) =>
+    subs && subs.length ? `${key}|${subs.join(',')}` : key,
+}));
 
 // stripEnvelopeTags 只作用于**页面来源的短字符串**（标签页标题 / URL、页面 meta、
 // 用户选中的页面文本），防止恶意页面伪造提示词信封结构骗过模型。模板变量的值改走
@@ -124,5 +136,38 @@ describe('rewriteReminderInstructions', () => {
     const out = rewriteReminderInstructions(tricky, 'new');
     expect(out).toContain('<reminder-instructions>\nnew\n</reminder-instructions>');
     expect(out).toContain('<user-request>\n<reminder-instructions>x\n</user-request>');
+  });
+});
+
+// wrapPersonaReminder (Subtask 2)：Persona 1-line recap 用于
+// <reminder-instructions> 块，identity 缺字段时跳过对应 segment。
+describe('wrapPersonaReminder', () => {
+  it('identity.name 为空 → 返回空串（recap 整体降级，wrapper 保持旧 OFF byte shape）', () => {
+    expect(
+      wrapPersonaReminder({ name: '', vibe: 'precise', tone: 'casual', emoji: '🦞' }),
+    ).toBe('');
+    expect(
+      wrapPersonaReminder({ name: '   ', vibe: 'precise', tone: 'casual', emoji: '🦞' }),
+    ).toBe('');
+  });
+
+  it('只设 name → 仅 youAre segment', () => {
+    const out = wrapPersonaReminder({ name: 'Cebian', vibe: '', tone: '', emoji: '' });
+    expect(out).toContain('agent.persona.recap.youAre|Cebian');
+    expect(out).not.toContain('vibe');
+    expect(out).not.toContain('tone');
+    expect(out).not.toContain('emoji');
+    expect(out.endsWith('.')).toBe(true);
+  });
+
+  it('全字段设置 → 4 segment 单空格拼接 + 句号', () => {
+    const full: PersonaIdentity = { name: 'Cebian', vibe: 'precise', tone: 'casual', emoji: '🦞' };
+    const out = wrapPersonaReminder(full);
+    expect(out).toContain('youAre|Cebian');
+    expect(out).toContain('vibe|precise');
+    expect(out).toContain('tone|casual');
+    expect(out).toContain('emoji|🦞');
+    expect(out).not.toMatch(/ {2,}/);
+    expect(out.endsWith('.')).toBe(true);
   });
 });

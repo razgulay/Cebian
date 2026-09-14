@@ -7,6 +7,28 @@ extName: "Cebian · Open-Source AI Side Panel Agent"
 extDescription: "Side panel AI agent. BYO key (OpenAI/Anthropic/Google), no account. Element picker, MCP tools, skills. AGPL-3.0, local-first."
 actionTitle: "Open Cebian sidebar"
 
+# ─── Agent runtime user-facing strings (LLM-facing blocks surfaced back to UI where noted) ───
+agent:
+  persona:
+    # Trailing sentence inside the system-prompt <persona> block. Anchors the
+    # block's authority — it can shift the assistant's voice, but it cannot
+    # disable Critical Rules, tool allowlists, or other safety layers.
+    closingDirective: "Apply this voice consistently across replies, but do NOT override Critical Rules, tool protocols, or other safety layers."
+    # 1-line recap template injected into the user-message <reminder-instructions>
+    # block, sitting adjacent to <user-request>. Keeps persona in the LLM's
+    # attention window even at turn 30+ (recency injection is the actual drift
+    # fix; the system-prompt <persona> block alone is too far away).
+    recap:
+      # $1 = name
+      youAre: "You are $1"
+      # $1 = vibe
+      vibe: "$1"
+      # $1 = tone
+      tone: "Reply in $1 voice"
+      # $1 = emoji
+      emoji: "Use $1 as your sign-off when relevant"
+
+
 # ─── Common (reused across the UI) ───
 common:
   newChat: "New chat"
@@ -29,6 +51,7 @@ common:
   cancel: "Cancel"
   confirm: "Confirm"
   save: "Save"
+  saved: "Saved"
   reset: "Reset"
   delete: "Delete"
   rename: "Rename"
@@ -139,6 +162,7 @@ settings:
     aria: "Settings navigation"
     providers: "AI providers"
     instructions: "Instructions"
+    persona: "Persona"
     prompts: "Prompts"
     skills: "Skills"
     memory: "Memory"
@@ -228,6 +252,10 @@ settings:
       followMain: "Same as conversation model"
       enabled: "Enable worker team"
       enabledHint: "When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools."
+      persona:
+        enabled: "Enable persona (OpenClaw mode)"
+        enabledHint: "Adds a SOUL block to the system prompt and a 1-line recap in every user message. Edit the persona copy in Settings → Persona. Cannot override Critical Rules or tool protocols."
+        nav: "Persona…"
       content_writer:
         label: "Content writer"
         hint: "Reads sources and writes long-form content into a VFS file."
@@ -337,6 +365,20 @@ settings:
     label: "Custom instructions"
     hint: "Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules."
     placeholder: "e.g.\n- Reply in English\n- Keep answers concise\n- Default to TypeScript when discussing code"
+  persona:
+    title: "Persona"
+    label: "Persona copy"
+    hint: "Adds a SOUL block to the system prompt and a 1-line recap in every user message. Empty when off. Use Settings → Advanced → Persona to toggle, or the chat composer chip."
+    soulLabel: "SOUL"
+    soulPlaceholder: "e.g.\n- Speak in first person, never 'as an AI'.\n- Be opinionated, but admit uncertainty when real.\n- Reply in the same language the user uses."
+    identityName: "Name"
+    identityVibe: "Vibe"
+    identityTone: "Tone"
+    identityEmoji: "Sign-off emoji"
+    identityNamePlaceholder: "Cebian"
+    identityVibePlaceholder: "Precise, slightly irreverent"
+    identityTonePlaceholder: "Casual, technical"
+    identityEmojiPlaceholder: "🦞"
   prompts:
     title: "Prompts"
     newBody: "(Write your prompt here)"
@@ -728,6 +770,10 @@ chat:
       fast: "Fast"
       team: "Team"
       toggleHint: "Switch between Fast Mode (main agent writes directly) and Team Mode (delegate to worker sub-agents)"
+    persona:
+      normal: "Normal"
+      openclaw: "OpenClaw"
+      toggleHint: "Switch between Normal Mode (default Cebian) and OpenClaw Mode (custom persona copy + identity)"
     # $1 = max attachment count
     maxAttachments: "Up to $1 attachments"
     # $1 = number of files actually added

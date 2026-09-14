@@ -71,7 +71,7 @@ import {
 } from '@/lib/agent/tool-permissions';
 import type { BroadcastMessage, TurnSettings } from '@/lib/ipc/protocol';
 import { replaceUserText, truncateForRetry, sanitizeAgentMessages, extractUserText, getAssistantText } from '@/lib/agent/message-helpers';
-import { rewriteReminderInstructions } from '@/lib/agent/prompt-envelope';
+import { rewriteReminderInstructions, wrapPersonaReminder } from '@/lib/agent/prompt-envelope';
 import { createWorkerTeamRoutingHook } from '@/lib/agent/worker-team-routing';
 import {
   providerCredentials,
@@ -82,6 +82,9 @@ import {
   userInstructions as userInstructionsStorage,
   memorySettings,
   workerTeamEnabled,
+  personaEnabled,
+  personaSoul,
+  personaIdentity,
   type ModelIdentity,
   type ThinkingLevel,
 } from '@/lib/persistence/storage';
@@ -1449,11 +1452,18 @@ class SessionManager {
 
     // 本轮开关的单一快照：memory 同时喂给 user/system prompt；Team 同时喂给
     // tool array / system prompt / user reminder，避免一轮内 prompt 说能用 worker
-    // 但 tools 里还没有 delegate_task（或反之）。
-    const [memoryEnabled, workerTeamOn] = await Promise.all([
+    // 但 tools 里还没有 delegate_task（或反之）。Persona 与 Team 同源：单一 snapshot
+    // 喂给 system prompt block + user message reminder，确保两侧 byte 一致。
+    const [memoryEnabled, workerTeamOn, personaOn] = await Promise.all([
       memorySettings.getValue().then((settings) => settings.enabled),
       workerTeamEnabled.getValue(),
+      personaEnabled.getValue(),
     ]);
+    // Persona identity 只在 personaOn 时读（避免空 identity 进 helper 触发 noisy
+    // 空字符串处理；OFF 时完全跳读，cache 也更稳定）。
+    const personaIdentityValue = personaOn
+      ? await personaIdentity.getValue()
+      : { name: '', vibe: '', tone: '', emoji: '' };
     const tools = await buildSessionToolArray(agentSession.toolCtx, {
       broadcast: (msg) => broadcastToViewers(sessionId, msg),
       workerTeamOn,
@@ -1464,7 +1474,7 @@ class SessionManager {
       return;
     }
     agentSession.agent.state.tools = tools;
-    const enriched = await composeUserMessage(text, attachments, memoryEnabled, slashPrompt, workerTeamOn);
+    const enriched = await composeUserMessage(text, attachments, memoryEnabled, slashPrompt, workerTeamOn, personaIdentityValue);
     const images = extractImages(attachments);
     trace.mark('bg:prompt_composed', { textLen: enriched.length, imgCount: images.length });
 
@@ -1482,7 +1492,7 @@ class SessionManager {
       return;
     }
 
-    const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled, workerTeamOn);
+    const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled, workerTeamOn, personaOn);
     if (this.sessions.get(sessionId) !== agentSession) {
       this.releaseTrace(sessionId);
       return;
@@ -2247,13 +2257,17 @@ class SessionManager {
       // 后立即按 Retry/Edit，prompt 里还在写「DEFAULT to delegate_task」但 tool list
       // 已经看不到 `delegate_task`（或反之），LLM 幻觉调工具 / 不知何时用 worker。
       const workerTeamOn = await workerTeamEnabled.getValue();
+      const personaOn = await personaEnabled.getValue();
+      const personaIdentityValue = personaOn
+        ? await personaIdentity.getValue()
+        : { name: '', vibe: '', tone: '', emoji: '' };
       const refreshedTools = await buildSessionToolArray(agentSession.toolCtx, {
         broadcast: (msg) => broadcastToViewers(sessionId, msg),
         workerTeamOn,
         getMainModel: () => agentSession.modelIdentity,
       });
       agentSession.agent.state.tools = refreshedTools;
-      const refreshedSystemPrompt = await composeSystemPrompt(sessionId, undefined, workerTeamOn);
+      const refreshedSystemPrompt = await composeSystemPrompt(sessionId, undefined, workerTeamOn, personaOn);
       agentSession.agent.state.systemPrompt = refreshedSystemPrompt;
 
       // 同步最后一条 user message 的 reminder 块：用户原 turn 是用当时的 Team/Fast
@@ -2267,7 +2281,10 @@ class SessionManager {
       // state.messages——让「成功路径写新 reminder + 失败路径回滚到新 reminder」
       // 行为一致；后者避免 agent 看到「系统 prompt 已更新但 user message 还是
       // 旧 reminder」这种半新半旧的混合状态。
-      const reminderBody = workerTeamOn ? TEAM_REMINDER_COPY : '';
+      const reminderBody = [
+        workerTeamOn ? TEAM_REMINDER_COPY : '',
+        personaOn ? wrapPersonaReminder(personaIdentityValue) : '',
+      ].filter(Boolean).join('\n');
       const rewritten = this.rewriteUserMessageReminder(truncated, reminderBody);
       for (let i = 0; i < truncated.length; i++) {
         truncated[i] = rewritten[i];

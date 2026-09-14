@@ -152,6 +152,12 @@ vi.mock('@/lib/persistence/storage', () => ({
   // watchWorkerTeam 会 .watch() 它；给最小 fake（watch 返回 noop 退订），
   // 否则未来首个触达该路径的用例会撞 "No workerTeamEnabled export"。
   workerTeamEnabled: mocks.workerTeamEnabled,
+  // Persona (Subtask 2) 镜像 Worker Team 的 mock pattern：getValue/setValue/watch
+  // 三件套，让 retry/edit 路径能正常读取 personaOn snapshot + personaIdentity。
+  // 缺省 false / '' / empty identity 与 personaEnabled 默认 fallback 一致。
+  personaEnabled: { getValue: vi.fn(async () => false), setValue: vi.fn(), watch: vi.fn(() => () => {}) },
+  personaSoul: { getValue: vi.fn(async () => ''), setValue: vi.fn(), watch: vi.fn(() => () => {}) },
+  personaIdentity: { getValue: vi.fn(async () => ({ name: '', vibe: '', tone: '', emoji: '' })), setValue: vi.fn(), watch: vi.fn(() => () => {}) },
 }));
 
 vi.mock('@/lib/mcp/manager', () => ({

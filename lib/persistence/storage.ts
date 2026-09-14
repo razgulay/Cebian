@@ -299,6 +299,43 @@ export const userInstructions = defineLoggedItem<string>(
   { fallback: '' },
 );
 
+// Persona layer (Subtask 1/2): SOUL copy + identity fields mirrored in
+// composeSystemPrompt (system-prompt block) and composeUserMessage
+// (1-line recap inside <reminder-instructions>). Default OFF so the
+// prompt-composer stays byte-identical to its pre-persona baseline when
+// the user hasn't enabled Persona (cache-stable invariant).
+export const personaEnabled = defineLoggedItem<boolean>(
+  'local:personaEnabled',
+  { fallback: false },
+);
+
+export const personaSoul = defineLoggedItem<string>(
+  'local:persona',
+  { fallback: '' },
+);
+
+// 4 字段 identity：name / vibe / tone / emoji。空字符串视为「该槽位未设置」，
+// 渲染时整行 recap 自动跳过。Use a plain object (not JSON-encoded) so
+// `useStorageItem` round-trips without a parser step.
+export interface PersonaIdentity {
+  name: string;
+  vibe: string;
+  tone: string;
+  emoji: string;
+}
+
+const PERSONA_IDENTITY_FALLBACK: PersonaIdentity = {
+  name: '',
+  vibe: '',
+  tone: '',
+  emoji: '',
+};
+
+export const personaIdentity = defineLoggedItem<PersonaIdentity>(
+  'local:personaIdentity',
+  { fallback: PERSONA_IDENTITY_FALLBACK },
+);
+
 export const expandPromptsInline = defineLoggedItem<boolean>(
   'local:expandPromptsInline',
   { fallback: false },

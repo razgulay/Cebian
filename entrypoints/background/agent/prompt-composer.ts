@@ -7,14 +7,16 @@
 //
 // 造 Agent 实例本身在同目录的 `factory.ts` —— 它只接收本文件产出的成形字符串。
 
-import { userInstructions as userInstructionsStorage, memorySettings, workerTeamEnabled } from '@/lib/persistence/storage';
+import { compilePersonaBlock, personaBindingLine } from '@/lib/agent/persona-types';
+import { userInstructions as userInstructionsStorage, memorySettings, workerTeamEnabled, personaSoul, personaIdentity, personaEnabled } from '@/lib/persistence/storage';
+import { t } from '@/lib/i18n';
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt';
 import { gatherPageContext } from './page-context';
 import { buildTextPrefix, type Attachment } from '@/lib/agent/attachments';
 import { scanSkillIndex, buildSkillsBlock } from '@/lib/ai-config/scanner';
 import { buildAvailableWorkersBlock } from '@/lib/agent/worker-roles';
 import { buildSlashPromptBlock, SLASH_PROMPT_ONLY_REQUEST, type SlashPrompt } from '@/lib/ai-config/slash-prompt';
-import { wrapUserRequest, wrapReminderInstructions } from '@/lib/agent/prompt-envelope';
+import { wrapUserRequest, wrapReminderInstructions, wrapPersonaReminder } from '@/lib/agent/prompt-envelope';
 import { MEMORY_INSTRUCTIONS, memoryLimitationLine } from '@/lib/memory/prompt';
 import { scanMemoryIndex, buildMemoriesBlock, buildUserProfileBlock } from '@/lib/memory/index-scan';
 import { ragSettings } from '@/lib/rag';
@@ -143,6 +145,27 @@ function buildSystemPrompt(
     parts.push(buildAvailableWorkersBlock(true));
   }
 
+  // Persona (Subtask 2): 1-line binding sentence 注入到 Output & Communication
+  // 段下方（紧邻 "Always respond in the same language..." 那行）。`personaBindingLine`
+  // 返回 '' 当 persona 缺 name，所以 cache-stable byte-shape 保留：仅在 ON + name
+  // 设置时多 1 行（开头是连字符缩进，保持 markdown bullet 视觉一致）。
+  if (variables.personaBinding) {
+    parts.push(`- ${variables.personaBinding}`);
+  }
+
+  // Persona (Subtask 2): inject the SOUL copy + identity block between
+  // workers and user-instructions. `compilePersonaBlock` returns '' when
+  // the user has not set any persona field, so the cache prefix stays
+  // byte-identical to the pre-persona baseline (no extra `\n\n` artifact).
+  if (variables.personaBinding) {
+    const soul = String(variables.personaSoul ?? '');
+    const identity = JSON.parse(String(variables.personaIdentityJson ?? '{}')) as Parameters<
+      typeof compilePersonaBlock
+    >[0];
+    const personaBlock = compilePersonaBlock(identity, soul, t);
+    if (personaBlock) parts.push(personaBlock);
+  }
+
   const trimmedInstructions = userInstructions.trim();
   if (trimmedInstructions) {
     parts.push(`<user-instructions>\n${trimmedInstructions}\n</user-instructions>`);
@@ -176,6 +199,7 @@ async function composeUserMessage(
   memoryEnabled: boolean,
   slashPrompt?: SlashPrompt,
   workerTeamOn?: boolean,
+  personaIdentity?: Parameters<typeof wrapPersonaReminder>[0],
 ): Promise<string> {
   const parts: string[] = [];
 
@@ -183,7 +207,12 @@ async function composeUserMessage(
   // wrapper 形状由 prompt-envelope 的 wrapReminderInstructions 单一来源决定，
   // retry/edit 路径下的 rewriteReminderInstructions 复用同一 helper，确保
   // prompt-cache prefix 字节稳定。
-  const reminders = workerTeamOn ? TEAM_REMINDER_COPY : '';
+  // Persona (Subtask 2) 1-line recap 拼到同一 reminder 块里：worker_team 提醒在前，
+  // persona 提醒在后；两者 OFF 时 body 为空，wrapper 仍按旧 byte shape 输出。
+  const reminders = [
+    workerTeamOn ? TEAM_REMINDER_COPY : '',
+    personaIdentity ? wrapPersonaReminder(personaIdentity) : '',
+  ].filter(Boolean).join('\n');
   parts.push(wrapReminderInstructions(reminders));
 
   // ② Attachments (elements + files; images go via multimodal content blocks)
@@ -228,12 +257,26 @@ async function composeSystemPrompt(
   sessionId: string,
   memoryEnabled?: boolean,
   workerTeamOn?: boolean,
+  personaOn?: boolean,
 ): Promise<string> {
-  const [instructions, skillMetas, currentRagSettings, storedTeamEnabled] = await Promise.all([
+  // personaOn / workerTeamOn 是同源 snapshot：与 lib/tools/index.ts 的 buildSessionToolArray
+  // 共享同一个 storage flag，但有「调用方预读 / 实时读」两种走法。per-subtask 1 模式：
+  // 调用方传值时复用其快照，缺省时本函数自行 getValue（与 workerTeamOn 一致）。
+  const personaOnSnapshot = personaOn ?? (await personaEnabled.getValue());
+  const [
+    instructions,
+    skillMetas,
+    currentRagSettings,
+    storedTeamEnabled,
+    personaSoulValue,
+    personaIdentityValue,
+  ] = await Promise.all([
     userInstructionsStorage.getValue(),
     scanSkillIndex(),
     ragSettings.getValue(),
     workerTeamOn === undefined ? workerTeamEnabled.getValue() : Promise.resolve(workerTeamOn),
+    personaOnSnapshot ? personaSoul.getValue() : Promise.resolve(''),
+    personaOnSnapshot ? personaIdentity.getValue() : Promise.resolve({ name: '', vibe: '', tone: '', emoji: '' }),
   ]);
   // memoryEnabled 由调用方传入时复用其快照（让同一轮的 system / user 注入读同一个值）；
   // 未传时（如初始建会话路径）自行读取。
@@ -262,6 +305,19 @@ async function composeSystemPrompt(
       // ——这里把 boolean 显式 'true' / 'false' 字面化进变量表，buildSystemPrompt
       // 那边只比对 `=== 'true'` 即可，不引入新分支类型。
       workerTeamEnabled: String(storedTeamEnabled),
+      // Persona (Subtask 2) 1-line binding 走 `{{PERSONA_BINDING}}` 占位符替换
+      // （RAG 风格，inline 单行）。OFF 时 personaBindingLine 返回 '' → 占位符替换
+      // 为空，prompt byte-shape 保持 pre-Subtask-2 字节稳定。ON 且 identity.name
+      // 设置时输出 1 句人设摘要，注入到 Output & Communication section。
+      personaBinding: personaOnSnapshot
+        ? personaBindingLine(personaIdentityValue, t)
+        : '',
+      // personaSoul + personaIdentityJson 单独传：buildSystemPrompt 内
+      // compilePersonaBlock parse identityJson → PersonaIdentity、读 soul → SOUL 副本。
+      // OFF 时 buildSystemPrompt 不读这些字段（也不会 push persona block），
+      // personaBinding='' + 占位符='' → 完全不影响 prompt。
+      personaSoul: personaSoulValue,
+      personaIdentityJson: JSON.stringify(personaIdentityValue),
     }),
   );
 }

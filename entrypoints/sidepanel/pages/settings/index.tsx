@@ -5,6 +5,7 @@ import { SettingsLayout } from '@/components/settings/SettingsLayout';
 import { SETTINGS_SECTIONS } from '@/components/settings/SectionNav';
 import { ProvidersSection } from '@/components/settings/sections/ProvidersSection';
 import { InstructionsSection } from '@/components/settings/sections/InstructionsSection';
+import { PersonaSection } from '@/components/settings/sections/PersonaSection';
 import { PromptsSection } from '@/components/settings/sections/PromptsSection';
 import { SkillsSection } from '@/components/settings/sections/SkillsSection';
 import { MemorySection } from '@/components/settings/sections/MemorySection';
@@ -44,6 +45,7 @@ export function SettingsRoutes({ basePath, showBackButton = false, showOpenInTab
         <Route index element={<SettingsIndexRedirect />} />
         <Route path="providers" element={<ProvidersSection />} />
         <Route path="instructions" element={<InstructionsSection />} />
+        <Route path="persona" element={<PersonaSection />} />
         <Route path="prompts/*" element={<PromptsSection />} />
         <Route path="skills/*" element={<SkillsSection />} />
         <Route path="memory/*" element={<MemorySection />} />

@@ -1,3 +1,6 @@
+import type { PersonaIdentity } from '@/lib/persistence/storage';
+import { t } from '@/lib/i18n';
+
 /**
  * 提示词信封的外层标签词汇表 + 剥离器。
  *
@@ -107,4 +110,18 @@ export function rewriteReminderInstructions(raw: string, body: string): string {
   }
   // 信封缺该块时插在最前（与 composeUserMessage 的拼装顺序一致）。
   return `${wrapReminderInstructions(body)}\n\n${raw}`;
+}
+
+/**
+ * 拼接 persona 1-line recap 用于 `<reminder-instructions>` 块。
+ * 与 worker_team_html_reminder 串联（同块内，按 persona → team 顺序展示）。
+ * 当 identity.name 为空时返回 ''（recap 块整体被 persona 整体为空时自然降级）。
+ */
+export function wrapPersonaReminder(identity: PersonaIdentity): string {
+  if (!identity.name.trim()) return '';
+  const bits: string[] = [t('agent.persona.recap.youAre', [identity.name.trim()])];
+  if (identity.vibe.trim()) bits.push(t('agent.persona.recap.vibe', [identity.vibe.trim()]));
+  if (identity.tone.trim()) bits.push(t('agent.persona.recap.tone', [identity.tone.trim()]));
+  if (identity.emoji.trim()) bits.push(t('agent.persona.recap.emoji', [identity.emoji.trim()]));
+  return bits.join(' ') + '.';
 }

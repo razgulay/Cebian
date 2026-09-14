@@ -11,11 +11,13 @@ import {
   workerModels,
   workerTeamEnabled,
   workerRoleTimeouts,
+  personaEnabled,
   type ModelIdentity,
   type WorkerRole,
 } from '@/lib/persistence/storage';
 import { resolveWorkerRoleTimeoutMs, WORKER_ROLES } from '@/lib/agent/worker-roles';
 import { t } from '@/lib/i18n';
+import { NavLink } from 'react-router-dom';
 import { Sparkles, MousePointerClick, Users } from 'lucide-react';
 
 /**
@@ -65,6 +67,7 @@ export function AdvancedSection() {
   const [teamEnabled, setTeamEnabled] = useStorageItem(workerTeamEnabled, true);
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
+  const [personaOn, setPersonaOn] = useStorageItem(personaEnabled, false);
 
   // Partial<Record> 存的 model identity 是 optional 的；读时统一转 `ModelIdentity | null`
   // 形式以匹配 ModelSelector 的 `activeModel` prop 类型。Setter 反向：传 null 即视为
@@ -192,9 +195,56 @@ export function AdvancedSection() {
             className="shrink-0"
           />
         </div>
+      </section>
 
-        {UI_DOMAINS.map(({ key, labelKey, hintKey }) => {
-          const activeModel = workerMap[key] ?? null;
+      {/* ─── Card: Persona (OpenClaw mode) ─── */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <h3 className="text-sm font-medium flex items-center gap-2">
+          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-violet-50 text-violet-600 dark:bg-violet-950/40 dark:text-violet-400">
+            <Sparkles className="size-4" />
+          </span>
+          {t('settings.persona.title')}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {t('settings.persona.hint')}
+        </p>
+
+        {/* Master switch: enables the persona layer (system-prompt SOUL block
+            + 1-line user-message recap). Persona copy itself lives in
+            Settings → Persona (separate authoring surface). The same Switch
+            shares its storage key with the chat composer chip (PersonaChip)
+            via `useStorageItem`'s watch — both sides stay in lockstep. */}
+        <div className="flex items-center justify-between gap-4 pt-2 pb-3 border-b border-border/50">
+          <div className="min-w-0 space-y-1">
+            <Label htmlFor="persona-enabled" className="text-sm">
+              {t('settings.advanced.workers.persona.enabled')}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.advanced.workers.persona.enabledHint')}
+            </p>
+          </div>
+          <Switch
+            id="persona-enabled"
+            checked={personaOn}
+            onCheckedChange={(v) => void setPersonaOn(v)}
+            className="shrink-0"
+          />
+        </div>
+
+        {/* Inline link to the persona authoring surface — keeps users from
+            hunting through settings to find where to type the SOUL copy. */}
+        <div className="pt-2">
+          <NavLink
+            to="/settings/persona"
+            className="text-xs text-primary hover:underline"
+          >
+            {t('settings.advanced.workers.persona.nav')}
+          </NavLink>
+        </div>
+      </section>
+
+      {UI_DOMAINS.map(({ key, labelKey, hintKey }) => {
+        const activeModel = workerMap[key] ?? null;
           // 当前显示给用户的有效 ceiling：override 优先 → registry 默认 → 全局兜底。
           // 「Default」选项的展示文案要写真实默认值，避免 UI 跟 runner 实际值漂移。
           const effectiveMs = resolveWorkerRoleTimeoutMs(key, timeoutMap);
@@ -276,7 +326,6 @@ export function AdvancedSection() {
             </div>
           );
         })}
-      </section>
     </div>
   );
 }

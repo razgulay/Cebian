@@ -12,6 +12,7 @@ import { RecordButton } from '@/components/chat/RecordButton';
 import { MicButton } from '@/components/chat/MicButton';
 import { MentionPopover } from '@/components/chat/MentionPopover';
 import { WorkerTeamChip } from '@/components/chat/WorkerTeamChip';
+import { PersonaChip } from '@/components/chat/PersonaChip';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
@@ -2300,6 +2301,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           />
         </div>
 
+        {/* Persona / Worker Team toggle row: top-left of composer toolbar.
+         *   - Independent row keeps the heavier model/thinking selectors in
+         *     row 2 from competing for space.
+         *   - Idle state: row still renders (chips always visible), so the
+         *     user does not have to click empty space to find the toggle. */}
+        <div className="flex items-center gap-1.5 px-2.5 pb-0.5">
+          <WorkerTeamChip />
+          <PersonaChip />
+          <span className="flex-1" />
+        </div>
+
         {/* Toolbar — two fixed rows so every action has a stable slot:
           *
           *   Row 1: ContextUsagePill + CompactNowButton, left-aligned. The
@@ -2334,7 +2346,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 onSelect={handleThinkingSelect}
               />
             )}
-            <WorkerTeamChip />
           </div>
           <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
             <MentionPopover
