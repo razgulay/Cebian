@@ -1273,6 +1273,8 @@ vfs:
     n: "$1 個項目"  # $1 = 路徑
   pathNotFound: "路徑不存在：$1"
   unknownError: "未知錯誤"
+  # 列表上方的入口按鈕：把每行切到多選模式
+  selectAll: "全選"
   # 工作區目錄還在、但對應對話已被刪除。$1 = 短 id
   # 工作區目錄對應的對話已被刪除：目錄仍在磁碟，但已無法從任何對話存取。
   # 直接顯示完整目錄名作為標題，不加任何前綴——僅靠灰字 + tooltip 表達狀態。
@@ -1287,9 +1289,22 @@ vfs:
     paste: "貼到這裡"
     # $1 = 動作（「複製」/「剪下」），$2 = 項目名稱 —— 用於工具列上 paste 按鈕的副標題，提示剪貼簿裡是什麼
     pasteHint: "$1 → $2"
+    # 行級 kebab 選單（DirView 行右鍵 / MoreVertical 觸發）
+    copyName: "複製名稱"
+    copyPath: "複製路徑"
+    copy: "複製"
+    cut: "剪下"
   # 內聯新增/重新命名輸入框的佔位文字。$1 = 類型（"檔案" 或 "資料夾"）
   prompt:
     newName: "輸入$1名稱"
+    # $1 = 當前名稱
+    rename: "重新命名 $1"
+  # 內聯校驗 / 狀態提示，toast 形式
+  error:
+    # 名稱為空、含 '/' 或 '..'
+    invalidName: "名稱無效——不可包含斜線或空段"
+    # 試圖刪除結構根目錄（'/'、'/workspaces'、~/.cebian/skills|prompts）。
+    cannotDeleteProtected: "此目錄由 Cebian 保留，無法刪除"
   # 刪除等危險操作前的確認對話框
   confirm:
     # $1 = 檔案名

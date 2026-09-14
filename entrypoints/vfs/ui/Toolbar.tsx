@@ -1,4 +1,4 @@
-import { Code, Download, Eye, Link, Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Code, Download, Eye, Link, Loader2, ShieldAlert, ShieldCheck, FilePlus, FolderPlus, ClipboardPaste } from 'lucide-react';
 import { toast } from 'sonner';
 import { CopyButton } from '@/components/common/CopyButton';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,14 @@ interface ToolbarProps {
   onModeChange: (mode: ViewMode) => void;
   isDownloading: boolean;
   onDownload: () => void;
+  /** Dir-only actions (Subtask 3: New File / New Folder / Paste). Each callback
+   *  receives the current dir path. Pass undefined to hide the corresponding
+   *  button. `pasteHint` drives the paste button's aria-label / tooltip;
+   *  omitting both makes the button render disabled. */
+  onNewFile?: (dir: string) => void;
+  onNewFolder?: (dir: string) => void;
+  onPaste?: (dir: string) => void;
+  pasteHint?: string;
 }
 
 function ModeButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
@@ -108,7 +116,7 @@ function describe(view: ViewState, mode: ViewMode | undefined): React.ReactNode 
  *  加载中路径已知，所以「复制路径」保持挂载；元信息 / 切换 / 复制内容 / 下载要等内容
  *  到了才知道该不该显示。下载中即使 view 已切到 loading 也保持按钮挂载，否则用户会
  *  失去忙碌指示。复制内容始终复制源码（与模式无关），那才是用户要贴到别处的东西。 */
-function Toolbar({ view, mode, onModeChange, isDownloading, onDownload }: ToolbarProps) {
+function Toolbar({ view, mode, onModeChange, isDownloading, onDownload, onNewFile, onNewFolder, onPaste, pasteHint }: ToolbarProps) {
   const meta = describe(view, mode);
   // error 态也保留「复制路径」：用户要把打不开的路径贴出去反馈时正需要它。
   const path = view.path;
@@ -120,6 +128,31 @@ function Toolbar({ view, mode, onModeChange, isDownloading, onDownload }: Toolba
       {meta && (
         <>
           <span className="inline-flex items-center text-xs text-muted-foreground tabular-nums whitespace-nowrap">{meta}</span>
+          <div className="h-4 w-px bg-border" />
+        </>
+      )}
+
+      {view.kind === 'dir' && (onNewFile || onNewFolder || onPaste) && (
+        <>
+          {onNewFile && (
+            <IconButton label={t('vfs.action.newFile')} onClick={() => onNewFile(view.path)}>
+              <FilePlus className="size-4" />
+            </IconButton>
+          )}
+          {onNewFolder && (
+            <IconButton label={t('vfs.action.newFolder')} onClick={() => onNewFolder(view.path)}>
+              <FolderPlus className="size-4" />
+            </IconButton>
+          )}
+          {onPaste && (
+            <IconButton
+              label={pasteHint ?? t('vfs.action.paste')}
+              onClick={() => onPaste(view.path)}
+              disabled={!pasteHint}
+            >
+              <ClipboardPaste className="size-4" />
+            </IconButton>
+          )}
           <div className="h-4 w-px bg-border" />
         </>
       )}
