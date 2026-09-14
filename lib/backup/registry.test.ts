@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as storageModule from '@/lib/persistence/storage';
 import * as ragStorageModule from '@/lib/rag/settings';
-import type { MCPServerConfig, CustomProviderConfig } from '@/lib/persistence/storage';
+import type { MCPServerConfig, CustomProviderConfig, PersonaIdentity } from '@/lib/persistence/storage';
 import type { RagSettings } from '@/lib/rag/types';
 import { DEFAULT_RAG_SETTINGS } from '@/lib/rag/types';
 import type { CustomPageAction, PageActionsConfig } from '@/lib/page-actions/types';
@@ -323,6 +323,124 @@ describe('pageActionsConfig 合并补缺', () => {
     const merged = fillMissing({ builtin: {}, custom: [] }, backup);
     merged.order!.push('translate');
     expect(backup.order).toEqual(['explain']);
+  });
+});
+
+describe('persona items 合并补缺', () => {
+  // 从注册表里取 fillMissing（合并恢复的语义就写在注册表上）——保证
+  // 测试的是真正的 backup-time 行为，而不是某个孤儿 helper。
+  const fillPersonaEnabled = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:personaEnabled',
+  )!.fillMissing! as (local: boolean, backup: boolean) => boolean;
+
+  const fillPersonaSoul = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:persona',
+  )!.fillMissing! as (local: string, backup: string) => string;
+
+  const fillPersonaIdentity = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:personaIdentity',
+  )!.fillMissing! as (
+    local: PersonaIdentity,
+    backup: PersonaIdentity,
+  ) => PersonaIdentity;
+
+  describe('personaEnabled', () => {
+    it('本地默认 OFF (false) → 取备份值', () => {
+      expect(fillPersonaEnabled(false, true)).toBe(true);
+      expect(fillPersonaEnabled(false, false)).toBe(false);
+    });
+
+    it('本地已开启 (true) → 保留本地、不被备份覆盖', () => {
+      // 同为 true → 保留本地值（与 workerModels 同 role 本地优先的契约）。
+      expect(fillPersonaEnabled(true, true)).toBe(true);
+      // 备份 OFF → 仍保留本地 ON：merge「只增不减」、不把用户的 ON 改回 OFF。
+      expect(fillPersonaEnabled(true, false)).toBe(true);
+    });
+  });
+
+  describe('personaSoul', () => {
+    it('本地空串（默认） → 取备份的 SOUL 副本', () => {
+      expect(fillPersonaSoul('', 'Speak in first person.')).toBe(
+        'Speak in first person.',
+      );
+      // 备份也是空串 → 结果空串。
+      expect(fillPersonaSoul('', '')).toBe('');
+    });
+
+    it('本地有内容 → 保留本地、不被备份覆盖', () => {
+      expect(fillPersonaSoul('local soul', 'backup soul')).toBe('local soul');
+    });
+
+    it('本地仅空白字符 → 视为非空保留本地（与 isEmptyValue 仅把严格空串当默认一致）', () => {
+      // 与「isEmptyValue 严格空串当默认」一致——用户主动输入的纯空白 self-intro
+      // 不应被备份覆盖。
+      expect(fillPersonaSoul('   ', 'backup soul')).toBe('   ');
+    });
+  });
+
+  describe('personaIdentity', () => {
+    const empty: PersonaIdentity = { name: '', vibe: '', tone: '', emoji: '' };
+
+    it('本地 4 字段全空（默认） → 取备份的 identity', () => {
+      const backup: PersonaIdentity = {
+        name: 'Cebian',
+        vibe: 'precise',
+        tone: 'casual',
+        emoji: '🦞',
+      };
+      expect(fillPersonaIdentity(empty, backup)).toEqual(backup);
+    });
+
+    it('本地任一字段非空 → 保留本地整个 identity（不被备份部分覆盖）', () => {
+      // merge 是「整对象级别」的，不是「per-field」——任一字段非空即视为用户
+      // 已配置，避免备份把本地已设置字段（如 emoji）覆盖。
+      const local: PersonaIdentity = {
+        name: 'LocalName',
+        vibe: '',
+        tone: '',
+        emoji: '',
+      };
+      const backup: PersonaIdentity = {
+        name: 'BackupName',
+        vibe: 'precise',
+        tone: 'casual',
+        emoji: '🦞',
+      };
+      expect(fillPersonaIdentity(local, backup)).toEqual(local);
+    });
+
+    it('本地全 4 字段非空 → 保留本地、不被备份覆盖', () => {
+      const local: PersonaIdentity = {
+        name: 'L',
+        vibe: 'v',
+        tone: 't',
+        emoji: 'e',
+      };
+      const backup: PersonaIdentity = {
+        name: 'B',
+        vibe: 'b',
+        tone: 'b',
+        emoji: 'b',
+      };
+      expect(fillPersonaIdentity(local, backup)).toEqual(local);
+    });
+
+    it('本地非默认但部分非空（典型「用户改过 vibe 但其他保持」场景）→ 保留本地全部', () => {
+      const local: PersonaIdentity = {
+        name: '',
+        vibe: 'local-vibe-kept',
+        tone: '',
+        emoji: '',
+      };
+      const backup: PersonaIdentity = {
+        name: 'BackupName',
+        vibe: 'precise',
+        tone: 'casual',
+        emoji: '🦞',
+      };
+      // local 整体保留，backup 整体不接管。
+      expect(fillPersonaIdentity(local, backup)).toEqual(local);
+    });
   });
 });
 

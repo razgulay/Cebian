@@ -14,11 +14,15 @@ import {
   webdavConfig,
   workerModels,
   workerRoleTimeouts,
+  personaEnabled,
+  personaSoul,
+  personaIdentity,
   type MCPServerConfig,
   type ProviderCredentials,
   type CustomProviderConfig,
   type WorkerModelMap,
   type WorkerTimeoutMap,
+  type PersonaIdentity,
 } from '@/lib/persistence/storage';
 
 const SK = {
@@ -30,6 +34,9 @@ const SK = {
   webdavConfig: 'local:webdavConfig',
   workerModels: 'local:workerModels',
   workerRoleTimeouts: 'local:workerRoleTimeouts',
+  personaEnabled: 'local:personaEnabled',
+  personaSoul: 'local:persona',
+  personaIdentity: 'local:personaIdentity',
 };
 
 function bearerServer(id: string, token: string): MCPServerConfig {
@@ -465,5 +472,118 @@ describe('restoreStorage — merge', () => {
     const result = await workerRoleTimeouts.getValue();
     expect(result.frontend_coder).toBe(600000);
     expect(result.reviewer).toBe(90000);
+  });
+
+  // persona 三件套修复：merge 模式下默认状态（OFF/''/空 identity）须被备份补入，
+  // 本地已配置则保留。修复前 3 条都没有 fillMissing → merge silently skip，
+  // local defaults 保持不变 → backup persona content 被 drop。
+  describe('persona items (修复合并模式静默跳过)', () => {
+    const backupEnabled = true;
+    const backupSoul = 'Speak in first person.';
+    const backupIdentity: PersonaIdentity = {
+      name: 'Cebian',
+      vibe: 'precise',
+      tone: 'casual',
+      emoji: '🦞',
+    };
+
+    it('本地默认（OFF / 空串 / 空 identity） → 备份内容整体生效', async () => {
+      // 确认起始是默认（与 persistence/storage fallback 一致）。
+      expect(await personaEnabled.getValue()).toBe(false);
+      expect(await personaSoul.getValue()).toBe('');
+      expect(await personaIdentity.getValue()).toEqual({
+        name: '',
+        vibe: '',
+        tone: '',
+        emoji: '',
+      });
+
+      await restoreStorage(
+        {
+          config: {
+            [SK.personaEnabled]: backupEnabled,
+            [SK.personaSoul]: backupSoul,
+            [SK.personaIdentity]: backupIdentity,
+          },
+        },
+        { strategy: 'merge', settings: true, credentials: false },
+      );
+
+      // 三件套全部从备份补入。
+      expect(await personaEnabled.getValue()).toBe(true);
+      expect(await personaSoul.getValue()).toBe(backupSoul);
+      expect(await personaIdentity.getValue()).toEqual(backupIdentity);
+    });
+
+    it('本地任一 persona 项已配置 → merge 保留本地、不被备份覆盖', async () => {
+      await personaEnabled.setValue(true);
+      await personaSoul.setValue('local soul — 保留');
+      await personaIdentity.setValue({
+        name: 'LocalName',
+        vibe: 'local-vibe',
+        tone: 'local-tone',
+        emoji: '🎯',
+      });
+
+      await restoreStorage(
+        {
+          config: {
+            [SK.personaEnabled]: false,
+            [SK.personaSoul]: 'backup soul — should-be-ignored',
+            [SK.personaIdentity]: backupIdentity,
+          },
+        },
+        { strategy: 'merge', settings: true, credentials: false },
+      );
+
+      // personaEnabled 本地 true → 保留（不被备份 false 覆盖）。
+      expect(await personaEnabled.getValue()).toBe(true);
+      // personaSoul 本地非空 → 保留。
+      expect(await personaSoul.getValue()).toBe('local soul — 保留');
+      // personaIdentity 本地非空 → 整个对象保留（不与备份逐字段 merge）。
+      expect(await personaIdentity.getValue()).toEqual({
+        name: 'LocalName',
+        vibe: 'local-vibe',
+        tone: 'local-tone',
+        emoji: '🎯',
+      });
+    });
+
+    it('replace 策略：备份值永远覆盖、不论本地状态', async () => {
+      await personaEnabled.setValue(true);
+      await personaSoul.setValue('irrelevant');
+      await personaIdentity.setValue({
+        name: 'X',
+        vibe: 'v',
+        tone: 't',
+        emoji: 'e',
+      });
+
+      await restoreStorage(
+        {
+          config: {
+            [SK.personaEnabled]: false,
+            [SK.personaSoul]: '',
+            [SK.personaIdentity]: {
+              name: '',
+              vibe: '',
+              tone: '',
+              emoji: '',
+            },
+          },
+        },
+        { strategy: 'replace', settings: true, credentials: false },
+      );
+
+      // 即使备份值就是默认空状态，replace 也覆盖写入。
+      expect(await personaEnabled.getValue()).toBe(false);
+      expect(await personaSoul.getValue()).toBe('');
+      expect(await personaIdentity.getValue()).toEqual({
+        name: '',
+        vibe: '',
+        tone: '',
+        emoji: '',
+      });
+    });
   });
 });

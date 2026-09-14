@@ -7,6 +7,7 @@
 
 import type { WxtStorageItem } from 'wxt/utils/storage';
 import type { RestoreStrategy } from './types';
+import { isEmptyValue } from './is-empty-value';
 import type { PageActionsConfig } from '@/lib/page-actions/types';
 import {
   lastSelectedModel,
@@ -19,6 +20,7 @@ import {
   personaEnabled,
   personaSoul,
   personaIdentity,
+  type PersonaIdentity,
   lastSelectedThinkingLevel,
   mcpServers,
   providerCredentials,
@@ -370,10 +372,39 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   // 本地偏好，避免恢复旧备份意外覆盖用户当前选择）。
   entry({ item: workerTeamEnabled, storageClass: 'settings' }),
   // Persona layer: SOUL copy + identity fields + OpenClaw-mode master switch.
-  // 用户偏好 / 内容并存，恢复后用户能看到原本的人设副本。
-  entry({ item: personaEnabled, storageClass: 'settings' }),
-  entry({ item: personaSoul, storageClass: 'settings' }),
-  entry({ item: personaIdentity, storageClass: 'settings' }),
+  // 用户偏好 / 内容并存，恢复后用户能看到原本的人设副本。下面 3 条都声明
+  // fillMissing 走 merge「默认视为空、用备份值覆盖」语义：personaEnabled OFF
+  // 视为空、personaSoul 空串视为空、personaIdentity 4 字段全空视为空；
+  // 本地已配置（非空）则保留本地（merge「只增不减」）。
+  entry({
+    item: personaEnabled,
+    storageClass: 'settings',
+    // Merge: 本地默认 OFF (false) 视为空 → 用备份值恢复 personaEnabled；
+    // 本地已开启 (true) 保留本地。注意：无法区分「默认未配置」与「用户主动 OFF」，
+    // 故后者也会被覆盖（merge 契约使然，与 workerModels「Off 以 delete key 表达」
+    // 同 caveat）。
+    fillMissing: (local: boolean, backup: boolean) => local || backup,
+  }),
+  entry({
+    item: personaSoul,
+    storageClass: 'settings',
+    // Merge: 本地为空串视为默认 → 用备份的 SOUL 副本补入；非空保留本地用户自定。
+    fillMissing: (local: string, backup: string) =>
+      isEmptyValue(local) ? backup : local,
+  }),
+  entry({
+    item: personaIdentity,
+    storageClass: 'settings',
+    // Merge: 4 字段全空视为默认 identity → 用备份补入；任一字段非空保留本地。
+    // 用 isEmptyValue 逐字段判断（与 personaSoul 同形态），与 storageClass 解耦。
+    fillMissing: (local: PersonaIdentity, backup: PersonaIdentity) =>
+      isEmptyValue(local.name) &&
+      isEmptyValue(local.vibe) &&
+      isEmptyValue(local.tone) &&
+      isEmptyValue(local.emoji)
+        ? backup
+        : local,
+  }),
   // Worker Team per-role 超时覆盖（用户 UI 调整后存这里）。同 settings 分类：
   // 是用户偏好而非密钥。
   entry({

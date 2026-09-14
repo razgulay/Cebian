@@ -11,6 +11,7 @@
 
 import { BACKUP_REGISTRY } from '../registry';
 import type { RestoreStrategy } from '../types';
+import { isEmptyValue } from '../is-empty-value';
 
 /** 采集结果。`config` / `credentials` 仅在对应分类被选时存在。 */
 export interface CollectedStorage {
@@ -18,14 +19,6 @@ export interface CollectedStorage {
   config?: Record<string, unknown>;
   /** 密钥信息。键是 storage key。 */
   credentials?: Record<string, unknown>;
-}
-
-/** 判断一个值是否「空」——用于 credentials 补缺时判断本地是否缺该项。 */
-function isEmptyValue(v: unknown): boolean {
-  if (v == null) return true;
-  if (Array.isArray(v)) return v.length === 0;
-  if (typeof v === 'object') return Object.keys(v as object).length === 0;
-  return false;
 }
 
 /** 恢复时的策略与已选分类。 */
