@@ -64,6 +64,7 @@ dialogs     # modal dialogs
 errors      # toast / inline error messages
 agent       # agent-runtime user-facing strings
 pageActions # in-page injected UI (floating ball, selection toolbar)
+canvas      # canvas pane (live HTML preview in sidepanel chat view)
 
 # Flat top-level keys (manifest exception, see "Manifest localization"):
 # extName, extDescription, actionTitle

@@ -7,6 +7,12 @@ import { recorder } from './recorder/manager';
 import { setupRecorderClientHandlers } from './recorder/client-handlers';
 import { setupRecorderPortRelay } from './recorder/port-relay';
 import { setupMcpBridge } from './mcp/bridge';
+import { setupCanvas } from './canvas/manager';
+import { setupCanvasClientHandlers } from './canvas/client-handlers';
+import { setupScheduler } from './scheduler/manager';
+import { setupSchedulerClientHandlers } from './scheduler/client-handlers';
+import { setupTelegramGatewayClientHandlers } from './telegram-gateway/client-handlers';
+import { setupTelegramGatewayManager } from './telegram-gateway/manager';
 import { debugLogClientHandlers } from './debug-log/client-handlers';
 import { seedDevStorage } from './providers/dev-seed';
 import { registerBackupHandler } from './chat/backup-handler';
@@ -53,6 +59,13 @@ export default defineBackground(() => {
   // 订阅 Worker Team 总开关（Fast/Team）翻转，让活会话的 tool list 与
   // system-prompt 侧同步撤下/挂上 `delegate_task`（见 watchWorkerTeam）。
   sessionManager.watchWorkerTeam();
+  // Canvas Live Artifacts：注册 VFS 写入监听，正被打开的文件被改时广播
+  // `canvas_file_changed` 给所有 viewer。模块级 onChange 在本函数调用前就
+  // 注册过（vfs.ts 顶层求值时即挂），这里只是把 BG 域的 handler 接上。
+  setupCanvas();
+  // Scheduled tasks（用户配的 cron / interval 自动化）：注册 `scheduler-tick`
+  // alarm + onStartup/onInstalled 重建；listener 内部防双注册。
+  setupScheduler();
 
   // Dev-only: seed a custom provider from .env.local if configured.
   // No-op in production builds and when WXT_DEV_API_KEY is empty.
@@ -197,6 +210,18 @@ export default defineBackground(() => {
   setupRecorderClientHandlers();
   setupMemoryClientHandlers();
   setupMcpBridge();
+  // Scheduled task IPC handlers (scheduler_list / create / update / delete /
+  // run_now)。与 recorder / memory / mcp 同款：handler map 必须在 setupClientRouter()
+  // 之前 register（client-router 启动时会校验 CLIENT_MESSAGE_TYPES 全集覆盖）。
+  setupSchedulerClientHandlers();
+  setupTelegramGatewayClientHandlers();
+  // Telegram Gateway「通电」：watch config/secrets 存储，SW 启动 / 保存配置后
+  // 自动 (re)bootstrap WS 客户端（此前 bootstrap 无人调用，gateway 只是存了
+  // 配置而从未连过线）。
+  setupTelegramGatewayManager();
+  // Canvas 链接拦截（canvas_open）——与各域 client-handlers 同一注册窗口，
+  // 必须先于 setupClientRouter()（启动时校验 CLIENT_MESSAGE_TYPES 全集覆盖）。
+  setupCanvasClientHandlers();
   registerClientHandlers(debugLogClientHandlers);
   setupClientRouter();
 

@@ -16,6 +16,9 @@ import { recorderClientHandlers } from '../recorder/client-handlers';
 import { memoryClientHandlers } from '../memory/client-handlers';
 import { mcpClientHandlers } from '../mcp/bridge';
 import { debugLogClientHandlers } from '../debug-log/client-handlers';
+import { schedulerClientHandlers } from '../scheduler/client-handlers';
+import { telegramGatewayClientHandlers } from '../telegram-gateway/client-handlers';
+import { canvasClientHandlers } from '../canvas/client-handlers';
 
 /** 所有注册进路由器的 handler map（与 index.ts 各 setup() 注册的对象一一对应）。 */
 const DOMAIN_HANDLER_MAPS: readonly [name: string, map: ClientHandlerMap][] = [
@@ -25,6 +28,9 @@ const DOMAIN_HANDLER_MAPS: readonly [name: string, map: ClientHandlerMap][] = [
   ['memory', memoryClientHandlers],
   ['mcp', mcpClientHandlers],
   ['debugLog', debugLogClientHandlers],
+  ['scheduler', schedulerClientHandlers],
+  ['telegramGateway', telegramGatewayClientHandlers],
+  ['canvas', canvasClientHandlers],
 ];
 
 describe('client-router 穷尽性', () => {

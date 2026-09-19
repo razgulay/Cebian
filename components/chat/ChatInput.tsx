@@ -36,6 +36,8 @@ import { ragSettings as ragSettingsStorage } from '@/lib/rag';
 import { resolveMentions, resolveMentionToAttachment, PIN_AUTO_UNPIN_THRESHOLD, type MentionChip, type PinnedMention, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
+import { canvasPickChannel } from '@/lib/canvas/pick-channel';
+import { buildCanvasElementAttachment, pickDedupeKey } from '@/lib/canvas/element-inspect';
 import { useRecorder } from '@/hooks/useRecorder';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { appendTranscript, cleanTranscript } from '@/lib/speech/transcript';
@@ -521,6 +523,39 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         eventsCount: session.events.length,
         durationMs: session.durationMs,
       });
+      attachmentsRef.current = next;
+      setAttachments(next);
+    });
+  }, []);
+
+  // Canvas Pick Element（CanvasPane 发布）：把拾取的元素挂成合成 file 附件
+  // （`buildCanvasElementAttachment`——chip 与 LLM envelope 走 file 附件既有
+  // 管线）。与 recorder 订阅同款守则：mount-once effect + attachmentsRef 读
+  // 最新列表、写 ref 与 state 同步进行，handleSend 的 outgoing 快照总能看到
+  // 刚挂的 chip。去重键由 builder 侧 `pickDedupeKey` 单源提供（canvas 路径 +
+  // selector 两行注释）：同一文件同一元素重复拾取只提示、不重复挂，与页内
+  // element picker 语义一致。
+  useEffect(() => {
+    return canvasPickChannel.subscribe(({ pick, canvasPath }) => {
+      const current = attachmentsRef.current;
+      const pickKey = pickDedupeKey(pick, canvasPath);
+      if (current.some((a) => a.type === 'file' && a.content.startsWith(pickKey))) {
+        toast.info(t('chat.composer.elementAdded'));
+        return;
+      }
+      if (current.length >= MAX_ATTACHMENT_COUNT) {
+        toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
+        return;
+      }
+      const att = buildCanvasElementAttachment(pick, canvasPath);
+      debugLog.info('ui', 'attachment:add', {
+        kind: 'canvas-element',
+        mime: att.mimeType,
+        size: att.size,
+        canvasPath,
+        selector: pick.selector,
+      });
+      const next = [...current, att];
       attachmentsRef.current = next;
       setAttachments(next);
     });
@@ -1840,7 +1875,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   };
 
   return (
-    <footer className="px-1.5 py-1.5 bg-background relative">
+    <footer className="px-1.5 py-1.5 bg-background relative shrink-0">
       {/* Slash menu — dynamic VFS prompts */}
       {isSlashMenuVisible && (
         <div

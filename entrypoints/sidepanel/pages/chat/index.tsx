@@ -72,6 +72,7 @@ import type { SessionSnapshot } from '@/lib/ipc/protocol';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
 import { t } from '@/lib/i18n';
+import { ChatSessionIdContext } from '@/components/chat/context/ChatSessionIdContext';
 
 // ─── ChatPage ───
 
@@ -456,8 +457,15 @@ export function ChatPage({
   // message array belongs to a different chat and must not be rendered.
   const sessionLoading = !isNewChat && routeSessionId !== activeSessionId;
 
+  // 当前 chat session id（新会话还没落 id 时为 null）。ChatInput 的历史导航与
+  // ChatSessionIdContext（canvas 链接拦截）共用同一口径，避免两处各算一遍漂移。
+  const chatSessionId = isNewChat ? activeSessionId : routeSessionId ?? null;
+
   return (
-    <>
+    // canvas 链接拦截（MarkdownRenderer 深处的 MarkdownLink）需要当前 session
+    // id——provider 只包 chat 页自己，VFS 标签页等其它 markdown 渲染处拿到的
+    // 恒为 null，链接行为不受影响。
+    <ChatSessionIdContext.Provider value={chatSessionId}>
       <div className="flex-1 min-h-0 relative flex flex-col">
         <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
           <div role="chat-messages" className="flex min-h-full flex-col gap-3 px-4 py-3">
@@ -1142,7 +1150,7 @@ export function ChatPage({
           onOpenSettings={onOpenSettings}
           onOpenStorage={onOpenStorage}
           userHistory={userHistory}
-          sessionId={isNewChat ? activeSessionId : routeSessionId ?? null}
+          sessionId={chatSessionId}
           model={turnModel}
           thinkingLevel={turnThinking}
           onModelChange={handleModelChange}
@@ -1156,7 +1164,7 @@ export function ChatPage({
         scopeSelector={CHAT_MESSAGES_SELECTOR}
         onQuote={handleQuote}
       />
-    </>
+    </ChatSessionIdContext.Provider>
   );
 }
 

@@ -1,4 +1,4 @@
-import { Sun, Moon, SunMoon, Settings, SquarePen, PanelLeft } from 'lucide-react';
+import { Sun, Moon, SunMoon, Settings, SquarePen, PanelLeft, Eye, EyeOff, Send } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -7,6 +7,8 @@ import {
 } from '@/components/ui/tooltip';
 import { t } from '@/lib/i18n';
 import { debugLog } from '@/lib/debug/log';
+import { useTelegramGatewayStatus } from '@/hooks/useTelegramGatewayStatus';
+import { cn } from '@/lib/utils';
 
 interface HeaderProps {
   title?: string;
@@ -17,9 +19,23 @@ interface HeaderProps {
   onOpenSettings: () => void;
   onNewChat: () => void;
   onOpenSidebar: () => void;
+  /** Canvas pane 是否处于展开态 —— 决定 Eye/EyeOff 图标。 */
+  canvasOpen: boolean;
+  onToggleCanvas: () => void;
 }
 
-export function Header({ title, isNewChat, theme, onToggleTheme, onOpenSettings, onNewChat, onOpenSidebar }: HeaderProps) {
+export function Header({
+  title,
+  isNewChat,
+  theme,
+  onToggleTheme,
+  onOpenSettings,
+  onNewChat,
+  onOpenSidebar,
+  canvasOpen,
+  onToggleCanvas,
+}: HeaderProps) {
+  const telegramStatus = useTelegramGatewayStatus();
   const handleNewChat = () => {
     debugLog.info('ui', 'header:new_chat');
     onNewChat();
@@ -35,6 +51,10 @@ export function Header({ title, isNewChat, theme, onToggleTheme, onOpenSettings,
   const handleOpenSettings = () => {
     debugLog.info('ui', 'header:settings:open');
     onOpenSettings();
+  };
+  const handleToggleCanvas = () => {
+    debugLog.info('ui', 'header:canvas:toggle', { from: canvasOpen });
+    onToggleCanvas();
   };
 
   return (
@@ -65,6 +85,49 @@ export function Header({ title, isNewChat, theme, onToggleTheme, onOpenSettings,
         </span>
 
         <div className="flex gap-2">
+          {/* Telegram Gateway badge — hidden when disconnected (noisy for users
+              who never configured the gateway). Green = live, amber = connecting
+              or reconnecting, gray = offline. */}
+          {telegramStatus !== 'disconnected' && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  className={cn(
+                    'flex items-center gap-1 px-1.5 rounded-md text-[10px] font-medium',
+                    telegramStatus === 'connected' && 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40',
+                    telegramStatus === 'connecting' && 'text-amber-600 bg-amber-50 dark:bg-amber-950/40',
+                    telegramStatus === 'reconnecting' && 'text-amber-600 bg-amber-50 dark:bg-amber-950/40',
+                  )}
+                  aria-label={`Telegram ${telegramStatus}`}
+                >
+                  <Send className="size-3" />
+                  <span
+                    className={cn(
+                      'size-1.5 rounded-full',
+                      telegramStatus === 'connected' && 'bg-emerald-500',
+                      (telegramStatus === 'connecting' || telegramStatus === 'reconnecting') && 'bg-amber-500 animate-pulse',
+                    )}
+                  />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>Telegram {telegramStatus}</TooltipContent>
+            </Tooltip>
+          )}
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={canvasOpen ? t('canvas.header.closeAria') : t('canvas.header.openAria')}
+                onClick={handleToggleCanvas}
+              >
+                {canvasOpen ? <EyeOff className="size-4.5" /> : <Eye className="size-4.5" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{canvasOpen ? t('canvas.header.closeAria') : t('canvas.header.openAria')}</TooltipContent>
+          </Tooltip>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

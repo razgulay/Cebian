@@ -67,6 +67,14 @@ export const TOOL_SUBAGENT_CLICK = 'subagent_click' as const;
  *  reaching for fs_list/fs_search (which only see the virtual filesystem
  *  under /home/user/...). */
 export const TOOL_RAG_INSPECT = 'rag_inspect' as const;
+/** Opens a VFS file in the canvas pane (live HTML preview in sidepanel).
+ *  Per-session factory — see `lib/canvas/tool-canvas-open.ts`. */
+export const TOOL_CANVAS_OPEN = 'canvas_open' as const;
+/** LLM-facing scheduler tools — see `lib/scheduler/tool-scheduler.ts`. */
+export const TOOL_SCHEDULER_LIST = 'scheduler_list' as const;
+export const TOOL_SCHEDULER_CREATE = 'scheduler_create' as const;
+export const TOOL_SCHEDULER_DELETE = 'scheduler_delete' as const;
+export const TOOL_SCHEDULER_RUN_NOW = 'scheduler_run_now' as const;
 /** Tool that runs a hybrid (vector + BM25 / RRF) search inside a named
  *  RAG collection and returns the top-K chunks as a structured text
  *  block. Off by default — `lib/tools/index.ts` only pushes it into

@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Key, MessageSquare, Sparkles, FileText, Blocks, Brain, Plug, Info, DatabaseBackup, Sliders, MousePointerClick, Type, Database } from 'lucide-react';
+import { Key, MessageSquare, Sparkles, FileText, Blocks, Brain, Plug, Info, DatabaseBackup, Sliders, MousePointerClick, Type, Database, CalendarClock, BellRing, Send } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 
@@ -31,6 +31,9 @@ export const SETTINGS_SECTIONS: SectionNavItem[] = [
   // 快捷按钮（深链接 /settings/storage 仍可用）。从 nav 移除免去「Settings 里再点一
   // 下」的两级跳转。
   { path: 'advanced', getLabel: () => t('settings.nav.advanced'), icon: Sliders },
+  { path: 'scheduler', getLabel: () => t('settings.nav.scheduler'), icon: CalendarClock },
+  { path: 'notifications', getLabel: () => t('settings.nav.notifications'), icon: BellRing },
+  { path: 'telegram-gateway', getLabel: () => t('settings.nav.telegramGateway'), icon: Send },
   { path: 'about', getLabel: () => t('settings.nav.about'), icon: Info },
 ];
 

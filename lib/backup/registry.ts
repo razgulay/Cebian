@@ -44,15 +44,24 @@ import {
   workerModels,
   workerTeamEnabled,
   workerRoleTimeouts,
+  scheduledTasks,
+  canvasPanelOpen,
+  notifyChannels,
+  notifyChannelSecrets,
+  telegramGatewayConfig,
+  telegramGatewaySecrets,
   type MCPServerConfig,
   type ProviderCredentials,
   type WebDavConfig,
   type CustomProviderConfig,
   type WorkerModelMap,
   type WorkerTimeoutMap,
+  type TelegramGatewayConfig,
 } from '@/lib/persistence/storage';
 import { ragSettings, ragCollections } from '@/lib/rag/settings';
 import type { RagSettings, RagCollection } from '@/lib/rag/types';
+import type { ChannelSecret } from '@/lib/scheduler/notify-channels/types';
+import type { TelegramGatewaySecret } from '@/lib/telegram-gateway/types';
 
 /**
  * 一个 storage item 在备份中的归属：
@@ -519,6 +528,72 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastOpenSessionId, storageClass: 'exclude' }),
   // 聊天输入框固定的 Prompt / Skill（全局偏好，跨会话生效；无密钥）。
   entry({ item: composerPinnedContexts, storageClass: 'settings' }),
+  // Scheduler tasks（用户在 Settings → Scheduler 里 CRUD 的定时任务；非密钥，
+  // 走 settings 分类以便备份/恢复时一起同步）。
+  entry({ item: scheduledTasks, storageClass: 'settings' }),
+  // scheduler 多通道外部通知（Phase C / N2）：
+  //  - notifyChannels 走 settings（channel name / kind / topic / chatId / 开关 / notify-on flags）随备份走 config.json
+  //  - notifyChannelSecrets 走 credentials（token / URL）走 splitSecret，token 不进 config.json
+  entry({
+    item: notifyChannels,
+    storageClass: 'settings',
+  }),
+  entry({
+    item: notifyChannelSecrets,
+    storageClass: 'credentials',
+    // splitSecret：channel 名字 / kind / enabled / notify-on flags 与 secret 数组
+    // 完全分离——本字段存的就是 secret 整段，split 出 `safe = []`（公开 config 里
+    // 没东西），`secret = local`（整段都是 secret）。
+    splitSecret: (value: ChannelSecret[] | null) => ({
+      safe: [],
+      secret: (value ?? []) as unknown,
+    }),
+    restoreSecret: (local: ChannelSecret[] | null, secret: unknown, strategy) => {
+      const incoming = (secret ?? []) as ChannelSecret[];
+      if (strategy === 'replace') return incoming;
+      const existing = local ?? [];
+      const byId = new Map(existing.map((s) => [s.id, s]));
+      for (const s of incoming) if (!byId.has(s.id)) byId.set(s.id, s);
+      return Array.from(byId.values());
+    },
+    fillMissing: (local: ChannelSecret[] | null, backup: ChannelSecret[] | null) => {
+      if (!backup) return local;
+      const existing = local ?? [];
+      const byId = new Map(existing.map((s) => [s.id, s]));
+      for (const s of backup) if (!byId.has(s.id)) byId.set(s.id, s);
+      return Array.from(byId.values());
+    },
+  }),
+  //  - telegramGatewayConfig 走 settings（workerUrl / allowedChatIdsCsv / interactiveMode）随备份走 config.json
+  entry({
+    item: telegramGatewayConfig,
+    storageClass: 'settings',
+  }),
+  //  - telegramGatewaySecrets 走 credentials（botToken / webhookSecret / wsAuthToken）走 splitSecret，token 不进 config.json
+  entry({
+    item: telegramGatewaySecrets,
+    storageClass: 'credentials',
+    splitSecret: (value: TelegramGatewaySecret[] | null) => ({
+      safe: [],
+      secret: (value ?? []) as unknown,
+    }),
+    restoreSecret: (local: TelegramGatewaySecret[] | null, secret: unknown, strategy) => {
+      const incoming = (secret ?? []) as TelegramGatewaySecret[];
+      if (strategy === 'replace') return incoming;
+      const existing = local ?? [];
+      const byId = new Map(existing.map((s) => [s.id, s]));
+      for (const s of incoming) if (!byId.has(s.id)) byId.set(s.id, s);
+      return Array.from(byId.values());
+    },
+    fillMissing: (local: TelegramGatewaySecret[] | null, backup: TelegramGatewaySecret[] | null) => {
+      if (!backup) return local;
+      const existing = local ?? [];
+      const byId = new Map(existing.map((s) => [s.id, s]));
+      for (const s of backup) if (!byId.has(s.id)) byId.set(s.id, s);
+      return Array.from(byId.values());
+    },
+  }),
+  entry({ item: canvasPanelOpen, storageClass: 'exclude' }),
 ];
 
 /** BACKUP_REGISTRY 中所有已登记的 storage key 集合（供覆盖性测试比对）。 */

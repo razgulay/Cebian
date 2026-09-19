@@ -193,6 +193,9 @@ settings:
     storage: "文件系统"
     advanced: "高级"
     about: "关于"
+    scheduler: "定时任务"
+    notifications: "通知通道"
+    telegramGateway: "Telegram 网关"
   providers:
     title: "AI 提供商"
   storage:
@@ -754,6 +757,123 @@ settings:
   files:
     backToList: "返回文件列表"
     selectOrCreate: "从左侧选择或创建文件"
+  # Scheduled tasks（BG 自动化 scheduler）—— 用户配置 cron / interval 周期任务，
+  # 后台跑 fetch URL 或 webcheck（状态 / body 包含文本）。
+  scheduler:
+    title: "定时任务"
+    description: "用 cron 表达式或固定间隔在后台跑 fetch 或健康检查任务。"
+    empty: "还没有定时任务。在下面新建一个，开始后台拉取。"
+    createButton: "新建任务"
+    columns:
+      name: "名称"
+      schedule: "周期"
+      action: "动作"
+      lastResult: "结果"
+      enabled: "启用"
+    scheduleType:
+      interval: "每 N 分钟"
+      cron: "Cron 表达式"
+    intervalLabel: "间隔（分钟）"
+    cronLabel: "Cron 表达式"
+    cronPlaceholder: "*/15 * * * *"
+    actionType:
+      fetch: "抓取 URL"
+      webcheck: "健康检查"
+    fetchUrlLabel: "URL"
+    fetchExtractLabel: "抽取字段（可选）"
+    fetchExtractPlaceholder: "data.user.name"
+    webcheckUrlLabel: "URL"
+    webcheckExpectedLabel: "期望文本（contains_text 必填）"
+    notifyOnSuccess: "成功时通知"
+    notifyOnFailure: "失败时通知"
+    enabled: "启用"
+    dialogCreateTitle: "新建定时任务"
+    dialogEditTitle: "编辑定时任务"
+    dialogSave: "保存"
+    dialogSaveError: "保存失败，请检查字段后重试。"
+    dialogCancel: "取消"
+    dialogDelete: "删除"
+    deleteConfirmTitle: "删除定时任务？"
+    # $1 = task name
+    deleteConfirmBody: "确认删除 \"$1\"？此操作不可撤销。"
+    runNowButton: "立即运行"
+    runNowSuccess: "任务 \"$1\" 已派发（查看结果通知）。"
+    # $1 = task name, $2 = error summary
+    runNowFailure: "任务 \"$1\" 失败：$2"
+    resultToastSuccess: "$1 运行成功"
+    resultToastFailure: "$1 运行失败"
+    table:
+      # $1 = minutes
+      scheduleEvery: "每 $1 分钟"
+      actionStatus200: "状态 200"
+      # $1 = expected substring
+      actionContainsText: "包含 \"$1\""
+      dialogDescription: "保存时由后台校验，失败字段会在这里显示。"
+      nameLabel: "名称"
+      webcheckConditionStatus200: "状态 200"
+      webcheckConditionContainsText: "包含文本"
+      fetchUrlPlaceholder: "https://example.com/api"
+      webcheckUrlPlaceholder: "https://example.com/health"
+    permissionDeniedBody: "系统通知被关闭了。请在浏览器站点设置里启用通知，以接收定时任务的结果。"
+  # Multi-Channel Outbound Notification Gateway（Phase C / N4）—— Settings UI
+  notifications:
+    title: "通知通道"
+    description: "把定时任务结果推送到 ntfy、Telegram、Discord/Slack 风格的 webhook，或任何自定义端点。通道与浏览器内桌面通知并行触发。"
+    empty:
+      title: "还没配置通知通道"
+      hint: "在下面新增一个，让定时任务结果发到浏览器之外。"
+    columns:
+      name: "名称"
+      kind: "通道"
+      enabled: "启用"
+      lastTested: "上次测试"
+    kinds:
+      ntfy: "ntfy"
+      telegram: "Telegram"
+      webhook: "通用 webhook"
+    form:
+      name: "显示名"
+      namePlaceholder: "我的提醒"
+      topicLabel: "Topic"
+      topicPlaceholder: "cebian-alerts"
+      endpointLabel: "自托管 ntfy 端点（可空）"
+      endpointPlaceholder: "https://ntfy.example.com"
+      chatIdLabel: "Chat ID"
+      chatIdPlaceholder: "123456789"
+      chatIdHint: "给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。"
+      urlLabel: "Webhook URL"
+      urlPlaceholder: "https://discord.com/api/webhooks/…"
+      enabled: "启用"
+      notifySuccess: "成功时通知"
+      notifyFailure: "失败时通知"
+    dialogAdd: "新增通知通道"
+    dialogEdit: "编辑通知通道"
+    buttons:
+      save: "保存"
+      cancel: "取消"
+      test: "发送测试"
+      delete: "删除"
+      enable: "启用"
+      disable: "停用"
+    deleteConfirmTitle: "删除通知通道？"
+    deleteConfirmBody: "确认删除 \"$1\"？停止向该通道发送定时任务结果。"
+    testInProgress: "发送中…"
+    testResultSuccess: "上次测试：$1 ms"
+    testResultFailure: "测试失败：$1"
+    permissionRequired: "该通道需要 token / URL 才能工作，测试前先填对应 secret 字段。"
+    basicAuthHint: "自托管 ntfy 端点加 `?user=<user>&pass=<pass>` 即可发 Basic auth 头。"
+  telegramGateway:
+    title: "Telegram 网关"
+    description: "Telegram 与 Cebian agent 的双向实时桥接。需要自部署 Cloudflare Worker 中转。"
+    workerUrl: "Worker URL"
+    botToken: "Bot token"
+    webhookSecret: "Webhook secret"
+    wsAuthToken: "WS auth token"
+    allowedChatIds: "允许的 chat IDs"
+    chatIdHint: "给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。"
+    interactiveMode: "交互模式（把 Telegram 消息路由到 agent）"
+    save: "保存"
+    saved: "已保存"
 
 # ─── 聊天 ───
 chat:
@@ -1324,6 +1444,9 @@ vfs:
     cebian: "Cebian"
   copyPath: "复制路径"
   pathCopied: "已复制路径"
+  openInCanvas: "在 Canvas 中打开"
+  openInCanvasNoSession: "在 Canvas 中打开（文件不在任何会话工作区内）"
+  openedInCanvas: "已在 Canvas 中打开"
   showCollapsed: "显示折叠的层级"
   sandboxPreview: "沙箱预览"
   sandboxPreviewHint: "在独立的沙箱页中渲染。脚本可以运行，但无法访问扩展 API 或 Cebian 存储的其他数据。"
@@ -1458,3 +1581,24 @@ errors:
     # $1 = 技能名称
     reservedName: "该技能名称为系统保留：$1"
     parseFrontmatter: "无法解析 SKILL.md 的 frontmatter。"
+
+
+# ─── Canvas 面板（侧边栏 chat 视图中的实时 HTML 预览）───
+canvas:
+  header:
+    # Header Eye/EyeOff 切换按钮的 tooltip + aria-label（Header 同一处用）。
+    openAria: "打开画布"
+    closeAria: "关闭画布"
+  pane:
+    # Pane 顶部 title 回落文案（无文件打开时显示「画布」，有文件时显示 path）。
+    titleFallback: "画布"
+    # Pane 自身 close 按钮（右上角 EyeOff）的 tooltip + aria-label。
+    closeAria: "关闭画布"
+    # 拾取元素模式 toggle（tooltip 与 aria-label 同一处用）：inspectOn 为当前
+    # 关闭、点击开启的文案；inspectOff 为当前开启、点击关闭的文案。
+    inspectOn: "拾取元素"
+    inspectOff: "停止拾取"
+    empty:
+      # Pane 处于 empty state 时（panel 开着但 BG 没有打开文件）的两行文案。
+      title: "画布中没有打开的文件。"
+      hint: "请让 agent 调用 canvas_open 打开一个文件。"

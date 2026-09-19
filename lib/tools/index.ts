@@ -24,6 +24,8 @@ import { SessionToolContext } from './session-context';
 import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
 import { createMCPAgentTool } from './mcp-tool';
+import { createSessionCanvasOpenTool } from '@/lib/canvas/tool-canvas-open';
+import { schedulerTools } from '@/lib/scheduler/tool-scheduler';
 import { debugLog, withSession } from '@/lib/debug/log';
 import type { ServerMessage } from '@/lib/ipc/protocol';
 import { workerTeamEnabled, type ModelIdentity } from '@/lib/persistence/storage';
@@ -56,6 +58,11 @@ const sharedTools: AgentTool<any>[] = [
   // Read-only — safe to expose to every session.
   ragInspectTool,
   chromeApiTool,
+  // BG scheduler automation — 4 CRUD-style tools shared across sessions
+  // (BG holds task state in storage, not per-session). LLM cannot update
+  // existing tasks (no scheduler_update) to prevent schedule drift; the
+  // Settings UI is the only path for partial edits.
+  ...schedulerTools,
 ];
 
 /**
@@ -150,6 +157,9 @@ export async function buildSessionToolArray(
 
   const runSkill = createSessionRunSkillTool(ctx.sessionId);
   const base = [...ctx.getInteractiveTools(), ...sharedTools, runSkill, ...mcpTools];
+  // canvas_open 也是 per-session 工厂（BG canvas 状态按 session 隔离）；
+  // 见 `lib/canvas/tool-canvas-open.ts` 头注释。
+  base.push(createSessionCanvasOpenTool(ctx.sessionId));
   // Always include delegate_dom — checks the sub-agent model at runtime.
   const delegateStart = Date.now();
   const { delegateDomTool } = await import('./delegate-dom');

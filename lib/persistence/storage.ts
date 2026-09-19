@@ -280,6 +280,12 @@ export const lastOpenSessionId = defineLoggedItem<string | null>(
   { fallback: null },
 );
 
+// Canvas Live Artifacts — pane open/closed state.
+export const canvasPanelOpen = defineLoggedItem<boolean>(
+  'session:canvas-panel-open',
+  { fallback: false },
+);
+
 export const themePreference = defineLoggedItem<'dark' | 'light' | 'system'>(
   'local:theme',
   { fallback: 'system' },
@@ -413,6 +419,67 @@ export const pendingChangelogVersion = defineLoggedItem<string | null>(
   'local:pendingChangelogVersion',
   { fallback: null },
 );
+
+// ─── Scheduled tasks (BG automation scheduler) ───
+//
+// 用户在 Settings → Scheduler 配置；BG 用 chrome.alarms 在每个一分钟 tick
+// 拉一次列表，对到点的任务跑 action 并写回 lastRunAt / lastResult。属于用户配置，
+// 进 backup 的 settings 分类——调度任务随备份走能让用户换机迁移。
+import type { ScheduledTask } from '@/lib/scheduler/types';
+
+export const scheduledTasks = defineLoggedItem<ScheduledTask[]>(
+  'local:scheduledTasks',
+  { fallback: [] },
+);
+
+// ─── 调度任务外部通知通道（Multi-Channel Outbound Notification Gateway） ───
+//
+// config 与 secret 分开存储：
+// - `notifyChannels` (settings class)：channel name / kind / enabled / notify-on flags / kind-specific
+//   非机密字段（ntfy topic / telegram chatId）。随备份走 config.json。
+// - `notifyChannelSecrets` (credentials class)：token / URL 等机密字段。
+//   走 backup registry 的 splitSecret——token 不进 config.json，只进 credentials.json。
+import type { ChannelConfig, ChannelSecret } from '@/lib/scheduler/notify-channels/types';
+
+export const notifyChannels = defineLoggedItem<ChannelConfig[]>(
+  'local:notifyChannels',
+  { fallback: [] },
+);
+
+export const notifyChannelSecrets = defineLoggedItem<ChannelSecret[]>(
+  'local:notifyChannelSecrets',
+  { fallback: [] },
+);
+
+// ─── Telegram Two-Way Gateway (Phase D / D5) ───
+//
+// Config (settings class — visible + safe to commit) lives alongside
+// `notifyChannels` / `notifyChannelSecrets` from Phase C. Secrets
+// (credentials class — split out via backup registry) hold the bot token + the
+// shared Worker / extension gateway secret.
+import type {
+  TelegramGatewayConfig,
+  TelegramGatewaySecret,
+} from '@/lib/telegram-gateway/types';
+
+export const telegramGatewayConfig = defineLoggedItem<TelegramGatewayConfig>(
+  'local:telegramGatewayConfig',
+  {
+    fallback: {
+      workerUrl: '',
+      allowedChatIdsCsv: '',
+      interactiveMode: false,
+    },
+  },
+);
+
+export const telegramGatewaySecrets = defineLoggedItem<TelegramGatewaySecret[]>(
+  'local:telegramGatewaySecrets',
+  { fallback: [] },
+);
+
+/** Type re-exports for backup registry imports. */
+export type { TelegramGatewayConfig, TelegramGatewaySecret } from '@/lib/telegram-gateway/types';
 
 // ─── WebDAV 备份连接配置 ───
 

@@ -202,6 +202,9 @@ settings:
     storage: "Filesystem"
     advanced: "Advanced"
     about: "About"
+    scheduler: "Scheduled tasks"
+    notifications: "Notification channels"
+    telegramGateway: "Telegram Gateway"
   providers:
     title: "AI providers"
   storage:
@@ -771,6 +774,120 @@ settings:
   files:
     backToList: "Back to file list"
     selectOrCreate: "Select or create a file from the left"
+  # Scheduled tasks (BG automation scheduler) — user configures cron / interval
+  # jobs that fetch a URL or webcheck (status_200 / contains_text) on a schedule.
+  scheduler:
+    title: "Scheduled tasks"
+    description: "Run fetch or webcheck jobs on a cron or interval schedule in the background."
+    empty: "No scheduled tasks yet. Create one below to start fetching in the background."
+    createButton: "New task"
+    columns:
+      name: "Name"
+      schedule: "Schedule"
+      action: "Action"
+      lastResult: "Result"
+      enabled: "Enabled"
+    scheduleType:
+      interval: "Every N minutes"
+      cron: "Cron expression"
+    intervalLabel: "Interval (minutes)"
+    cronLabel: "Cron expression"
+    cronPlaceholder: "*/15 * * * *"
+    actionType:
+      fetch: "Fetch URL"
+      webcheck: "Health check"
+    fetchUrlLabel: "URL"
+    fetchExtractLabel: "Extract field (optional)"
+    fetchExtractPlaceholder: "data.user.name"
+    webcheckUrlLabel: "URL"
+    webcheckExpectedLabel: "Expected text (for contains_text)"
+    notifyOnSuccess: "Notify on success"
+    notifyOnFailure: "Notify on failure"
+    enabled: "Enabled"
+    dialogCreateTitle: "New scheduled task"
+    dialogEditTitle: "Edit scheduled task"
+    dialogSave: "Save"
+    dialogSaveError: "Couldn't save task. Check the fields and try again."
+    dialogCancel: "Cancel"
+    dialogDelete: "Delete"
+    deleteConfirmTitle: "Delete scheduled task?"
+    deleteConfirmBody: "Delete \"$1\"? This cannot be undone."
+    runNowButton: "Run now"
+    runNowSuccess: "Task \"$1\" dispatched (watch for the result)."
+    runNowFailure: "Task \"$1\" failed: $2"
+    resultToastSuccess: "$1 ran successfully"
+    resultToastFailure: "$1 failed"
+    table:
+      scheduleEvery: "every $1 min"
+      actionStatus200: "status 200"
+      actionContainsText: "contains \"$1\""
+      dialogDescription: "BG validates on save; failed fields surface here."
+      nameLabel: "Name"
+      webcheckConditionStatus200: "status 200"
+      webcheckConditionContainsText: "contains text"
+      fetchUrlPlaceholder: "https://example.com/api"
+      webcheckUrlPlaceholder: "https://example.com/health"
+    permissionDeniedBody: "System notifications are blocked. Enable them in your browser's site settings to receive scheduler task results."
+  # Multi-Channel Outbound Notification Gateway (Phase C / N4) — Settings UI
+  notifications:
+    title: "Notification channels"
+    description: "Send scheduler task results to ntfy, Telegram, Discord/Slack-style webhooks, or any custom endpoint. Channels fire alongside the in-browser desktop notification."
+    empty:
+      title: "No channels configured"
+      hint: "Add one below to start receiving scheduler results outside the browser."
+    columns:
+      name: "Name"
+      kind: "Channel"
+      enabled: "On"
+      lastTested: "Last tested"
+    kinds:
+      ntfy: "ntfy"
+      telegram: "Telegram"
+      webhook: "Generic webhook"
+    form:
+      name: "Display name"
+      namePlaceholder: "My alerts"
+      topicLabel: "Topic"
+      topicPlaceholder: "cebian-alerts"
+      endpointLabel: "Self-hosted ntfy endpoint (optional)"
+      endpointPlaceholder: "https://ntfy.example.com"
+      chatIdLabel: "Chat ID"
+      chatIdPlaceholder: "123456789"
+      chatIdHint: "Find via @userinfobot on Telegram, or check getUpdates after sending the bot a message."
+      urlLabel: "Webhook URL"
+      urlPlaceholder: "https://discord.com/api/webhooks/…"
+      enabled: "Enabled"
+      notifySuccess: "Notify on success"
+      notifyFailure: "Notify on failure"
+    dialogAdd: "Add notification channel"
+    dialogEdit: "Edit notification channel"
+    buttons:
+      save: "Save"
+      cancel: "Cancel"
+      test: "Send test"
+      delete: "Delete"
+      enable: "Enable"
+      disable: "Disable"
+    deleteConfirmTitle: "Delete notification channel?"
+    deleteConfirmBody: "Delete \"$1\"? This stops sending scheduler results to this channel."
+    testInProgress: "Sending…"
+    testResultSuccess: "Last test: $1 ms"
+    testResultFailure: "Test failed: $1"
+    basicAuthHint: "Add `?user=<user>&pass=<pass>` to a self-hosted ntfy endpoint to send Basic auth header."
+    permissionRequired: "This channel requires a token / URL to work. Fill the corresponding secret field before testing."
+  # Telegram Two-Way Gateway (Phase D / D5) — Settings UI
+  telegramGateway:
+    title: "Telegram Gateway"
+    description: "Two-way realtime bridge between Telegram and Cebian agent. Requires a self-deployed Cloudflare Worker relay."
+    workerUrl: "Worker URL"
+    botToken: "Bot token"
+    webhookSecret: "Webhook secret"
+    wsAuthToken: "WS auth token"
+    allowedChatIds: "Allowed chat IDs"
+    chatIdHint: "Find via @userinfobot on Telegram, or check getUpdates after messaging the bot."
+    interactiveMode: "Interactive mode (route Telegram messages to agent)"
+    save: "Save"
+    saved: "Saved successfully"
 
 # ─── Chat surface ───
 chat:
@@ -1363,6 +1480,9 @@ vfs:
     cebian: "Cebian"
   copyPath: "Copy path"
   pathCopied: "Path copied"
+  openInCanvas: "Open in Canvas"
+  openInCanvasNoSession: "Open in Canvas (file is outside any session workspace)"
+  openedInCanvas: "Opened in Canvas"
   showCollapsed: "Show collapsed folders"
   sandboxPreview: "Sandboxed preview"
   sandboxPreviewHint: "Rendered in an isolated sandbox page. Scripts can run, but cannot reach the extension APIs or anything Cebian stores."
@@ -1502,3 +1622,24 @@ errors:
     # $1 = skill name
     reservedName: "Skill name is reserved: $1"
     parseFrontmatter: "Failed to parse SKILL.md frontmatter."
+
+
+# ─── Canvas pane (live HTML preview in sidepanel chat view) ───
+canvas:
+  header:
+    # Tooltip + aria-label for Header Eye/EyeOff toggle button（Header 同一处用）。
+    openAria: "Open canvas"
+    closeAria: "Close canvas"
+  pane:
+    # Pane 顶部 title 回落文案（无文件打开时显示 "Canvas"，有文件时显示 path）。
+    titleFallback: "Canvas"
+    # Pane 自身的 close button（右上角 EyeOff）tooltip + aria-label。
+    closeAria: "Close canvas"
+    # Pick-element mode toggle（tooltip 与 aria-label 同一处用）：inspectOn 是
+    # 当前关闭、点击开启的文案；inspectOff 是当前开启、点击关闭的文案。
+    inspectOn: "Pick an element"
+    inspectOff: "Stop picking"
+    empty:
+      # Pane 处于 empty state 时（panel 开着但 BG 没有 open 文件）的两行文案。
+      title: "No file open in canvas."
+      hint: "Ask the agent to canvas_open a file."

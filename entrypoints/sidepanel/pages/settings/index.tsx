@@ -14,6 +14,9 @@ import { MCPSection } from '@/components/settings/sections/MCPSection';
 import { PageInteractionSection } from '@/components/settings/sections/PageInteractionSection';
 import { AppearanceSection } from '@/components/settings/sections/AppearanceSection';
 import { BackupSection } from '@/components/settings/sections/BackupSection';
+import { SchedulerSection } from '@/components/settings/sections/SchedulerSection';
+import { NotificationsSection } from '@/components/settings/sections/NotificationsSection';
+import { TelegramGatewaySection } from '@/components/settings/sections/TelegramGatewaySection';
 import { StorageSection } from '@/components/settings/sections/StorageSection';
 import { AdvancedSection } from '@/components/settings/sections/AdvancedSection';
 import { AboutSection } from '@/components/settings/sections/AboutSection';
@@ -54,6 +57,9 @@ export function SettingsRoutes({ basePath, showBackButton = false, showOpenInTab
 <Route path="page-interaction/*" element={<PageInteractionSection />} />
         <Route path="appearance" element={<AppearanceSection />} />
         <Route path="backup" element={<BackupSection />} />
+        <Route path="scheduler" element={<SchedulerSection />} />
+        <Route path="notifications" element={<NotificationsSection />} />
+        <Route path="telegram-gateway" element={<TelegramGatewaySection />} />
         <Route path="storage" element={<StorageSection />} />
         <Route path="advanced" element={<AdvancedSection />} />
         <Route path="about" element={<AboutSection />} />

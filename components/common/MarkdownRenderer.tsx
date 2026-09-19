@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { createContext, memo, useContext, useEffect, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import Markdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
@@ -9,11 +9,15 @@ import { CopyButton } from './CopyButton';
 import { t } from '@/lib/i18n';
 import { CEBIAN_SKILLS_DIR, CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
 import { encodeRelPath, vfs } from '@/lib/persistence/vfs';
+import { canvasPanelOpen } from '@/lib/persistence/storage';
+import { canvasChannel } from '@/lib/canvas/sidepanel-channel';
+import { ChatSessionIdContext } from '@/components/chat/context/ChatSessionIdContext';
 import { isImageMime, mimeFromPath } from '@/lib/content/mime';
 import { formatBytes } from '@/lib/utils';
 import { extensionSettingsUrl } from '@/lib/browser/file-access';
 import { normalizeMathDelimiters } from '@/lib/content/math-delimiters';
 import { splitMarkdownBlocks } from '@/lib/content/markdown-blocks';
+import { debugLog } from '@/lib/debug/log';
 
 /**
  * Minimal structural types for the hast (HTML AST) nodes react-markdown passes
@@ -764,8 +768,30 @@ const components: Components = {
   ),
 };
 
+/**
+ * 解析 resolved 链接指向的 VFS `.html`/`.htm` 路径（canvas 链接拦截用）。
+ * 非本扩展的 vfs.html 链接、无 hash、或目标不是 HTML 文件 → null——拦截只
+ * 接管「能在 canvas 里预览」的链接，其余保持既有行为。路径段经 `encodeURI`
+ * 写入（见 `vfsDocumentUrl`），这里用 `decodeURI` 逆变换；查询串（`?anchor=`）
+ * 与 hash 内锚点一并舍弃——canvas 预览不需要它们。
+ */
+function htmlVfsPathFromResolvedUrl(resolved: string): string | null {
+  const base = extensionUrl('vfs.html');
+  if (!base || !resolved.startsWith(base)) return null;
+  const hashAt = resolved.indexOf('#');
+  if (hashAt < 0) return null;
+  const raw = resolved.slice(hashAt + 1);
+  if (!/^\/[^?#]*\.html?$/i.test(raw)) return null;
+  try {
+    return decodeURI(raw);
+  } catch {
+    return null;
+  }
+}
+
 function MarkdownLink({ href, children, ...props }: React.ComponentPropsWithoutRef<'a'>) {
   const currentVfsPath = useContext(MarkdownVfsPathContext);
+  const chatSessionId = useContext(ChatSessionIdContext);
   const resolved = resolveMarkdownHref(href, currentVfsPath);
   if (!resolved) return <span className="text-muted-foreground">{children}</span>;
   const target = markdownLinkTarget(resolved, currentVfsPath);
@@ -773,6 +799,22 @@ function MarkdownLink({ href, children, ...props }: React.ComponentPropsWithoutR
   // （「允许访问文件网址」开关所在页，LLM 引导用户开启时会给出该链接），
   // 拦截点击改经 chrome.tabs.create 打开；不放开任意 chrome:// 地址
   const isOwnSettingsPage = resolved === extensionSettingsUrl();
+  // Canvas 链接拦截（仅 chat 语境）：指向 VFS `.html` 的链接不再开独立
+  // VFS 视图，改为在 canvas pane 里打开（顺手把面板从关闭态展开——面板开合
+  // 状态走 storage，App 的 useStorageItem watch 会实时跟上）。VFS 标签页自己
+  // 渲染 markdown 时 currentVfsPath 有值、chatSessionId 为 null，两层守门都
+  // 不命中，链接行为与从前完全一致。
+  const htmlCanvasPath = currentVfsPath === undefined && chatSessionId !== null
+    ? htmlVfsPathFromResolvedUrl(resolved)
+    : null;
+  const openInCanvas = htmlCanvasPath
+    ? (e: ReactMouseEvent<HTMLAnchorElement>) => {
+        e.preventDefault();
+        debugLog.info('ui', 'canvas:link_open', { path: htmlCanvasPath, sessionId: chatSessionId });
+        void canvasPanelOpen.setValue(true);
+        canvasChannel.openFile(htmlCanvasPath);
+      }
+    : undefined;
   return (
     <a
       href={resolved}
@@ -784,7 +826,7 @@ function MarkdownLink({ href, children, ...props }: React.ComponentPropsWithoutR
             e.preventDefault();
             void chrome.tabs.create({ url: resolved, active: true });
           }
-        : props.onClick}
+        : openInCanvas ?? props.onClick}
       {...props}
     >
       {children}

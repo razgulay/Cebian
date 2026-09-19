@@ -27,6 +27,9 @@ import type { Message } from '@earendil-works/pi-ai';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { mcpAppResourceChannel } from '@/lib/mcp/sidepanel-channel';
+import { canvasChannel } from '@/lib/canvas/sidepanel-channel';
+import { schedulerChannel, publishResult } from '@/lib/scheduler/sidepanel-channel';
+import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
 import { compactionChannel } from '@/lib/agent/compaction-sidepanel-channel';
 import { sessionListChannel } from '@/lib/agent/session-list-channel';
 import { myInstanceId } from '@/lib/ipc/instance-id';
@@ -63,6 +66,9 @@ export interface AgentPortState {
   sessionId: string | null;
   sessionTitle: string;
   connected: boolean;
+  /** Live Telegram gateway connection status — drives the header badge.
+   *  Updated by the telegramGatewayChannel subscriber effect below. */
+  telegramStatus: 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
   /** Last error message from the agent, cleared on next prompt. */
   lastError: string | null;
   /**
@@ -134,6 +140,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     sessionId: null,
     sessionTitle: '',
     connected: false,
+    telegramStatus: 'disconnected',
     lastError: null,
     contextOverflow: null,
     contextWindow: null,
@@ -407,6 +414,10 @@ case 'stream_ops':
             ...prev,
             liveLines: new Map(),
           }));
+
+          // Telegram reply：dispatch 已迁到 BG 侧（telegram-gateway/manager.ts
+          // 按 OpenClaw 模式跑独立 session 并自行经 WS 回复）——agent_end 在
+          // sidepanel 不再承担 Telegram 回信。
           break;
 
         case 'tool_pending':
@@ -624,6 +635,37 @@ case 'stream_ops':
         case 'mcp_resource_result':
           mcpAppResourceChannel.handleResult(msg);
           break;
+
+        case 'canvas_state':
+        case 'canvas_opened':
+        case 'canvas_file_changed':
+          // Canvas Live Artifacts: BG 推 canvas 事件（initial state / open / hot-reload）。
+          // sessionId 过滤在 channel 内部做（canvasChannel 已 setActiveSession）。
+          // 不需要 isCurrentSession 守门——BG 通过 broadcastToViewers-style
+          // 的 channel-level activeSessionId 过滤已经处理了 cross-session 干扰。
+          canvasChannel.handleMessage(msg);
+          break;
+
+        case 'telegram_gateway_status':
+          // Telegram Gateway 实时桥：BG 端 bootstrap 经 broadcastAll 把状态送到
+          // 所有连接端口，本侧 channel 喂给徽章订阅者。inbound 消息由 BG 侧的
+          // session 隔离路由直接处理，不再经过 sidepanel bridge。
+          telegramGatewayChannel.publishStatus(msg.status);
+          break;
+
+        case 'scheduler_list_result':
+          // 这是对 scheduler_list/create/update/delete/run_now 请求的 ack——
+          // `useScheduledTasks` 收到此消息并 resolve 自己的 Promise；不在
+          // switch 里 fanout（没有 UI 订阅这种「整表刷新」事件）。
+          break;
+
+        case 'scheduler_result':
+          // BG 推 task 跑完结果（alarm tick 或 run_now 触发）。Bridge 到本地
+          // channel 让 UI 订阅者（useSchedulerNotifications 弹 Sonner toast）
+          // 拿到结构化事件——BG 域不能直接 import lib/ 的 channel，否则
+          // BG / sidepanel 跨 bundle 状态不共享，事件丢一半。
+          publishResult(msg);
+          break;
       }
     };
 
@@ -663,6 +705,12 @@ case 'stream_ops':
       // Expose to the MCP App resource channel so useMCPAppResource can
       // fetch `ui://` HTML for inline iframe rendering.
       mcpAppResourceChannel.setPort(port);
+      // Canvas Live Artifacts: CanvasPane uses this port for canvas_* push events.
+      canvasChannel.setPort(port);
+      // Scheduled tasks: useBackgroundAgent.handleMessage routes scheduler_result
+      // into schedulerChannel.handleResult; without setPort, disconnect 不会清掉
+      // UI bundle 内的 lastResults，订阅者重连会拿到过期数据。
+      schedulerChannel.setPort(port);
 
       port.onMessage.addListener(handleMessage);
 
@@ -676,6 +724,8 @@ case 'stream_ops':
           recorderChannel.setPort(null);
           mcpAppResourceChannel.setPort(null);
           sessionListChannel.setPort(null);
+          canvasChannel.setPort(null);
+          schedulerChannel.setPort(null);
           setState(prev => ({ ...prev, connected: false }));
         }
         scheduleRetry();
@@ -718,6 +768,8 @@ case 'stream_ops':
       recorderChannel.setPort(null);
       mcpAppResourceChannel.setPort(null);
       sessionListChannel.setPort(null);
+      canvasChannel.setPort(null);
+      schedulerChannel.setPort(null);
       // Phase 2：组件卸载时取消节流 timer——否则 50ms 后仍会回调已卸载
       // 组件的 setState（StrictMode 双挂载时尤其明显）。
       streamQueue.reset();
@@ -806,6 +858,10 @@ case 'stream_ops':
     // 真正投递成功后再写入新 sessionId，避免重连等待期间订阅一个尚未创建的会话。
     if (!existingSessionId) {
       sessionIdRef.current = sessionId;
+      // Canvas Live Artifacts：新会话——同步把 channel 的 activeSessionId 也
+      // 指过去；如果 channel 之前缓存的是别的 session 快照，
+      // useCanvasChannel 的 useEffect 会重新调用 getLastSnapshot 拿当前 session 状态。
+      canvasChannel.setActiveSession(sessionId);
     }
 
     // Optimistically add user message to local state for immediate UI feedback
@@ -1038,6 +1094,11 @@ case 'stream_ops':
       }
     }
     sessionIdRef.current = sessionId;
+    // Canvas Live Artifacts：canvasChannel 用 activeSessionId 来过滤
+    // 其 lastSnapshot 缓存（BG 用 broadcastAll 跨 session 推 canvas_* 事件，详见
+    // lib/canvas/sidepanel-channel.ts 头注释）。订阅切到这里就让 channel
+    // 把缓存策略指到这次 session。
+    canvasChannel.setActiveSession(sessionId);
     setState(prev => isSessionChange
       ? {
           ...prev,
@@ -1065,6 +1126,20 @@ case 'stream_ops':
   useEffect(() => {
     sessionIdRef.current = state.sessionId;
   }, [state.sessionId]);
+
+  // Telegram gateway inbound：dispatch 已迁到 BG 侧（manager.ts，OpenClaw 式
+  // session 隔离——每个 chat_id 一个专用 session，跑在后台不碰当前打开的
+  // chat）。本 hook 只保留 status 订阅驱动 Header 徽章；用户从 History 点开
+  // `Telegram · …` session 时，走常规 subscribe + broadcast 路径实时看消息。
+  // Telegram gateway status → setState for header badge (UI uses local state; channel
+  // remains the source of truth). No-op when state already matches — avoid render
+  // churn on every reconnect attempt.
+  useEffect(() => {
+    const unsub = telegramGatewayChannel.subscribeStatus((s) => {
+      setState(prev => (prev.telegramStatus === s ? prev : { ...prev, telegramStatus: s }));
+    });
+    return unsub;
+  }, []);
 
   // 用 messages 引用变化来驱动 token 估算刷新。estimateContextTokensForUi
   // 与 BG maybeCompact 同形状（sanitize → lastSummary → sinceLast → estimate），
@@ -1128,6 +1203,7 @@ case 'stream_ops':
       sessionId: null,
       sessionTitle: '',
       connected: true,
+      telegramStatus: 'disconnected',
       lastError: null,
       contextOverflow: null,
       contextWindow: null,

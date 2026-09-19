@@ -26,6 +26,8 @@ import type { MCPResourceContents } from '@/lib/mcp/client';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import type { BranchEntryInfo } from '@/lib/agent/session-projection';
 import type { DebugLogEntry } from '@/lib/debug/log';
+import type { RunResult } from '@/lib/scheduler/types';
+import type { ChannelKind } from '@/lib/scheduler/notify-channels/types';
 
 // ─── Port name ───
 
@@ -163,7 +165,41 @@ export type ClientMessage =
   /** Subscribe to the BG's debug-log broadcast stream. Pair with
    *  `debug_log_unsubscribe` on unmount. Sidepanel useLiveLog uses this. */
   | { type: 'debug_log_subscribe' }
-  | { type: 'debug_log_unsubscribe' };
+  | { type: 'debug_log_unsubscribe' }
+  // ─── Scheduled tasks (BG automation scheduler) ───
+  /** Sidepanel (Settings → Scheduler 列表) 拉当前所有 tasks。BG 回一条
+   *  `scheduler_list_result` 给发起端口（不广播）。 */
+  | { type: 'scheduler_list' }
+  /** 创建新 task。`task` 是 Omit<ScheduledTask, 'id' | 'lastRunAt' | 'lastResult'>——
+   *  id 由 BG 生成（crypto.randomUUID），lastRunAt / lastResult 强制 null。BG 写完
+   *  后回一条 `scheduler_list_result` 给发起端口，让 UI 即时刷新。validation 在 BG
+   *  端做（共享 lib/scheduler/validate.ts），失败回 `error` ServerMessage。 */
+  | { type: 'scheduler_create'; task: unknown }
+  /** 局部更新一个 task。`id` 必填；`patch` 是 Partial<name/schedule/action/notify/enabled>，
+   *  至少一个字段必须 present。BG 写完后回 `scheduler_list_result`。lastRunAt /
+   *  lastResult 不在 patch 里——保留历史结果。 */
+  | { type: 'scheduler_update'; id: string; patch: unknown }
+  /** 删除 task。BG 写完后回 `scheduler_list_result`。 */
+  | { type: 'scheduler_delete'; id: string }
+  /** 手动触发一个 task 立刻跑一次（不等到 alarm tick）。BG 走 `runTask` 并发一条
+   *  `scheduler_result`（source: 'manual'）——结果 push 给所有订阅者，让多窗口看到
+   *  手动触发的进展。失败回 `error`。 */
+  | { type: 'scheduler_run_now'; id: string }
+  /** 触发单 channel 的「test send」（Settings UI 的「Send test notification」按钮）。
+   *  BG 读 channel + 对应 secret，调 `dispatchSingleChannelTest`，回
+   *  `scheduler_channel_test_result`——包含 success / latencyMs / error？字段
+   *  供 UI 即时显示。失败也回同形状的 wire，让 UI 区分是「fail」而不是「无响应」。 */
+  | { type: 'scheduler_test_channel'; id: string }
+  | { type: 'telegram_gateway_config_get' }
+  | { type: 'telegram_gateway_config_set'; config: unknown; secrets: unknown }
+  /** UI 主动发送一条 Telegram 回复（BG 转交给 bootstrap 持有的 WS 客户端）。
+   *  跨 context 桥：sidepanel 的 channel 实例不持有 outbound sender，必须经
+   *  port 走 BG 侧真正的客户端。fire-and-forget——失败经路由层回 `error`。 */
+  | { type: 'telegram_gateway_send'; action: unknown }
+  /** UI 请求把一个 VFS 文件打开到 canvas（chat 里 `#/…html` 链接的点击拦截）。
+   *  BG 调 openCanvas → 广播 `canvas_opened`，CanvasPane 即时显示。fire-and-forget
+   *  ——失败由路由层统一回 `error` ServerMessage，UI 不等待。 */
+  | { type: 'canvas_open'; sessionId: string; path: string };
 
 /**
  * `ClientMessage['type']` 的值级清单，供运行期穷尽性检查用（类型在编译后被擦除，
@@ -198,6 +234,16 @@ export const CLIENT_MESSAGE_TYPES = [
   'debug_log_unsubscribe',
   'session_pin',
   'session_rename',
+  'scheduler_list',
+  'scheduler_create',
+  'scheduler_update',
+  'scheduler_delete',
+  'scheduler_run_now',
+  'scheduler_test_channel',
+  'telegram_gateway_config_get',
+  'telegram_gateway_config_set',
+  'telegram_gateway_send',
+  'canvas_open',
 ] as const satisfies readonly ClientMessage['type'][];
 
 type _ExpectNever<T extends never> = T;
@@ -440,4 +486,86 @@ export type ServerMessage =
    *  per subscriber; the consumer caps the in-memory buffer (see
    *  useLiveLog). */
   | { type: 'debug_log_entry'; entry: DebugLogEntry }
-  | { type: 'debug_log_cleared' };
+  | { type: 'debug_log_cleared' }
+  // ─── Canvas Live Artifacts ───
+  /** 订阅 / 重连时 BG 推送的 canvas 状态帧：`openPath === null` 表示 canvas
+   *  对此 session 关闭（无文件打开）。`content` 是该文件当前内容——push 而不是
+   *  让 sidepanel 再走一次 fetch，避免额外 round-trip；文件通常 ≤100KB，
+   *  在 64MiB 单消息上限之下非常宽裕。Session-scoped：随 `subscribe` /
+   *  重连触发。 */
+  | {
+      type: 'canvas_state';
+      sessionId: string;
+      openPath: string | null;
+      content: string | null;
+    }
+  /** Agent 通过 `canvas_open` 工具打开一个 VFS 文件时 BG 广播的「刚打开」事件。
+   *  走 `broadcastToViewers(sessionId, ...)`，本 session 的所有 viewer 都会
+   *  收到；其他 session 的 sidepanel 看不到。 */
+  | {
+      type: 'canvas_opened';
+      sessionId: string;
+      path: string;
+      content: string;
+    }
+  /** VFS 写入命中「正被本 session 的某个 viewer 打开着」的路径时 BG 广播的热
+   *  更新事件。载荷形态与 `canvas_opened` 同——sidepanel 用同一 handler 渲染。 */
+  | {
+      type: 'canvas_file_changed';
+      sessionId: string;
+      path: string;
+      content: string;
+    }
+  // ─── Scheduled tasks (BG automation scheduler) ───
+  /** `scheduler_list` / `scheduler_create` / `scheduler_update` /
+   *  `scheduler_delete` 的回复。BG 仅回给发起端口（不广播），UI 拿 `tasks`
+   *  整体替换当前列表。 */
+  | { type: 'scheduler_list_result'; tasks: unknown[] }
+  /** `scheduler_create` 的「带 id」回复。BG 仅回发起端口。`id` 是新任务的
+   *  crypto.randomUUID()——tool 据此写回 details 与后续 run_now / delete 用同
+   *  一 id。`task` 镜像 BG 写完后的完整 ScheduledTask（带 createdAt），让 LLM
+   *  能立即看到落库后的样子，无需再发一次 list。 */
+  | { type: 'scheduler_create_result'; id: string; task: unknown }
+  /** 单 task 跑完结果（alarm tick 自动跑 OR `scheduler_run_now` 手动跑）。
+   *  BG 通过 `schedulerChannel.publishResult` fanout 给所有订阅者——多窗口场景下
+   *  每个 sidepanel 都会收到这条结果。`source` 让 UI 区分「自动 tick」与「用户手动
+   *  触发」（后者通常显示成 loading → done 的更明显动画）。 */
+  | {
+      type: 'scheduler_result';
+      taskId: string;
+      result: RunResult;
+      source: 'manual' | 'tick';
+    }
+  /** `scheduler_test_channel` 的回复——BG 端只回发起端口（不广播）。
+   *  `latencyMs` 给 UI 即时反馈；`error` 只在 success=false 时存在（union 强约束）。
+   *  UI 把 success=false 当作「test 失败」展示，让用户立即看到是网络/凭证问题
+   *  而不是「没反应」。 */
+  | {
+      type: 'scheduler_channel_test_result';
+      channelId: string;
+      channelKind: ChannelKind;
+      success: true;
+      latencyMs: number;
+    }
+  | {
+      type: 'scheduler_channel_test_result';
+      channelId: string;
+      channelKind: ChannelKind;
+      success: false;
+      latencyMs: number;
+      error: string;
+    }
+  /** Telegram Gateway — BG 端回给发起端口的配置结果（get / set 后都回这个）。 */
+  | {
+      type: 'telegram_gateway_config_get_result';
+      config: unknown;
+      secrets: unknown;
+    }
+  /** Telegram Gateway 实时状态推送（BG → sidepanel 跨 context 桥）。bootstrap 在
+   *  WS 状态变化时 broadcastAll；sidepanel 经 useBackgroundAgent.handleMessage 把
+   *  这条消息喂回本侧 channel 驱动 Header 徽章。 */
+  | { type: 'telegram_gateway_status'; status: 'connecting' | 'connected' | 'reconnecting' | 'disconnected' }
+  /** Telegram Gateway 收到的入站消息（BG → sidepanel）。bootstrap 在
+   *  worker-client.onMessage 回调里 broadcastAll；sidepanel 喂回 channel 推到
+   *  useBackgroundAgent 的订阅 effect，触发 dispatchPrompt。 */
+  | { type: 'telegram_gateway_inbound'; message: unknown };

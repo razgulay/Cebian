@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { Group, Panel, Separator } from 'react-resizable-panels';
 import { browser } from 'wxt/browser';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from '@/components/ui/sonner';
@@ -8,11 +9,12 @@ import { ConfirmOutlet } from '@/components/dialogs/confirm-outlet';
 import { UpdateNoticeOutlet } from '@/components/dialogs/update-notice-outlet';
 import { Header } from '@/components/layout/Header';
 import { SidebarPanel } from '@/components/layout/SidebarPanel';
+import { CanvasPane } from '@/components/canvas/CanvasPane';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { useApplyThemePreference, resolveTheme } from '@/hooks/useApplyThemePreference';
 import { useChangelogOnUpdate } from '@/hooks/useChangelogOnUpdate';
 import { useChatFontSize } from '@/hooks/useChatFontSize';
-import { lastOpenSessionId } from '@/lib/persistence/storage';
+import { canvasPanelOpen, lastOpenSessionId } from '@/lib/persistence/storage';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { ChatPage } from './pages/chat';
 import { useSidePanelToggle } from './useSidePanelToggle';
@@ -30,6 +32,9 @@ function App() {
   const [theme, themeReady, setTheme] = useApplyThemePreference();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [chatTitle, setChatTitle] = useState('');
+  // Canvas pane 开关状态——持久化到 session: 存储（侧边栏关闭再开会恢复）。
+  // `exclude` 分类不进备份（panel-open 是设备本地 UI 状态，不是用户配置）。
+  const [canvasOpen, setCanvasOpen] = useStorageItem(canvasPanelOpen, false);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -156,6 +161,16 @@ function App() {
     void browser.tabs.create({ url: browser.runtime.getURL('/vfs.html') + '#/workspaces' });
   }, [location.pathname]);
 
+  const handleToggleCanvas = useCallback(() => {
+    const next = !canvasOpen;
+    debugLog.info('ui', 'app:canvas:toggle', { from: canvasOpen, to: next });
+    // setCanvasOpen 是 useStorageItem 的乐观 setter：先同步 setValueState 让
+    // Eye/EyeOff 立即切，再异步落 chrome.storage.session。直接调
+    // canvasPanelOpen.setValue 会绕开乐观更新，导致图标切换延迟到 storage
+    // 写完 + watch 回调一圈才生效（与 useStorageItem 调用点的统一约定违背）。
+    void setCanvasOpen(next);
+  }, [canvasOpen, setCanvasOpen]);
+
   if (!themeReady || !restored) return null;
 
   return (
@@ -172,11 +187,65 @@ function App() {
             onOpenSettings={() => navigate('/settings')}
             onNewChat={handleNewChat}
             onOpenSidebar={() => setSidebarOpen(true)}
+            canvasOpen={canvasOpen}
+            onToggleCanvas={handleToggleCanvas}
           />
         )}
 
         <Routes>
-          <Route path="/chat/:sessionId?" element={<ChatPage onOpenSettings={() => navigate('/settings')} onOpenStorage={handleOpenStorage} onTitleChange={setChatTitle} />} />
+          <Route
+            path="/chat/:sessionId?"
+            element={
+              canvasOpen && !location.pathname.startsWith('/settings') ? (
+                <div className="flex-1 min-h-0 flex">
+                  <Group
+                    orientation="horizontal"
+                    id="cebian-canvas-split"
+                    style={{ flex: 1 }}
+                  >
+                    {/*
+                     * Canvas 在左，chat 在右。Panel id 仅作布局标识——
+                     * 无持久化布局，DOM 顺序即渲染顺序。
+                     */}
+                    <Panel
+                      id="cebian-canvas-panel"
+                      defaultSize="50"
+                      minSize="20"
+                    >
+                      <CanvasPane onClose={handleToggleCanvas} />
+                    </Panel>
+                    <Separator
+                      id="cebian-canvas-resize"
+                      className="w-1 hover:bg-primary/30 active:bg-primary/50 transition-colors"
+                    />
+                    <Panel
+                      id="cebian-chat-panel"
+                      defaultSize="50"
+                      minSize="25"
+                      className="flex flex-col"
+                    >
+                      {/*
+                       * Panel 的 inner wrapper 默认是 block——chat 内容短时整片收缩、
+                       * 输入框跟着漂。转成 flex column 让消息区 flex-1 吃满高度、
+                       * ChatInput 恒定钉在底部。
+                       */}
+                      <ChatPage
+                        onOpenSettings={() => navigate('/settings')}
+                        onOpenStorage={handleOpenStorage}
+                        onTitleChange={setChatTitle}
+                      />
+                    </Panel>
+                  </Group>
+                </div>
+              ) : (
+                <ChatPage
+                  onOpenSettings={() => navigate('/settings')}
+                  onOpenStorage={handleOpenStorage}
+                  onTitleChange={setChatTitle}
+                />
+              )
+            }
+          />
           <Route
             path="/settings/*"
             element={

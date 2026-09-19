@@ -1,12 +1,15 @@
-import { Code, Download, Eye, Link, Loader2, ShieldAlert, ShieldCheck, FilePlus, FolderPlus, ClipboardPaste } from 'lucide-react';
+import { Code, Download, Eye, Link, Loader2, PanelLeft, ShieldAlert, ShieldCheck, FilePlus, FolderPlus, ClipboardPaste } from 'lucide-react';
 import { toast } from 'sonner';
 import { CopyButton } from '@/components/common/CopyButton';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { copyText } from '@/lib/ui/clipboard';
 import { t } from '@/lib/i18n';
+import { canvasPanelOpen } from '@/lib/persistence/storage';
 import { languageName } from '../lib/highlight';
 import { formatBytes } from '@/lib/utils';
+import { requestOpenInCanvas } from '../lib/canvas-open';
+import { sessionUuidOf } from '../lib/path-utils';
 import { supportsHtmlPreviewScripts } from '../lib/preview-capabilities';
 import type { FileMedia, ViewMode, ViewState } from '../types';
 
@@ -122,6 +125,13 @@ function Toolbar({ view, mode, onModeChange, isDownloading, onDownload, onNewFil
   const path = view.path;
   const loaded = view.kind === 'dir' || view.kind === 'file';
   const textContent = view.kind === 'file' && 'content' in view.media ? view.media.content : null;
+  // 「Open in Canvas」只对 HTML 文件出现；sessionId 从 `/workspaces/<id>/…`
+  // 路径解析（`sessionUuidOf` 含合法 id 校验）。会话工作区之外的 html（如根
+  // 目录散文件）没有可归属的 session——BG 的 canvas 状态是 per-session 的，
+  // 无主文件打开也无人能看见，按钮置灰而不是静默无效。
+  const canvasTarget = view.kind === 'file' && view.media.type === 'html'
+    ? { path: view.path, sessionId: sessionUuidOf(view.path) }
+    : null;
 
   return (
     <div className="flex items-center gap-2 shrink-0">
@@ -162,6 +172,27 @@ function Toolbar({ view, mode, onModeChange, isDownloading, onDownload, onNewFil
           <ModeButton active={mode === 'preview'} onClick={() => onModeChange('preview')} icon={<Eye className="size-3.5" />} label={t('vfs.preview')} />
           <ModeButton active={mode === 'source'} onClick={() => onModeChange('source')} icon={<Code className="size-3.5" />} label={t('vfs.source')} />
         </div>
+      )}
+
+      {/*
+       * Open in Canvas：紧跟预览/源码切换——同为「怎么看这份文件」的操作组。
+       * 置灰态的 tooltip 换成解释原因（与 Paste 按钮的 pasteHint 同款）。
+       */}
+      {canvasTarget && (
+        <IconButton
+          label={canvasTarget.sessionId === null
+            ? t('vfs.openInCanvasNoSession')
+            : t('vfs.openInCanvas')}
+          disabled={canvasTarget.sessionId === null}
+          onClick={() => {
+            if (canvasTarget.sessionId === null) return;
+            void canvasPanelOpen.setValue(true);
+            requestOpenInCanvas(canvasTarget.sessionId, canvasTarget.path);
+            toast.success(t('vfs.openedInCanvas'));
+          }}
+        >
+          <PanelLeft className="size-4" />
+        </IconButton>
       )}
 
       <IconButton

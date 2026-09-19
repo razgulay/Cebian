@@ -42,6 +42,22 @@ import type { ServerMessage, BroadcastMessage, StreamOp } from '@/lib/ipc/protoc
 import { post } from '../ipc/port-registry';
 import { getCurrentMessageId } from './stream-broadcast';
 
+// ─── Broadcast tap（会话广播观察者）───
+//
+// telegram-gateway 的 UX 生命周期（typing keepalive / tool 状态 / 流式文本编辑）
+// 需要观察 agent 事件流，但不该为此 import chat 域的其它模块。这里暴露一个
+// 极简 tap：所有经 `broadcastToViewers` 的会话广播（无论该会话有没有 viewer）
+// 都会通知观察者。tap 抛错不影响正常投递。
+const broadcastTaps = new Set<(msg: ServerMessage) => void>();
+
+/** 订阅会话广播流。返回退订函数。 */
+export function onBroadcastTap(cb: (msg: ServerMessage) => void): () => void {
+  broadcastTaps.add(cb);
+  return () => {
+    broadcastTaps.delete(cb);
+  };
+}
+
 /** port → 它当前正在看的 sessionId。模块级状态，生命周期 = service worker 生命周期 */
 const viewers = new Map<chrome.runtime.Port, string>();
 
@@ -218,6 +234,13 @@ function applyPortCursor(
 /** 投给所有正在看这个会话的窗口（对比传输层的 `broadcastAll` = 所有连接）。
  *  `stream_ops` 帧按端口 cursor 过滤 + 裁剪；其它帧照发。 */
 function broadcastToViewers(sessionId: string, msg: ServerMessage): void {
+  // Broadcast tap：会话广播的观察者（telegram-gateway 的 UX 生命周期需要观察
+  // agent 事件流：typing keepalive / tool 状态 / 流式文本）。tap 在 viewer
+  // 投递之前触发——无论该会话有没有 viewer，观察者都能收到。
+  for (const tap of broadcastTaps) {
+    // tap 抛错不影响正常投递
+    try { tap(msg); } catch { /* ignore */ }
+  }
   if (msg.type === 'stream_ops') {
     for (const [port, id] of viewers) {
       if (id !== sessionId) continue;
