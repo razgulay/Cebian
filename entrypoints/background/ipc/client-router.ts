@@ -102,3 +102,11 @@ function setupClientRouter(): void {
 
 export { registerClientHandlers, setupClientRouter, builtinHandlers };
 export type { ClientHandlerMap };
+
+/** Test-only: 清空 module-level handler 表，让下一个 `registerClientHandlers()`
+ *  不报「duplicate」。生产代码不调。 */
+export const _internal = {
+  resetForTest(): void {
+    for (const k of Object.keys(handlers)) delete (handlers as Record<string, unknown>)[k];
+  },
+};

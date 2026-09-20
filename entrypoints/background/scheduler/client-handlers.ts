@@ -4,7 +4,7 @@
 // `lib/scheduler/validate.ts` 校验输入 + `lib/scheduler/sidepanel-channel.ts`
 // 推 results + `scheduledTasks` storage 读写。
 
-import type { ServerMessage } from '@/lib/ipc/protocol';
+import type { ClientMessage, ServerMessage } from '@/lib/ipc/protocol';
 import {
   notifyChannels,
   notifyChannelSecrets,
@@ -16,6 +16,7 @@ import { post } from '../ipc/port-registry';
 import { registerClientHandlers, type ClientHandlerMap } from '../ipc/client-router';
 import { dispatchTask } from './manager';
 import { dispatchSingleChannelTest } from '@/lib/scheduler/notify-channels/dispatcher';
+import { installSchedulerDirectPlugin } from '@/lib/scheduler/scheduler-ipc';
 import type {
   ChannelConfig,
   ChannelSecret,
@@ -181,6 +182,104 @@ const schedulerClientHandlers: ClientHandlerMap = {
 /** Register handlers. 在 `index.ts` 启动序列里、`setupPortRegistry()` 之前同步调用。 */
 export function setupSchedulerClientHandlers(): void {
   registerClientHandlers(schedulerClientHandlers);
+
+  // Direct-dispatch plugin: tools running INSIDE the BG SW can't reliably
+  // round-trip through `chrome.runtime.sendMessage` (same-SW sendMessage
+  // in MV3 is not guaranteed to deliver to its own onMessage before the
+  // channel closes). The plugin lets in-SW callers hit the same handler
+  // map directly. Sidepanel does not install a plugin, so it falls
+  // through to the message-port bridge below.
+  installSchedulerDirectPlugin(dispatchDirect);
+
+  // sendMessage bridge: sidepanel / settings UI call scheduler_* via
+  // `chrome.runtime.sendMessage` (see lib/scheduler/scheduler-ipc.ts).
+  // The listener must return `true` synchronously to keep the channel
+  // open while the async reply is composed; we use an IIFE so the
+  // try/catch always calls `sendResponse` exactly once, even on throw.
+  // Pattern mirrored from `mcp/bridge.ts`.
+  console.log('[scheduler] setupSchedulerClientHandlers: installing sendMessage bridge');
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (!msg || typeof msg !== 'object' || typeof (msg as { type?: unknown }).type !== 'string') {
+      return false; // Not a scheduler message — let other listeners try.
+    }
+    const t = (msg as { type: string }).type;
+    if (!t.startsWith('scheduler_')) return false; // Not ours.
+
+    void (async () => {
+      // Clear stale lastError before async work — if the previous
+      // sendMessage left a flag set, it would surface in the caller as
+      // "message port closed" even though we're about to reply.
+      void chrome.runtime.lastError;
+      try {
+        const reply = await dispatchDirect(msg as ClientMessage);
+        sendResponse(reply);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        sendResponse({ type: 'error', sessionId: null, error: `scheduler: ${t} crashed: ${error}` });
+      }
+    })();
+    return true; // Async response: must return synchronously.
+  });
+}
+
+/** Direct dispatch — run a scheduler_* message through the registered
+ *  handler map without going through `chrome.runtime.sendMessage`. Used
+ *  by tools that run inside the BG SW (same-SW sendMessage is
+ *  unreliable) and by the sendMessage bridge for anything that does
+ *  arrive through the port. Throws on no-handler / no-reply so callers
+ *  (plugin + bridge) can surface a useful error. */
+export async function dispatchDirect(msg: ClientMessage): Promise<ServerMessage> {
+  const port = makeSyntheticPort();
+  const handler = schedulerClientHandlers[msg.type as keyof typeof schedulerClientHandlers];
+  if (!handler) {
+    throw new Error(`scheduler: no handler for ${msg.type}`);
+  }
+  await (handler as (p: chrome.runtime.Port, m: ClientMessage) => Promise<void>)(port, msg);
+  const reply = port.captured;
+  if (reply === null) {
+    throw new Error(`scheduler: ${msg.type} produced no reply`);
+  }
+  return reply;
+}
+
+// ─── sendMessage ↔ port-handler 桥 ───
+
+/** 合成 port——让现有的 port-style handler 能直接用 `port.postMessage(...)`
+ *  回信，我们把「第一条 post」捕获出来作为 sendResponse 载荷。
+ *
+ *  chrome.runtime.sendMessage 只允许一个 reply 载荷（不像 port 那样持续双向
+ *  投递），所以这里只取首条 post；handler 的协议本来就是「一次调用一条终
+ *  端回复」（`scheduler_list_result` / `scheduler_create_result` / `error`）。
+ *  `scheduler_run_now` 成功路径靠 BG manager 通过 port-registry 的 pub/sub
+ *  广播 `scheduler_result` 给所有连上的 sidepanel，originating sendMessage
+ *  收不到也不需要收到（调用方要的是同步 ack + 列表刷新）。 */
+function makeSyntheticPort(): chrome.runtime.Port & { captured: ServerMessage | null } {
+  const ref: { current: ServerMessage | null } = { current: null };
+  const port = {
+    name: 'scheduler-sendmessage-adapter',
+    postMessage(msg: ServerMessage) {
+      if (ref.current === null) ref.current = msg;
+    },
+    disconnect() {
+      /* noop */
+    },
+    // chrome.runtime.Port 的 onMessage / onDisconnect 是 EventObject；handler
+    // 不会向合成 port 注册订阅，所以 addListener 留 noop 即可。
+    onMessage: { addListener() { /* noop */ } },
+    onDisconnect: { addListener() { /* noop */ } },
+    sender: undefined,
+  } as unknown as chrome.runtime.Port;
+  // 用 defineProperty 装 accessor：不能 Object.assign getter——Object.assign 会
+  // 读取源属性的当前值并作为普通值写入 target，accessor 不会保留（参
+  // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign
+  // 「The Object.assign() method only copies enumerable and own properties from a
+  //  source object to a target object. It uses [[Get]] on the source and [[Set]]
+  //  on the target」）。getter 会被消费为快照值，bridge 后续就读不到。
+  return Object.defineProperty(port, 'captured', {
+    get(): ServerMessage | null { return ref.current; },
+    enumerable: true,
+    configurable: true,
+  }) as chrome.runtime.Port & { captured: ServerMessage | null };
 }
 
 /** Export 源 map（与 index.ts setup() 传给 registerClientHandlers 的对象是同一引用），
