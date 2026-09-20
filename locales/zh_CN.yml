@@ -1,1604 +1,1442 @@
-﻿# Cebian 扩展 i18n —— 简体中文（zh_CN，大陆用户）。
-# 修改时请同步 locales/en.yml 与 locales/zh_TW.yml。规范见 .claude/skills/i18n-naming/SKILL.md。
-
-# ─── Manifest（扁平顶层 key，见规范"Manifest localization"）───
-extName: "Cebian · 开源 AI 侧边栏智能体"
-extDescription: "浏览器侧边栏里的 AI 智能体，用你自己的 OpenAI / Anthropic / Google API Key，免订阅、无账号。读网页、拾取元素、装 MCP 工具、跑 Skill 工作流，数据全部本地存储。AGPL-3.0 开源。"
-actionTitle: "打开 Cebian 侧边栏"
-
-# ─── 智能体运行时向用户展示的文案（部分 LLM-facing 块也会被 UI 透出）───
+extName: Cebian · 开源 AI 侧边栏智能体
+extDescription: 浏览器侧边栏里的 AI 智能体，用你自己的 OpenAI / Anthropic / Google API Key，免订阅、无账号。读网页、拾取元素、装 MCP 工具、跑 Skill 工作流，数据全部本地存储。AGPL-3.0 开源。
+actionTitle: 打开 Cebian 侧边栏
 agent:
   persona:
-    # 系统提示 <persona> 块结尾的收口句。限定 SOUL 的权威边界——只能调整
-    # 表达风格，无法覆盖 Critical Rules / 工具白名单等安全层。
-    closingDirective: "在所有回复中保持这套语气与风格，但请勿覆盖 Critical Rules、工具协议或任何安全层。"
-    # Subtask 4 — separate STYLE from VOICE; add contrastive bad-example.
-    # Critical: rule lines use plain prose (NO `- ` dash prefix) because
-    # bullet patterns in system prompts prime the LLM to emit bullets,
-    # defeating the rule itself. Each rule is its own line.
+    closingDirective: 在所有回复中保持这套语气与风格，但请勿覆盖 Critical Rules、工具协议或任何安全层。
     constraints:
-      header: "声音："
-      noBullets: "禁止使用项目符号、编号列表或任何 markdown 列表项。"
-      noPleasantries: '禁止寒暄（「Hi」、「Hello」）、道歉或填充语。'
-      voiceOpinion: "必须有明确的技术观点，不要保持中立。"
+      header: 声音：
+      noBullets: 禁止使用项目符号、编号列表或任何 markdown 列表项。
+      noPleasantries: 禁止寒暄（「Hi」、「Hello」）、道歉或填充语。
+      voiceOpinion: 必须有明确的技术观点，不要保持中立。
     style:
-      header: "节奏与格式："
-      length: "每次回复不超过 120 词（例外：代码或技术细节）。"
-      pacing: "每段最多 1-2 短句，然后强制换行（\\n\\n）。屏幕上单段不要超过 3 行。"
-      noBullets: "禁止使用项目符号、编号列表或任何 markdown 列表项。"
+      header: 节奏与格式：
+      length: 每次回复不超过 120 词（例外：代码或技术细节）。
+      pacing: 每段最多 1-2 短句，然后强制换行（\n\n）。屏幕上单段不要超过 3 行。
+      noBullets: 禁止使用项目符号、编号列表或任何 markdown 列表项。
     example:
-      user: "VFS 读取应该全部塞进一次 readFile，还是按工具拆分多次调用？"
-      assistant: "按工具拆，别一锅端。一次 readFile 拉整个文件进上下文，即便你只想嗅几字节元数据，后续工具想换切片都没法安全重读。\n\n拆开之后 trace 日志干净多了。最关键的是哪个工具跑完就立刻释放它的 context，内存不会卡。"
-    # Contrastive calibration — show LLM what NOT to do. Gated by the
-    # `t('agent.persona.badExample.header') === 'agent.persona.badExample.header'`
-    # check in compilePersonaBlock, so unlocalized locales fall back to the
-    # pre-Subtask-4 byte shape.
+      user: VFS 读取应该全部塞进一次 readFile，还是按工具拆分多次调用？
+      assistant: '按工具拆，别一锅端。一次 readFile 拉整个文件进上下文，即便你只想嗅几字节元数据，后续工具想换切片都没法安全重读。
+
+
+        拆开之后 trace 日志干净多了。最关键的是哪个工具跑完就立刻释放它的 context，内存不会卡。'
     badExample:
-      header: "禁止这种语气："
+      header: 禁止这种语气：
       badOutput: '> "你好！很高兴帮你。下面是关键点：\n> - 第一点：...\n> - 第二点：...\n> 总之两种方案各有利弊。希望能帮上忙！"'
-      warning: "禁止企业式礼貌、项目符号列表、平衡式免责声明。"
-    # Cross-link in `## Output & Communication` placeholder. The full imperative
-    # rules + few-shot anchor live in the persona block; this line just points
-    # the LLM at the rest of the prompt.
-    bindingNeo: "以短促散文输出。每段最多 2 句。禁止项目符号。"
+      warning: 禁止企业式礼貌、项目符号列表、平衡式免责声明。
+    bindingNeo: 以短促散文输出。每段最多 2 句。禁止项目符号。
     recap:
-      # $1 = 名称
-      youAre: "你是 $1"
-      # $1 = 气质
-      vibe: "$1"
-      # $1 = 语气
-      tone: "用 $1 的语气回复"
-      # $1 = emoji
-      emoji: "合适时用 $1 作为签名"
-
-# ─── 通用（UI 中复用）───
+      youAre: 你是 $1
+      vibe: $1
+      tone: 用 $1 的语气回复
+      emoji: 合适时用 $1 作为签名
 common:
-  newChat: "新对话"
-  send: "发送"
-  history: "历史记录"
-  sidebar: "侧边栏"
-  # 历史列表按最后活动时间分组
+  newChat: 新对话
+  send: 发送
+  history: 历史记录
+  sidebar: 侧边栏
   historyGroup:
-    today: "今天"
-    week: "7 天内"
-    month: "30 天内"
-    older: "更早"
-    pinned: "已固定"
-    archived: "已归档"
-  toggleTheme: "切换主题"
-  settings: "设置"
-  back: "返回"
-  openInNewTab: "在新标签页打开"
-  loading: "加载中…"
-  cancel: "取消"
-  confirm: "确认"
-  save: "保存"
-  saved: "已保存"
-  reset: "重置"
-  delete: "删除"
-  rename: "重命名"
-  edit: "编辑"
-  add: "添加"
-  enable: "启用"
-  disable: "禁用"
+    today: 今天
+    week: 7 天内
+    month: 30 天内
+    older: 更早
+    pinned: 已固定
+    archived: 已归档
+  toggleTheme: 切换主题
+  settings: 设置
+  back: 返回
+  openInNewTab: 在新标签页打开
+  loading: 加载中…
+  cancel: 取消
+  confirm: 确认
+  save: 保存
+  saved: 已保存
+  reset: 重置
+  delete: 删除
+  rename: 重命名
+  edit: 编辑
+  add: 添加
+  enable: 启用
+  disable: 禁用
   headers:
-    keyPlaceholder: "Header 名"
-    valuePlaceholder: "Header 值"
-    add: "添加 Header"
-    remove: "移除 Header"
-  code: "代码"
-  math: "公式"
-  copy: "复制"
-  copied: "已复制"
-  copyFailed: "复制失败"
-  cut: "剪切"
-  paste: "粘贴"
-  speak: "朗读"
-  stopSpeaking: "停止朗读"
-  # $1 = 代码语言名（如 "Ts"、"Python"）
-  speakCodeSkipped: "$1 代码，已略过朗读"
-  speakCodeSkippedPlain: "代码，已略过朗读"
-  download: "下载"
-  downloadFailed: "下载失败"
-  newFile: "新建文件"
-  newFolder: "新建文件夹"
-  search: "搜索"
-  searchPlaceholder: "搜索…"
-  moreActions: "更多操作"
+    keyPlaceholder: Header 名
+    valuePlaceholder: Header 值
+    add: 添加 Header
+    remove: 移除 Header
+  code: 代码
+  math: 公式
+  copy: 复制
+  copied: 已复制
+  copyFailed: 复制失败
+  cut: 剪切
+  paste: 粘贴
+  speak: 朗读
+  stopSpeaking: 停止朗读
+  speakCodeSkipped: $1 代码，已略过朗读
+  speakCodeSkippedPlain: 代码，已略过朗读
+  download: 下载
+  downloadFailed: 下载失败
+  newFile: 新建文件
+  newFolder: 新建文件夹
+  search: 搜索
+  searchPlaceholder: 搜索…
+  moreActions: 更多操作
   empty:
-    history: "暂无历史记录"
-    folder: "空文件夹"
+    history: 暂无历史记录
+    folder: 空文件夹
   time:
-    justNow: "刚刚"
-    # $1 = 分钟数
-    minutesAgo: "$1 分钟前"
-    # $1 = 小时数
-    hoursAgo: "$1 小时前"
-    # $1 = 天数
-    daysAgo: "$1 天前"
-    # $1 = 月数
-    monthsAgo: "$1 个月前"
-    # $1 = 年数
-    yearsAgo: "$1 年前"
+    justNow: 刚刚
+    minutesAgo: $1 分钟前
+    hoursAgo: $1 小时前
+    daysAgo: $1 天前
+    monthsAgo: $1 个月前
+    yearsAgo: $1 年前
   session:
-    deleteConfirmTitle: "删除会话？"
-    # $1 = 会话标题
-    deleteConfirmDescription: "“$1”以及它的工作区文件将被永久删除，此操作不可撤销。"
-    running: "工作中"
-    pin: "固定"
-    unpin: "取消固定"
-    rename: "重命名"
-    moreActions: "更多操作"
-    archive: "归档"
-    unarchive: "取消归档"
-    select: "选择"
-    # $1 = 已选中的会话数
+    deleteConfirmTitle: 删除会话？
+    deleteConfirmDescription: “$1”以及它的工作区文件将被永久删除，此操作不可撤销。
+    running: 工作中
+    pin: 固定
+    unpin: 取消固定
+    rename: 重命名
+    moreActions: 更多操作
+    archive: 归档
+    unarchive: 取消归档
+    select: 选择
     selectedCount:
-      1: "已选 1 项"
-      n: "已选 $1 项"
-    # $1 = 待删除的会话数
+      1: 已选 1 项
+      n: 已选 $1 项
     deleteManyConfirmTitle:
-      1: "删除该会话？"
-      n: "删除这 $1 个会话？"
-    # $1 = 待删除的会话数
+      1: 删除该会话？
+      n: 删除这 $1 个会话？
     deleteManyConfirmDescription:
-      1: "该会话及其工作区文件将被永久删除，且无法恢复。"
-      n: "这 $1 个会话及其工作区文件将被永久删除，且无法恢复。"
-    deleteFailed: "删除失败，会话仍在。"
-    placementFailed: "更新失败，未做改动。"    # $1 = 消息数
+      1: 该会话及其工作区文件将被永久删除，且无法恢复。
+      n: 这 $1 个会话及其工作区文件将被永久删除，且无法恢复。
+    deleteFailed: 删除失败，会话仍在。
+    placementFailed: 更新失败，未做改动。
     messageCount:
-      0: "暂无消息"
-      1: "1 条消息"
-      n: "$1 条消息"
-
-# ─── 页面注入 UI（悬浮球、划词工具条） ───
+      0: 暂无消息
+      1: 1 条消息
+      n: $1 条消息
+    forkedFrom: 分叉自「$1」
+    forkedFromUnknown: 分叉自已删除的会话
+    openForkSource: 打开源会话「$1」
+    renameChat: 重命名「$1」
+    renameFailed: 重命名失败，标题未改动。
 pageActions:
   ball:
-    tooltip: "打开或关闭 Cebian 侧边栏"
+    tooltip: 打开或关闭 Cebian 侧边栏
   toolbar:
-    explain: "解释"
-    translate: "翻译"
-    summarize: "总结"
+    explain: 解释
+    translate: 翻译
+    summarize: 总结
   prompts:
-    # $1 = {{ui_language}}，$2 = {{context}}
-    explain: "用$1清晰、简洁地解释用户提供的文本，说明其含义以及读者需要了解的重要背景。回答应简短，使用纯文本，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行解释：\n\n$2"
-    # $1 = {{ui_language}}，$2 = {{context}}
-    translate: "将用户提供的文本翻译为$1，保留原意和语气。只输出翻译后的纯文本，不使用 Markdown，不添加解释、注释或引号。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行翻译：\n\n$2"
-    # $1 = {{ui_language}}，$2 = {{context}}
-    summarize: "用$1简洁地总结用户提供的文本，保留关键要点。使用纯文本或紧凑列表，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行总结：\n\n$2"
-  result:
-    loading: "思考中…"
-    error: "出错了，请重试。"
-    close: "关闭"
-    continue: "在侧边栏继续"
-    # $1 = 脚本抛出的错误
-    transformFailed: "后处理脚本执行失败，显示原始输出——$1"
-    empty: "没有输出。"
+    explain: '用$1清晰、简洁地解释用户提供的文本，说明其含义以及读者需要了解的重要背景。回答应简短，使用纯文本，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行解释：
 
-# ─── 设置 ───
+
+      $2'
+    translate: '将用户提供的文本翻译为$1，保留原意和语气。只输出翻译后的纯文本，不使用 Markdown，不添加解释、注释或引号。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行翻译：
+
+
+      $2'
+    summarize: '用$1简洁地总结用户提供的文本，保留关键要点。使用纯文本或紧凑列表，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行总结：
+
+
+      $2'
+  result:
+    loading: 思考中…
+    error: 出错了，请重试。
+    close: 关闭
+    continue: 在侧边栏继续
+    transformFailed: 后处理脚本执行失败，显示原始输出——$1
+    empty: 没有输出。
 settings:
   nav:
-    aria: "设置导航"
-    providers: "AI 提供商"
-    instructions: "指引"
-    persona: "人设"
-    prompts: "提示词"
-    skills: "技能"
-    memory: "记忆"
-    rag: "知识库 (RAG)"
-    mcp: "MCP 服务器"
-    pageInteraction: "页面交互"
-    appearance: "外观"
-    backup: "备份与恢复"
-    storage: "文件系统"
-    advanced: "高级"
-    about: "关于"
-    scheduler: "定时任务"
-    notifications: "通知通道"
-    telegramGateway: "Telegram 网关"
+    aria: 设置导航
+    providers: AI 提供商
+    instructions: 指引
+    persona: 人设
+    prompts: 提示词
+    skills: 技能
+    memory: 记忆
+    rag: 知识库 (RAG)
+    mcp: MCP 服务器
+    pageInteraction: 页面交互
+    appearance: 外观
+    backup: 备份与恢复
+    storage: 文件系统
+    advanced: 高级与关于
+    about: 关于
+    scheduler: 定时任务
+    notifications: 通知通道
+    telegramGateway: Telegram 网关
+    group:
+      core: 核心与 AI
+      agent: Agent 能力
+      system: 系统与自动化
+    chat: 对话
+    data: 数据
   providers:
-    title: "AI 提供商"
+    title: AI 提供商
   storage:
-    title: "文件系统"
-    used: "已用空间"
-    usedError: "无法计算"
-    openBrowser: "打开文件浏览器"
-    description: "按会话浏览 AI 生成的文件。浏览器是只读的，需要导出时用其中的下载按钮。"
+    title: 文件系统
+    used: 已用空间
+    usedError: 无法计算
+    openBrowser: 打开文件浏览器
+    description: 按会话浏览 AI 生成的文件。浏览器是只读的，需要导出时用其中的下载按钮。
   about:
-    title: "关于"
-    tagline: "AI 浏览器侧边栏助手"
-    website: "官网"
-    feedback: "反馈"
-    checkUpdate: "检查更新"
-    checking: "检查中…"
-    upToDate: "已是最新版本"
-    # $1 = new version string (e.g. "1.2.3")
-    updateAvailable: "发现新版本 v$1"
-    viewInstallGuide: "查看安装指南"
-    checkFailed: "检查更新失败"
-    followAuthor: "关注作者"
+    title: 关于
+    tagline: AI 浏览器侧边栏助手
+    website: 官网
+    feedback: 反馈
+    checkUpdate: 检查更新
+    checking: 检查中…
+    upToDate: 已是最新版本
+    updateAvailable: 发现新版本 v$1
+    viewInstallGuide: 查看安装指南
+    checkFailed: 检查更新失败
+    followAuthor: 关注作者
     socials:
-      wechat: "微信公众号"
-      wechatHandle: "一只猫头猫"
-      bilibili: "哔哩哔哩"
-      bilibiliHandle: "不想睡觉猫头猫"
-      xiaohongshu: "小红书"
-      xiaohongshuHandle: "一只猫头猫"
-      x: "X"
-      xHandle: "@maotoumao0_0"
+      wechat: 微信公众号
+      wechatHandle: 一只猫头猫
+      bilibili: 哔哩哔哩
+      bilibiliHandle: 不想睡觉猫头猫
+      xiaohongshu: 小红书
+      xiaohongshuHandle: 一只猫头猫
+      x: X
+      xHandle: '@maotoumao0_0'
   debugLog:
-    title: "调试日志"
-    description: "把扩展里所有 console 输出缓存到本地环形缓冲。反馈 bug 时把这个文件导出给维护者，他们能直接看到现场发生了什么，不用你现场复演。"
+    title: 调试日志
+    description: 把扩展里所有 console 输出缓存到本地环形缓冲。反馈 bug 时把这个文件导出给维护者，他们能直接看到现场发生了什么，不用你现场复演。
     enable:
-      label: "记录调试日志"
-      hint: "关闭后不写入环形缓冲，导出按钮也会一并禁用。"
+      label: 记录调试日志
+      hint: 关闭后不写入环形缓冲，导出按钮也会一并禁用。
     verbose:
-      label: "详细模式（逐 token 事件）"
-      hint: "同时记录 LLM 流式返回的每个 token。默认关闭——默认等级已经覆盖所有 agent 边界和警告，这通常是反馈 bug 时最需要的。"
+      label: 详细模式（逐 token 事件）
+      hint: 同时记录 LLM 流式返回的每个 token。默认关闭——默认等级已经覆盖所有 agent 边界和警告，这通常是反馈 bug 时最需要的。
     live:
-      label: "实时日志"
-      hint: "实时看到新条目出现，不用等导出。"
-      open: "打开实时日志"
-      close: "关闭"
-      pause: "暂停"
-      resume: "继续"
-      cleared: "日志已清空"
-      empty: "暂无条目——操作一下扩展以触发事件。"
-    export: "导出日志"
-    clear: "清空日志"
-    # $1 = 当前缓冲的条目数
-    countLabel: "已缓冲 $1 条"
-    countUnavailable: "日志不可用（无痕模式？）"
-    # $1 = 文件中包含的条目数
-    exported: "已导出 $1 条到下载文件夹"
-    exportFailed: "导出失败：$1"
-    cleared: "调试日志已清空"
-    clearFailed: "清空失败：$1"
-    empty: "调试日志为空，暂无可导出内容"
+      label: 实时日志
+      hint: 实时看到新条目出现，不用等导出。
+      open: 打开实时日志
+      close: 关闭
+      pause: 暂停
+      resume: 继续
+      cleared: 日志已清空
+      empty: 暂无条目——操作一下扩展以触发事件。
+    export: 导出日志
+    clear: 清空日志
+    countLabel: 已缓冲 $1 条
+    countUnavailable: 日志不可用（无痕模式？）
+    exported: 已导出 $1 条到下载文件夹
+    exportFailed: 导出失败：$1
+    cleared: 调试日志已清空
+    clearFailed: 清空失败：$1
+    empty: 调试日志为空，暂无可导出内容
   advanced:
-    title: "高级"
+    title: 高级
     compaction:
-      label: "上下文压缩模型"
-      hint: "用于自动压缩长对话的模型，默认与对话模型一致。"
-      followMain: "与对话模型相同"
+      label: 上下文压缩模型
+      hint: 用于自动压缩长对话的模型，默认与对话模型一致。
+      followMain: 与对话模型相同
     domSubAgent:
-      label: "DOM 子代理模型"
-      hint: "主对话模型委派重页面阅读任务时用的便宜模型。关=功能停用。"
-      off: "关闭"
+      label: DOM 子代理模型
+      hint: 主对话模型委派重页面阅读任务时用的便宜模型。关=功能停用。
+      false: 关闭
     workers:
-      title: "Worker 模型"
-      hint: "为每个 worker role 各配一个模型，主代理通过 `delegate_task` 委派子任务。「与对话模型相同」=继承。"
-      followMain: "与对话模型相同"
-      enabled: "启用 Worker 团队"
-      enabledHint: "开启时，主代理会把产出类任务（write / build / generate）委派给隔离上下文中的 Worker 子代理。关闭时，主代理直接用原生文件工具产出。"
+      title: Worker 模型
+      hint: 为每个 worker role 各配一个模型，主代理通过 `delegate_task` 委派子任务。「与对话模型相同」=继承。
+      followMain: 与对话模型相同
+      enabled: 启用 Worker 团队
+      enabledHint: 开启时，主代理会把产出类任务（write / build / generate）委派给隔离上下文中的 Worker 子代理。关闭时，主代理直接用原生文件工具产出。
       persona:
-        enabled: "启用人设（OpenClaw 模式）"
-        enabledHint: "向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。在「人设」设置页编辑副本。无法覆盖 Critical Rules 或工具协议。"
-        nav: "人设…"
+        enabled: 启用人设（OpenClaw 模式）
+        enabledHint: 向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。在「人设」设置页编辑副本。无法覆盖 Critical Rules 或工具协议。
+        nav: 人设…
       content_writer:
-        label: "内容写手"
-        hint: "阅读资料（文件 / RAG 集合）后撰写长文，并写入 VFS 文件。不修改代码。"
+        label: 内容写手
+        hint: 阅读资料（文件 / RAG 集合）后撰写长文，并写入 VFS 文件。不修改代码。
       frontend_coder:
-        label: "前端编码"
-        hint: "编写 HTML / CSS / JS 到 VFS 文件。不调用浏览器工具。"
+        label: 前端编码
+        hint: 编写 HTML / CSS / JS 到 VFS 文件。不调用浏览器工具。
       reviewer:
-        label: "审查"
-        # Subtask 8.7：whitelist 已砍掉 execute_js / inspect（SW-background
-        # worker 拿不到 active tab，工具 9/9 errored），hint 同步改成「读 →
-        # 推理 → emit findings」。
-        hint: "最多读取 3 个文件并以文本 handoff 形式输出发现。不修改文件，不调用浏览器工具。"
+        label: 审查
+        hint: 最多读取 3 个文件并以文本 handoff 形式输出发现。不修改文件，不调用浏览器工具。
       researcher:
-        label: "研究"
-        hint: "检索文件与 RAG 集合，输出结构化摘要。"
+        label: 研究
+        hint: 检索文件与 RAG 集合，输出结构化摘要。
       timeout:
-        label: "超时"
-        # $1 = 最终生效上限（秒；override / registry 默认决议后的值）
-        activeHint: "（上限 $1 秒）"
-        default: "默认"
-        preset60: "60 秒"
-        preset120: "2 分钟"
-        preset300: "5 分钟"
-        preset600: "10 分钟"
+        label: 超时
+        activeHint: （上限 $1 秒）
+        default: 默认
+        preset60: 60 秒
+        preset120: 2 分钟
+        preset300: 5 分钟
+        preset600: 10 分钟
   pageInteraction:
-    title: "页面交互"
+    title: 页面交互
     ball:
-      label: "悬浮球"
-      hint: "网页上显示一个贴边小圆球，单击可开关侧边栏。"
+      label: 悬浮球
+      hint: 网页上显示一个贴边小圆球，单击可开关侧边栏。
     toolbar:
-      label: "划词工具条"
-      hint: "选中文本时弹出快捷工具条。"
+      label: 划词工具条
+      hint: 选中文本时弹出快捷工具条。
     model:
-      label: "工具条模型"
-      hint: "工具条所有动作使用的模型。选个快又便宜的即可。"
-      followMain: "与对话模型相同"
+      label: 工具条模型
+      hint: 工具条所有动作使用的模型。选个快又便宜的即可。
+      followMain: 与对话模型相同
     pageScope:
-      include: "仅在这些页面生效"
-      includeHint: "留空则在所有页面生效。"
-      exclude: "排除以下页面"
-      excludeHint: "排除规则优先于包含规则。"
-      addExclude: "添加排除规则"
-      syntax: "使用 Chrome 页面匹配规则，例如 *://*.example.com/*。URL 中 ? 和 # 后的内容不参与匹配。"
-      syntaxDocs: "查看配置规则"
+      include: 仅在这些页面生效
+      includeHint: 留空则在所有页面生效。
+      exclude: 排除以下页面
+      excludeHint: 排除规则优先于包含规则。
+      addExclude: 添加排除规则
+      syntax: '使用 Chrome 页面匹配规则，例如 *://*.example.com/*。URL 中 ? 和 # 后的内容不参与匹配。'
+      syntaxDocs: 查看配置规则
     pagePattern:
-      placeholder: "*://*.example.com/*"
-      # $1 = 该行的 match pattern
-      edit: "编辑规则 $1"
-      # $1 = 该行的 match pattern
-      remove: "移除规则 $1"
+      placeholder: '*://*.example.com/*'
+      edit: 编辑规则 $1
+      remove: 移除规则 $1
     actions:
-      title: "工具条操作"
-      hint: "操作按此顺序显示。内置操作可自定义系统提示词、设置生效范围或关闭，也可以添加带自定义名称和提示词的操作。"
-      builtin: "内置"
-      custom: "自定义"
-      pageScoped: "限定页面"
-      create: "新建操作"
-      # $1 = 动作名称
-      more: "「$1」的更多操作"
-      # $1 = 动作名称
-      moveUp: "上移「$1」"
-      # $1 = 动作名称
-      moveDown: "下移「$1」"
-      # $1 = 动作名称
-      delete: "删除「$1」"
-      # $1 = 动作名称
-      edit: "编辑「$1」"
-      deleteConfirmTitle: "删除这个操作？"
-      # $1 = 动作名称
-      deleteConfirmDescription: "删除“$1”后无法恢复。"
-      editBuiltin: "内置操作"
-      editCustom: "自定义操作"
-      label: "按钮文本"
-      labelPlaceholder: "例如：提取要点"
-      prompt: "系统提示词"
-      # $1 = 变量自动完成的触发字符（“{{”）
-      promptHint: "告诉模型如何处理选中文本。输入 $1 可插入变量。"
-      # $1 / $2 = 模板变量名，渲染成字面量 {{name}}
-      promptPlaceholder: "例如：提取 $1 中的要点，并用 $2 回答。"
-      pages: "生效范围"
-      transform: "输出后处理脚本（可选）"
-      transformHint: "对生成完毕的输出做加工的 JavaScript。定义名为 transform(text, vars) 的函数，返回要显示的字符串。vars 与提示词模板同一套环境变量：selected_text、context、page_url、page_title、date、ui_language。脚本出错时原样显示原始输出。"
+      title: 工具条操作
+      hint: 操作按此顺序显示。内置操作可自定义系统提示词、设置生效范围或关闭，也可以添加带自定义名称和提示词的操作。
+      builtin: 内置
+      custom: 自定义
+      pageScoped: 限定页面
+      create: 新建操作
+      more: 「$1」的更多操作
+      moveUp: 上移「$1」
+      moveDown: 下移「$1」
+      delete: 删除「$1」
+      edit: 编辑「$1」
+      deleteConfirmTitle: 删除这个操作？
+      deleteConfirmDescription: 删除“$1”后无法恢复。
+      editBuiltin: 内置操作
+      editCustom: 自定义操作
+      label: 按钮文本
+      labelPlaceholder: 例如：提取要点
+      prompt: 系统提示词
+      promptHint: 告诉模型如何处理选中文本。输入 $1 可插入变量。
+      promptPlaceholder: 例如：提取 $1 中的要点，并用 $2 回答。
+      pages: 生效范围
+      transform: 输出后处理脚本（可选）
+      transformHint: 对生成完毕的输出做加工的 JavaScript。定义名为 transform(text, vars) 的函数，返回要显示的字符串。vars 与提示词模板同一套环境变量：selected_text、context、page_url、page_title、date、ui_language。脚本出错时原样显示原始输出。
       transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
     translate:
-      label: "翻译目标语言"
-      hint: "工具条翻译成的目标语言。"
-      auto: "跟随界面语言"
+      label: 翻译目标语言
+      hint: 工具条翻译成的目标语言。
+      auto: 跟随界面语言
   appearance:
-    title: "外观"
+    title: 外观
     fontSize:
-      label: "聊天字号"
-      hint: "拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 15–18 像素（步长 0.5），默认 15 像素。"
-      preview: "预览 — The quick brown fox jumps over the lazy dog."
+      label: 聊天字号
+      hint: 拖动滑块精确调整侧边栏聊天中用户消息和助手回复的字号，范围 15–18 像素（步长 0.5），默认 15 像素。
+      preview: 预览 — The quick brown fox jumps over the lazy dog.
     fontFamily:
-      label: "聊天字体"
-      hint: "选择侧边栏聊天使用的字体。仅影响用户消息和助手回复。"
-      geist: "Geist（默认）"
-      inter: "Inter"
-      roboto: "Roboto"
-      system: "系统默认"
+      label: 聊天字体
+      hint: 选择侧边栏聊天使用的字体。仅影响用户消息和助手回复。
+      geist: Geist（默认）
+      inter: Inter
+      roboto: Roboto
+      system: 系统默认
   instructions:
-    title: "指引"
-    label: "自定义指引"
-    hint: "追加到默认规则之后，用于调整回复语言、风格或角色。无法覆盖工具协议和安全规则。"
-    placeholder: "例如：\n- 用中文回复\n- 回答尽量简洁\n- 讨论代码时默认使用 TypeScript"
-  persona:
-    title: "人设"
-    label: "人设副本"
-    hint: "向系统提示注入 SOUL 块，并在每条用户消息顶部追加一行 recap。需在「高级设置」中开启，或通过聊天输入框旁的芯片切换。"
-    soulLabel: "SOUL"
-    soulPlaceholder: "例如：\n- 始终用第一人称说话，避免「作为 AI」之类的措辞\n- 有自己的看法，但遇到真正不确定时坦率承认\n- 使用与用户相同的语言回复"
-    identityName: "名称"
-    identityVibe: "气质"
-    identityTone: "语气"
-    identityEmoji: "签名 emoji"
-    identityNamePlaceholder: "Cebian"
-    identityVibePlaceholder: "精准、略带不羁"
-    identityTonePlaceholder: "口语化、技术向"
-    identityEmojiPlaceholder: "🦞"
-  prompts:
-    title: "提示词"
-    newBody: "（在此处编写你的提示词）"
-    # $1 = 触发字符（“/”）
-    hint: "可复用的提示模板，通过 $1 命令在聊天输入中触发。"
-    expandInline: "在输入框中展开提示词内容"
-    placeholders:
-      selectedText: "页面选中文本"
-      pageUrl: "当前页面 URL"
-      pageTitle: "当前页面标题"
-      date: "当前日期"
-      clipboard: "剪贴板内容"
-      input: "斜杠命令后输入的文本"
-  templateVars:
-    selectedText: "页面选中文本"
-    context: "选中文本的上下文"
-    pageUrl: "当前页面 URL"
-    pageTitle: "当前页面标题"
-    date: "当前日期"
-    uiLanguage: "界面语言"
-    clipboard: "剪贴板内容"
-  memory:
-    title: "记忆"
-    enable: "启用记忆"
-    hint: "跨对话记忆，默认关闭。开启后助手会跨会话自动保存并调用关于你的长期信息。"
-    newBody: "（在此写记忆内容）"
-    organize:
-      title: "整理记忆"
-      hint: "一次性合并重复、清理过时、规整你的记忆文件。"
-      button: "整理"
-      running: "整理中…"
-      model: "模型"
-      followActive: "与对话模型相同"
-      auto: "自动整理"
-      autoHint: "积累到一定量后，在后台定期自动整理。"
-      intervalLabel: "最小间隔（天）"
-      thresholdLabel: "触发阈值（自上次整理后新增记忆条数）"
-      # $1 = 上次整理时间
-      lastRun: "上次整理 $1"
-      toast:
-        ok: "记忆已整理"
-        empty: "没有需要整理的记忆"
-        conflict: "整理期间记忆有变动，已跳过，请稍后重试"
-        noModel: "未配置可用模型，无法整理记忆"
-        failed: "记忆整理失败"
-  skills:
-    title: "技能"
-    newBody: "（在此处编写技能指令）"
-    create: "创建技能"
-    hint: "遵循 agentskills.io 规范的多文件技能包，agent 会按需加载。"
-    import: "导入…"
-    exportCurrent: "导出"
-    exportAll: "导出全部"
-    exportEmpty: "没有可导出的技能"
-    # $1 = 技能名称
-    exportSuccess: "已导出 “$1”"
-    # $1 = 导出技能数量
-    exportAllSuccess:
-      1: "已导出 1 个技能"
-      n: "已导出 $1 个技能"
-    # $1 = 导入的技能名称
-    importSuccess: "已导入 “$1”"
-    # $1 = 导入技能数量
-    importSuccessBackup:
-      1: "已导入 1 个技能"
-      n: "已导入 $1 个技能"
-    importDialog:
-      titleSingle: "导入技能"
-      titleBackup: "导入技能备份"
-      permissionsHeading: "申请的权限"
-      permissionsNone: "未申请特殊权限。"
-      hasScriptsWarning: "包含 scripts/ 下的可执行脚本。"
-      # $1 = 文件数
-      fileCount:
-        1: "1 个文件"
-        n: "$1 个文件"
-      # $1 = 技能数
-      skillCount:
-        1: "1 个技能"
-        n: "$1 个技能"
-      # $1 = 已存在的源名称, $2 = 重命名后的目标名称
-      conflictNotice: "已存在名为 “$1” 的技能。除非选择覆盖，否则将导入为 “$2”。"
-      overwrite: "覆盖现有"
-      keepBoth: "保留两者"
-      confirmOverwriteTitle: "覆盖现有技能？"
-      # $1 = 技能名称（多个时以逗号分隔）
-      confirmOverwriteDescription: "“$1” 将被替换，且已授予的权限将被清除。是否继续？"
-  mcp:
-    title: "MCP 服务器"
-    description: "连接 MCP 服务器，将其工具暴露给 agent。"
-    header:
-      # $1 = 已配置数, $2 = 总服务器数
-      configuredCount: "$1 / $2 已配置"
-      collapse: "折叠 MCP 服务器"
-      expand: "展开 MCP 服务器"
-    empty:
-      title: "尚未配置 MCP 服务器"
-      hint: "添加一个服务器，用外部工具扩展 agent 的能力。"
-    actions:
-      add: "添加 MCP 服务器"
-      toggle: "启用服务器"
-      edit: "编辑服务器"
-      delete: "删除服务器"
-      dragHandle: "拖动以重新排序"
-      deleteConfirmTitle: "删除 MCP 服务器？"
-      # $1 = 服务器名称
-      deleteConfirmDescription: "“$1”将被删除，此操作不可撤销。"
-    errors:
-      # $1 = 服务器名称
-      nameTaken: "已存在名为“$1”的 MCP 服务器。"
-      nameRequired: "服务器名称不能为空。"
-      urlRequired: "服务器 URL 不能为空。"
-      # $1 = URL
-      urlInvalid: "服务器 URL 无效：$1"
-      # $1 = scheme（例如 "ftp:"）
-      urlScheme: "不支持的 URL 协议：$1"
-      bearerTokenRequired: "Bearer Token 不能为空。"
-      authHeaderConflict: "使用 Bearer 认证时请勿手动设置 Authorization header，请在认证字段中填写 token。"
-    status:
-      disabled: "已禁用"
-      idle: "等待首次调用"
-      connected: "已连接"
-      disconnected: "未连接"
-      probing: "重连中"
-      circuitOpen: "暂时不可用"
-    row:
-      # $1 = 服务器名称
-      aria: "$1 MCP 服务器"
-      transportType:
-        streamableHttp: "Streamable HTTP"
-        sse: "SSE"
-      auth: "认证"
-      authNone: "无"
-      authBearer: "Bearer（已设置）"
-      status: "状态"
-    form:
-      name: "名称"
-      namePlaceholder: "例如：weather、github、my-tools"
-      transport: "传输协议"
-      url: "URL"
-      urlPlaceholder: "https://example.com/mcp"
-      authType: "认证方式"
-      authNone: "无"
-      authBearer: "Bearer Token"
-      bearerToken: "Token"
-      bearerTokenPlaceholder: "粘贴 bearer token"
-      headers: "自定义 Headers"
-  rag:
-    title: "知识库 (RAG)"
-    infrastructureTitle: "基础设施"
-    retrievalRankingTitle: "检索与排序"
-    connectionTitle: "连接"
-    connectionLabel: "Neon 连接字符串"
-    connectionHint: "Neon 连接字符串——从项目控制台获取。"
-    testConnection: "测试连接"
-    connectionOk: "已连接 — pgvector 就绪"
-    connectionFailed: "连接失败"
-    connectionStatusReady: "就绪"
-    connectionStatusWarn: "缺少 pgvector"
-    connectionStatusError: "连接失败"
-    pgvectorMissing: "已连接，但缺少 pgvector 扩展。请到 Neon 控制台 → Extensions 启用。"
-    bootstrapFailed: "建表失败"
-    embedderTitle: "Embedding 模型"
-    embedderHint: "OpenAI 兼容的 `/embeddings` 接口，默认 CLIProxyAPI 端口 8317。"
-    embedderBaseUrl: "Base URL"
-    embedderApiKey: "API Key（可选）"
-    embedderModel: "模型"
-    embedderDim: "维度"
-    chunkingTitle: "分块"
-    chunkSize: "块大小（字符）"
-    chunkOverlap: "重叠（字符）"
-    collections: "知识库"
-    collectionsHint: "在聊天中选择一个知识库，把它的 top chunks 附到消息里。"
-    noCollections: "暂无知识库——点击「新建知识库」索引一批文件。"
-    rerankTitle: "重排序（第二层 — 可选）"
-    rerankHint: "用 cross-encoder 对第一层候选重排。每次发送多 1 次 API 调用。"
-    rerankBaseUrl: "Rerank Base URL"
-    rerankModel: "Rerank 模型"
-    rerankApiKey: "Rerank API key（可选）"
-    rerankTopN: "Rerank 后的 top-N"
-    ragSearchTitle: "代理 rag_search 工具"
-    ragSearchHint: "关闭——代理只看到发送时预注入的 chunks。开启后可在对话中主动查询。"
-    # Card 2 — Contextual Retrieval（第 0 层）
-    contextualRetrievalTitle: "上下文检索（第 0 层）"
-    contextualRetrievalHint: "关闭——chunks 按原文索引。开启后可改善文档中段的召回。"
-    contextualLlmBaseUrl: "上下文 LLM Base URL"
-    contextualLlmModel: "上下文 LLM 模型"
-    contextualLlmApiKey: "上下文 LLM API Key（可选）"
-    # Card 3 — 检索与排序
-    retrievalMode: "检索模式"
-    retrievalModeHybrid: "混合（向量 + BM25）"
-    retrievalModeRecommendedBadge: "推荐"
-    retrievalModeHybridSubLabel: "结合向量相似度与关键词匹配，召回更全面。"
-    retrievalModeVector: "仅向量"
-    hybridScoreWarning: "混合模式的相关性标尺（RRF）与纯向量不同；之前设的阈值可能过高，建议先调到 0 试试。"
-    pinGateTitle: "Pinned RAG 召回门槛"
-    pinGateHint: "话题无关时跳过已 pin 的 envelope。0 = 始终附带。"
-    pinMinScore: "最低相关性分数"
-    pinMinScoreHint: "数值越低召回越多，越高越严格。建议从 0 开始尝试。"
-    # 新建集合弹窗内的内联提示，仅当上下文检索开启时显示。
-    contextualHint: "chunks 将带上 LLM 生成的上下文前缀（每块约 1 次 LLM 调用）。"
-    newCollection: "新建知识库"
-    newCollectionHint: "先选择文件夹（已有或新建），再把文件放进去。索引在本地完成——文件留在你磁盘上，向量写入 Neon。"
-    newCollectionName: "知识库名称"
-    nameInvalid: "名称必须以字母或数字开头，只允许字母、数字、横线、下划线。"
-    nameExists: "已存在名为「$1」的知识库。"
-    folderLabel: "文件夹"
-    folderPlaceholder: "选择文件夹…"
-    folderNewOption: "+ 新建文件夹…"
-    folderNewPlaceholder: "输入名称后按回车"
-    folderNoFolders: "还没有文件夹——在上方输入名称"
-    filesInsideFolder: "此文件夹内的文件"
-    pickFiles: "选择文件"
-    pickFolder: "选择文件夹"
-    pickedCount: "$1 个文件 · $2"
-    pickedSkipped: "已跳过 $1 个文件（不支持的扩展名）"
-    reindexBanner: "向「$1」添加文件——已有 chunks 会被新文件替换。"
-    progressReading: "读取 $1 / $2 — $3"
-    progressChunking: "已分块 $1 块"
-    progressEmbedding: "Embedding $1 / $2"
-    progressInserting: "写入 $1 / $2"
-    index: "索引"
-    cancel: "取消"
-    indexDone: "已索引 $1 块"
-    indexFailed: "索引失败"
-    reindex: "重新索引（重新选文件）"
-    renameCollection: "重命名知识库"
-    renameCollectionLabel: "新名称"
-    renamePlaceholder: "输入新名称"
-    renameConfirm: "将「$1」重命名为「$2」？"
-    renameConfirmHint: "Neon 中已有的块会重新打上新的标签。Embedding 不会重新生成 —— 搜索结果完全不变。"
-    renameSuccess: "已将「$1」重命名为「$2」"
-    renameFailed: "重命名失败"
-    renameInUse: "已存在名为「$1」的知识库"
-    deleteCollection: "删除知识库"
-    confirmDeleteTitle: "删除知识库？"
-    confirmDelete: "删除知识库「$1」及其在 Neon 中的 $2 个块？磁盘上的文件不受影响。"
-    deleteSuccess: "已删除「$1」"
-    deleteFailed: "删除失败"
-  backup:
-    title: "备份与恢复"
-    local:
-      title: "本地备份"
-      description: "把全部内容导出成一个 .zip 文件自行保管，可在另一台设备上恢复。"
-      create: "创建备份"
-      restore: "从文件恢复…"
-    create:
-      title: "创建备份"
-      # $1 = formatted timestamp (e.g. "2026-06-09 14-30")
-      defaultName: "备份 $1"
-      nameLabel: "名称"
-      # $1 = max name length (characters)
-      nameInvalid: "名称不能包含 / \\ : * ? \" < > | 或超过 $1 个字符"
-      descriptionLabel: "描述"
-      descriptionPlaceholder: "可选的描述信息…"
-      mode: "备份模式"
-      modeFull: "完整备份"
-      modeFullHint: "会话、设置、技能与提示词、记忆，以及密钥"
-      modePartial: "部分备份"
-      modePartialHint: "自定义选择要备份的内容"
-      catSessions: "会话记录"
-      catWorkspaces: "一并备份工作区文件"
-      catSettings: "普通设置"
-      catSkillsPrompts: "技能与提示词"
-      catMemories: "记忆"
-      catCredentials: "密钥信息"
-      catCredentialsHint: "包含 API Key、OAuth token 等"
-      encrypt: "加密备份"
-      passwordPlaceholder: "口令"
-      passwordHint: "口令一旦遗忘将无法恢复"
-      bannerInfo: "备份不含浏览器 Cookie 与登录态；部分供应商在新设备恢复后可能需要重新登录"
-      bannerWarning: "此备份包含 API Key、OAuth token 等敏感凭证，请勿分享给他人，建议开启加密"
-      atLeastOne: "请至少选择一个要备份的分类"
-      success: "备份已创建"
-      failed: "备份失败"
-    restore:
-      title: "恢复备份"
-      # $1 = source app version (e.g. "1.3.2")
-      source: "来自 Cebian v$1"
-      encrypted: "已加密"
-      passwordLabel: "口令"
-      passwordPlaceholder: "输入备份口令"
-      wrongPassword: "口令错误或备份已损坏"
-      include: "恢复内容"
-      strategy: "恢复方式"
-      merge: "合并"
-      mergeHint: "只新增与更新，不会删除本地数据"
-      replace: "替换"
-      replaceHint: "先清空所选分类，再按备份原样还原"
-      catSessions: "会话记录"
-      catSettings: "普通设置"
-      catSkillsPrompts: "技能与提示词"
-      catMemories: "记忆"
-      catCredentials: "密钥信息"
-      apply: "恢复"
-      confirmReplaceTitle: "替换本地数据？"
-      confirmReplaceBody: "替换模式会先清空所选分类再还原，此操作不可撤销"
-      confirmReplaceCredentialsBody: "替换模式会先清空所选分类再还原，并把备份中的 API Key 与 token 写入本地，此操作不可撤销"
-      confirmCredentialsTitle: "恢复密钥信息？"
-      confirmCredentialsBody: "这会把备份中的 API Key 与 token 写入本地"
-      invalidFile: "该文件不是有效的 Cebian 备份"
-      incompatible: "该备份由更新版本的 Cebian 创建，无法恢复"
-      corrupt: "该备份已损坏或不完整，无法恢复"
-      passwordRequired: "该备份已加密，请输入口令"
-      success: "恢复完成"
-      failed: "恢复失败"
-      nothingSelected: "请至少选择一个要恢复的分类"
-      # $1 = skipped summary, e.g. "会话 3 · 文件 5"
-      partialSuccess: "部分恢复完成（跳过 $1）"
-      # $1 = skipped count
-      skippedSessions: "会话 $1"
-      # $1 = skipped count
-      skippedFiles: "文件 $1"
-    webdav:
-      urlLabel: "服务器地址"
-      urlPlaceholder: "https://dav.example.com/remote.php/dav"
-      usernameLabel: "用户名"
-      usernamePlaceholder: "用户名"
-      passwordLabel: "密码"
-      passwordPlaceholder: "密码或应用专用密码"
-      directoryLabel: "远程目录"
-      directoryPlaceholder: "/cebian"
-      test: "测试连接"
-      testSuccess: "连接正常"
-      save: "保存并连接"
-      title: "WebDAV 备份"
-      description: "备份到 WebDAV 服务器并保留多份快照，可在任意设备上恢复。"
-      notConfigured: "请先配置 WebDAV 连接"
-      changeConnection: "更改连接"
-      removeConnection: "断开连接"
-      removeConfirmTitle: "断开 WebDAV 连接？"
-      removeConfirmBody: "已保存的连接配置（含密码）将从本设备移除。已上传到 WebDAV 服务器的快照会保留，重新连接后仍可访问。"
-      removeSuccess: "已断开 WebDAV 连接"
-      backupNow: "备份到 WebDAV"
-      refresh: "刷新"
-      loading: "加载中…"
-      noSnapshots: "还没有快照"
-      restoreAction: "恢复"
-      deleteAction: "删除"
-      savedConnection: "连接已保存"
-      uploadSuccess: "已上传到 WebDAV"
-      deleteConfirmTitle: "删除这份快照？"
-      # $1 = snapshot file name
-      deleteConfirmBody: "$1 将从 WebDAV 服务器上永久删除，此操作不可撤销"
-      deleteSuccess: "快照已删除"
-      deleteFailed: "删除失败"
-      error:
-        network: "无法连接 WebDAV 服务器，请检查地址与网络"
-        timeout: "WebDAV 服务器响应超时，请检查地址与网络"
-        unauthorized: "鉴权失败，请检查用户名与密码"
-        notFound: "远程路径不存在"
-        conflict: "服务器上的上级目录不存在"
-        invalid: "路径不合法，服务器地址、目录或文件名不安全"
-        unexpected: "WebDAV 服务器返回了意外响应"
-  editor:
-    selectFile: "选择一个文件开始编辑"
-    saving: "保存中…"
-    saveFailed: "保存失败"
-    unsaved: "未保存"
-    saved: "已保存"
-  files:
-    backToList: "返回文件列表"
-    selectOrCreate: "从左侧选择或创建文件"
-  # Scheduled tasks（BG 自动化 scheduler）—— 用户配置 cron / interval 周期任务，
-  # 后台跑 fetch URL 或 webcheck（状态 / body 包含文本）。
-  scheduler:
-    title: "定时任务"
-    description: "用 cron 表达式或固定间隔在后台跑 fetch 或健康检查任务。"
-    empty: "还没有定时任务。在下面新建一个，开始后台拉取。"
-    createButton: "新建任务"
-    columns:
-      name: "名称"
-      schedule: "周期"
-      action: "动作"
-      lastResult: "结果"
-      enabled: "启用"
-    scheduleType:
-      interval: "每 N 分钟"
-      cron: "Cron 表达式"
-    intervalLabel: "间隔（分钟）"
-    cronLabel: "Cron 表达式"
-    cronPlaceholder: "*/15 * * * *"
-    actionType:
-      fetch: "抓取 URL"
-      webcheck: "健康检查"
-    fetchUrlLabel: "URL"
-    fetchExtractLabel: "抽取字段（可选）"
-    fetchExtractPlaceholder: "data.user.name"
-    webcheckUrlLabel: "URL"
-    webcheckExpectedLabel: "期望文本（contains_text 必填）"
-    notifyOnSuccess: "成功时通知"
-    notifyOnFailure: "失败时通知"
-    enabled: "启用"
-    dialogCreateTitle: "新建定时任务"
-    dialogEditTitle: "编辑定时任务"
-    dialogSave: "保存"
-    dialogSaveError: "保存失败，请检查字段后重试。"
-    dialogCancel: "取消"
-    dialogDelete: "删除"
-    deleteConfirmTitle: "删除定时任务？"
-    # $1 = task name
-    deleteConfirmBody: "确认删除 \"$1\"？此操作不可撤销。"
-    runNowButton: "立即运行"
-    runNowSuccess: "任务 \"$1\" 已派发（查看结果通知）。"
-    # $1 = task name, $2 = error summary
-    runNowFailure: "任务 \"$1\" 失败：$2"
-    resultToastSuccess: "$1 运行成功"
-    resultToastFailure: "$1 运行失败"
-    table:
-      # $1 = minutes
-      scheduleEvery: "每 $1 分钟"
-      actionStatus200: "状态 200"
-      # $1 = expected substring
-      actionContainsText: "包含 \"$1\""
-      dialogDescription: "保存时由后台校验，失败字段会在这里显示。"
-      nameLabel: "名称"
-      webcheckConditionStatus200: "状态 200"
-      webcheckConditionContainsText: "包含文本"
-      fetchUrlPlaceholder: "https://example.com/api"
-      webcheckUrlPlaceholder: "https://example.com/health"
-    permissionDeniedBody: "系统通知被关闭了。请在浏览器站点设置里启用通知，以接收定时任务的结果。"
-  # Multi-Channel Outbound Notification Gateway（Phase C / N4）—— Settings UI
-  notifications:
-    title: "通知通道"
-    description: "把定时任务结果推送到 ntfy、Telegram、Discord/Slack 风格的 webhook，或任何自定义端点。通道与浏览器内桌面通知并行触发。"
-    empty:
-      title: "还没配置通知通道"
-      hint: "在下面新增一个，让定时任务结果发到浏览器之外。"
-    columns:
-      name: "名称"
-      kind: "通道"
-      enabled: "启用"
-      lastTested: "上次测试"
-    kinds:
-      ntfy: "ntfy"
-      telegram: "Telegram"
-      webhook: "通用 webhook"
-    form:
-      name: "显示名"
-      namePlaceholder: "我的提醒"
-      topicLabel: "Topic"
-      topicPlaceholder: "cebian-alerts"
-      endpointLabel: "自托管 ntfy 端点（可空）"
-      endpointPlaceholder: "https://ntfy.example.com"
-      chatIdLabel: "Chat ID"
-      chatIdPlaceholder: "123456789"
-      chatIdHint: "给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。"
-      urlLabel: "Webhook URL"
-      urlPlaceholder: "https://discord.com/api/webhooks/…"
-      enabled: "启用"
-      notifySuccess: "成功时通知"
-      notifyFailure: "失败时通知"
-    dialogAdd: "新增通知通道"
-    dialogEdit: "编辑通知通道"
-    buttons:
-      save: "保存"
-      cancel: "取消"
-      test: "发送测试"
-      delete: "删除"
-      enable: "启用"
-      disable: "停用"
-    deleteConfirmTitle: "删除通知通道？"
-    deleteConfirmBody: "确认删除 \"$1\"？停止向该通道发送定时任务结果。"
-    testInProgress: "发送中…"
-    testResultSuccess: "上次测试：$1 ms"
-    testResultFailure: "测试失败：$1"
-    permissionRequired: "该通道需要 token / URL 才能工作，测试前先填对应 secret 字段。"
-    basicAuthHint: "自托管 ntfy 端点加 `?user=<user>&pass=<pass>` 即可发 Basic auth 头。"
-  telegramGateway:
-    title: "Telegram 网关"
-    description: "Telegram 与 Cebian agent 的双向实时桥接。需要自部署 Cloudflare Worker 中转。"
-    workerUrl: "Worker URL"
-    botToken: "Bot token"
-    webhookSecret: "Webhook secret"
-    wsAuthToken: "WS auth token"
-    allowedChatIds: "允许的 chat IDs"
-    chatIdHint: "给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。"
-    interactiveMode: "交互模式（把 Telegram 消息路由到 agent）"
-    save: "保存"
-    saved: "已保存"
+    title: 指引
+    label: 自定义指引
+    hint: 追加到默认规则之后，用于调整回复语言、风格或角色。无法覆盖工具协议和安全规则。
+    placeholder: '例如：
 
-# ─── 聊天 ───
+      - 用中文回复
+
+      - 回答尽量简洁
+
+      - 讨论代码时默认使用 TypeScript'
+  persona:
+    title: 人设
+    label: 人设副本
+    hint: 向系统提示注入 SOUL 块，并在每条用户消息顶部追加一行 recap。需在「高级设置」中开启，或通过聊天输入框旁的芯片切换。
+    soulLabel: SOUL
+    soulPlaceholder: '例如：
+
+      - 始终用第一人称说话，避免「作为 AI」之类的措辞
+
+      - 有自己的看法，但遇到真正不确定时坦率承认
+
+      - 使用与用户相同的语言回复'
+    identityName: 名称
+    identityVibe: 气质
+    identityTone: 语气
+    identityEmoji: 签名 emoji
+    identityNamePlaceholder: Cebian
+    identityVibePlaceholder: 精准、略带不羁
+    identityTonePlaceholder: 口语化、技术向
+    identityEmojiPlaceholder: 🦞
+  prompts:
+    title: 提示词
+    newBody: （在此处编写你的提示词）
+    hint: 可复用的提示模板，通过 $1 命令在聊天输入中触发。
+    expandInline: 在输入框中展开提示词内容
+    placeholders:
+      selectedText: 页面选中文本
+      pageUrl: 当前页面 URL
+      pageTitle: 当前页面标题
+      date: 当前日期
+      clipboard: 剪贴板内容
+      input: 斜杠命令后输入的文本
+  templateVars:
+    selectedText: 页面选中文本
+    context: 选中文本的上下文
+    pageUrl: 当前页面 URL
+    pageTitle: 当前页面标题
+    date: 当前日期
+    uiLanguage: 界面语言
+    clipboard: 剪贴板内容
+  memory:
+    title: 记忆
+    enable: 启用记忆
+    hint: 跨对话记忆，默认关闭。开启后助手会跨会话自动保存并调用关于你的长期信息。
+    newBody: （在此写记忆内容）
+    organize:
+      title: 整理记忆
+      hint: 一次性合并重复、清理过时、规整你的记忆文件。
+      button: 整理
+      running: 整理中…
+      model: 模型
+      followActive: 与对话模型相同
+      auto: 自动整理
+      autoHint: 积累到一定量后，在后台定期自动整理。
+      intervalLabel: 最小间隔（天）
+      thresholdLabel: 触发阈值（自上次整理后新增记忆条数）
+      lastRun: 上次整理 $1
+      toast:
+        ok: 记忆已整理
+        empty: 没有需要整理的记忆
+        conflict: 整理期间记忆有变动，已跳过，请稍后重试
+        noModel: 未配置可用模型，无法整理记忆
+        failed: 记忆整理失败
+  skills:
+    title: 技能
+    newBody: （在此处编写技能指令）
+    create: 创建技能
+    hint: 遵循 agentskills.io 规范的多文件技能包，agent 会按需加载。
+    import: 导入…
+    exportCurrent: 导出
+    exportAll: 导出全部
+    exportEmpty: 没有可导出的技能
+    exportSuccess: 已导出 “$1”
+    exportAllSuccess:
+      1: 已导出 1 个技能
+      n: 已导出 $1 个技能
+    importSuccess: 已导入 “$1”
+    importSuccessBackup:
+      1: 已导入 1 个技能
+      n: 已导入 $1 个技能
+    importDialog:
+      titleSingle: 导入技能
+      titleBackup: 导入技能备份
+      permissionsHeading: 申请的权限
+      permissionsNone: 未申请特殊权限。
+      hasScriptsWarning: 包含 scripts/ 下的可执行脚本。
+      fileCount:
+        1: 1 个文件
+        n: $1 个文件
+      skillCount:
+        1: 1 个技能
+        n: $1 个技能
+      conflictNotice: 已存在名为 “$1” 的技能。除非选择覆盖，否则将导入为 “$2”。
+      overwrite: 覆盖现有
+      keepBoth: 保留两者
+      confirmOverwriteTitle: 覆盖现有技能？
+      confirmOverwriteDescription: “$1” 将被替换，且已授予的权限将被清除。是否继续？
+  mcp:
+    title: MCP 服务器
+    description: 连接 MCP 服务器，将其工具暴露给 agent。
+    header:
+      configuredCount: $1 / $2 已配置
+      collapse: 折叠 MCP 服务器
+      expand: 展开 MCP 服务器
+    empty:
+      title: 尚未配置 MCP 服务器
+      hint: 添加一个服务器，用外部工具扩展 agent 的能力。
+    actions:
+      add: 添加 MCP 服务器
+      toggle: 启用服务器
+      edit: 编辑服务器
+      delete: 删除服务器
+      dragHandle: 拖动以重新排序
+      deleteConfirmTitle: 删除 MCP 服务器？
+      deleteConfirmDescription: “$1”将被删除，此操作不可撤销。
+    errors:
+      nameTaken: 已存在名为“$1”的 MCP 服务器。
+      nameRequired: 服务器名称不能为空。
+      urlRequired: 服务器 URL 不能为空。
+      urlInvalid: 服务器 URL 无效：$1
+      urlScheme: 不支持的 URL 协议：$1
+      bearerTokenRequired: Bearer Token 不能为空。
+      authHeaderConflict: 使用 Bearer 认证时请勿手动设置 Authorization header，请在认证字段中填写 token。
+    status:
+      disabled: 已禁用
+      idle: 等待首次调用
+      connected: 已连接
+      disconnected: 未连接
+      probing: 重连中
+      circuitOpen: 暂时不可用
+    row:
+      aria: $1 MCP 服务器
+      transportType:
+        streamableHttp: Streamable HTTP
+        sse: SSE
+      auth: 认证
+      authNone: 无
+      authBearer: Bearer（已设置）
+      status: 状态
+    form:
+      name: 名称
+      namePlaceholder: 例如：weather、github、my-tools
+      transport: 传输协议
+      url: URL
+      urlPlaceholder: https://example.com/mcp
+      authType: 认证方式
+      authNone: 无
+      authBearer: Bearer Token
+      bearerToken: Token
+      bearerTokenPlaceholder: 粘贴 bearer token
+      headers: 自定义 Headers
+  rag:
+    title: 知识库 (RAG)
+    infrastructureTitle: 基础设施
+    retrievalRankingTitle: 检索与排序
+    connectionTitle: 连接
+    connectionLabel: Neon 连接字符串
+    connectionHint: Neon 连接字符串——从项目控制台获取。
+    testConnection: 测试连接
+    connectionOk: 已连接 — pgvector 就绪
+    connectionFailed: 连接失败
+    connectionStatusReady: 就绪
+    connectionStatusWarn: 缺少 pgvector
+    connectionStatusError: 连接失败
+    pgvectorMissing: 已连接，但缺少 pgvector 扩展。请到 Neon 控制台 → Extensions 启用。
+    bootstrapFailed: 建表失败
+    embedderTitle: Embedding 模型
+    embedderHint: OpenAI 兼容的 `/embeddings` 接口，默认 CLIProxyAPI 端口 8317。
+    embedderBaseUrl: Base URL
+    embedderApiKey: API Key（可选）
+    embedderModel: 模型
+    embedderDim: 维度
+    chunkingTitle: 分块
+    chunkSize: 块大小（字符）
+    chunkOverlap: 重叠（字符）
+    collections: 知识库
+    collectionsHint: 在聊天中选择一个知识库，把它的 top chunks 附到消息里。
+    noCollections: 暂无知识库——点击「新建知识库」索引一批文件。
+    rerankTitle: 重排序（第二层 — 可选）
+    rerankHint: 用 cross-encoder 对第一层候选重排。每次发送多 1 次 API 调用。
+    rerankBaseUrl: Rerank Base URL
+    rerankModel: Rerank 模型
+    rerankApiKey: Rerank API key（可选）
+    rerankTopN: Rerank 后的 top-N
+    ragSearchTitle: 代理 rag_search 工具
+    ragSearchHint: 关闭——代理只看到发送时预注入的 chunks。开启后可在对话中主动查询。
+    contextualRetrievalTitle: 上下文检索（第 0 层）
+    contextualRetrievalHint: 关闭——chunks 按原文索引。开启后可改善文档中段的召回。
+    contextualLlmBaseUrl: 上下文 LLM Base URL
+    contextualLlmModel: 上下文 LLM 模型
+    contextualLlmApiKey: 上下文 LLM API Key（可选）
+    retrievalMode: 检索模式
+    retrievalModeHybrid: 混合（向量 + BM25）
+    retrievalModeRecommendedBadge: 推荐
+    retrievalModeHybridSubLabel: 结合向量相似度与关键词匹配，召回更全面。
+    retrievalModeVector: 仅向量
+    hybridScoreWarning: 混合模式的相关性标尺（RRF）与纯向量不同；之前设的阈值可能过高，建议先调到 0 试试。
+    pinGateTitle: Pinned RAG 召回门槛
+    pinGateHint: 话题无关时跳过已 pin 的 envelope。0 = 始终附带。
+    pinMinScore: 最低相关性分数
+    pinMinScoreHint: 数值越低召回越多，越高越严格。建议从 0 开始尝试。
+    contextualHint: chunks 将带上 LLM 生成的上下文前缀（每块约 1 次 LLM 调用）。
+    newCollection: 新建知识库
+    newCollectionHint: 先选择文件夹（已有或新建），再把文件放进去。索引在本地完成——文件留在你磁盘上，向量写入 Neon。
+    newCollectionName: 知识库名称
+    nameInvalid: 名称必须以字母或数字开头，只允许字母、数字、横线、下划线。
+    nameExists: 已存在名为「$1」的知识库。
+    folderLabel: 文件夹
+    folderPlaceholder: 选择文件夹…
+    folderNewOption: + 新建文件夹…
+    folderNewPlaceholder: 输入名称后按回车
+    folderNoFolders: 还没有文件夹——在上方输入名称
+    filesInsideFolder: 此文件夹内的文件
+    pickFiles: 选择文件
+    pickFolder: 选择文件夹
+    pickedCount: $1 个文件 · $2
+    pickedSkipped: 已跳过 $1 个文件（不支持的扩展名）
+    reindexBanner: 向「$1」添加文件——已有 chunks 会被新文件替换。
+    progressReading: 读取 $1 / $2 — $3
+    progressChunking: 已分块 $1 块
+    progressEmbedding: Embedding $1 / $2
+    progressInserting: 写入 $1 / $2
+    index: 索引
+    cancel: 取消
+    indexDone: 已索引 $1 块
+    indexFailed: 索引失败
+    reindex: 重新索引（重新选文件）
+    renameCollection: 重命名知识库
+    renameCollectionLabel: 新名称
+    renamePlaceholder: 输入新名称
+    renameConfirm: 将「$1」重命名为「$2」？
+    renameConfirmHint: Neon 中已有的块会重新打上新的标签。Embedding 不会重新生成 —— 搜索结果完全不变。
+    renameSuccess: 已将「$1」重命名为「$2」
+    renameFailed: 重命名失败
+    renameInUse: 已存在名为「$1」的知识库
+    deleteCollection: 删除知识库
+    confirmDeleteTitle: 删除知识库？
+    confirmDelete: 删除知识库「$1」及其在 Neon 中的 $2 个块？磁盘上的文件不受影响。
+    deleteSuccess: 已删除「$1」
+    deleteFailed: 删除失败
+  backup:
+    title: 备份与恢复
+    local:
+      title: 本地备份
+      description: 把全部内容导出成一个 .zip 文件自行保管，可在另一台设备上恢复。
+      create: 创建备份
+      restore: 从文件恢复…
+    create:
+      title: 创建备份
+      defaultName: 备份 $1
+      nameLabel: 名称
+      nameInvalid: '名称不能包含 / \ : * ? " < > | 或超过 $1 个字符'
+      descriptionLabel: 描述
+      descriptionPlaceholder: 可选的描述信息…
+      mode: 备份模式
+      modeFull: 完整备份
+      modeFullHint: 会话、设置、技能与提示词、记忆，以及密钥
+      modePartial: 部分备份
+      modePartialHint: 自定义选择要备份的内容
+      catSessions: 会话记录
+      catWorkspaces: 一并备份工作区文件
+      catSettings: 普通设置
+      catSkillsPrompts: 技能与提示词
+      catMemories: 记忆
+      catCredentials: 密钥信息
+      catCredentialsHint: 包含 API Key、OAuth token 等
+      encrypt: 加密备份
+      passwordPlaceholder: 口令
+      passwordHint: 口令一旦遗忘将无法恢复
+      bannerInfo: 备份不含浏览器 Cookie 与登录态；部分供应商在新设备恢复后可能需要重新登录
+      bannerWarning: 此备份包含 API Key、OAuth token 等敏感凭证，请勿分享给他人，建议开启加密
+      atLeastOne: 请至少选择一个要备份的分类
+      success: 备份已创建
+      failed: 备份失败
+    restore:
+      title: 恢复备份
+      source: 来自 Cebian v$1
+      encrypted: 已加密
+      passwordLabel: 口令
+      passwordPlaceholder: 输入备份口令
+      wrongPassword: 口令错误或备份已损坏
+      include: 恢复内容
+      strategy: 恢复方式
+      merge: 合并
+      mergeHint: 只新增与更新，不会删除本地数据
+      replace: 替换
+      replaceHint: 先清空所选分类，再按备份原样还原
+      catSessions: 会话记录
+      catSettings: 普通设置
+      catSkillsPrompts: 技能与提示词
+      catMemories: 记忆
+      catCredentials: 密钥信息
+      apply: 恢复
+      confirmReplaceTitle: 替换本地数据？
+      confirmReplaceBody: 替换模式会先清空所选分类再还原，此操作不可撤销
+      confirmReplaceCredentialsBody: 替换模式会先清空所选分类再还原，并把备份中的 API Key 与 token 写入本地，此操作不可撤销
+      confirmCredentialsTitle: 恢复密钥信息？
+      confirmCredentialsBody: 这会把备份中的 API Key 与 token 写入本地
+      invalidFile: 该文件不是有效的 Cebian 备份
+      incompatible: 该备份由更新版本的 Cebian 创建，无法恢复
+      corrupt: 该备份已损坏或不完整，无法恢复
+      passwordRequired: 该备份已加密，请输入口令
+      success: 恢复完成
+      failed: 恢复失败
+      nothingSelected: 请至少选择一个要恢复的分类
+      partialSuccess: 部分恢复完成（跳过 $1）
+      skippedSessions: 会话 $1
+      skippedFiles: 文件 $1
+    webdav:
+      urlLabel: 服务器地址
+      urlPlaceholder: https://dav.example.com/remote.php/dav
+      usernameLabel: 用户名
+      usernamePlaceholder: 用户名
+      passwordLabel: 密码
+      passwordPlaceholder: 密码或应用专用密码
+      directoryLabel: 远程目录
+      directoryPlaceholder: /cebian
+      test: 测试连接
+      testSuccess: 连接正常
+      save: 保存并连接
+      title: WebDAV 备份
+      description: 备份到 WebDAV 服务器并保留多份快照，可在任意设备上恢复。
+      notConfigured: 请先配置 WebDAV 连接
+      changeConnection: 更改连接
+      removeConnection: 断开连接
+      removeConfirmTitle: 断开 WebDAV 连接？
+      removeConfirmBody: 已保存的连接配置（含密码）将从本设备移除。已上传到 WebDAV 服务器的快照会保留，重新连接后仍可访问。
+      removeSuccess: 已断开 WebDAV 连接
+      backupNow: 备份到 WebDAV
+      refresh: 刷新
+      loading: 加载中…
+      noSnapshots: 还没有快照
+      restoreAction: 恢复
+      deleteAction: 删除
+      savedConnection: 连接已保存
+      uploadSuccess: 已上传到 WebDAV
+      deleteConfirmTitle: 删除这份快照？
+      deleteConfirmBody: $1 将从 WebDAV 服务器上永久删除，此操作不可撤销
+      deleteSuccess: 快照已删除
+      deleteFailed: 删除失败
+      error:
+        network: 无法连接 WebDAV 服务器，请检查地址与网络
+        timeout: WebDAV 服务器响应超时，请检查地址与网络
+        unauthorized: 鉴权失败，请检查用户名与密码
+        notFound: 远程路径不存在
+        conflict: 服务器上的上级目录不存在
+        invalid: 路径不合法，服务器地址、目录或文件名不安全
+        unexpected: WebDAV 服务器返回了意外响应
+  editor:
+    selectFile: 选择一个文件开始编辑
+    saving: 保存中…
+    saveFailed: 保存失败
+    unsaved: 未保存
+    saved: 已保存
+  files:
+    backToList: 返回文件列表
+    selectOrCreate: 从左侧选择或创建文件
+  scheduler:
+    title: 定时任务
+    description: 用 cron 表达式或固定间隔在后台跑 fetch 或健康检查任务。
+    empty: 还没有定时任务。在下面新建一个，开始后台拉取。
+    createButton: 新建任务
+    columns:
+      name: 名称
+      schedule: 周期
+      action: 动作
+      lastResult: 结果
+      enabled: 启用
+    scheduleType:
+      interval: 每 N 分钟
+      cron: Cron 表达式
+    intervalLabel: 间隔（分钟）
+    cronLabel: Cron 表达式
+    cronPlaceholder: '*/15 * * * *'
+    actionType:
+      fetch: 抓取 URL
+      webcheck: 健康检查
+    fetchUrlLabel: URL
+    fetchExtractLabel: 抽取字段（可选）
+    fetchExtractPlaceholder: data.user.name
+    webcheckUrlLabel: URL
+    webcheckExpectedLabel: 期望文本（contains_text 必填）
+    notifyOnSuccess: 成功时通知
+    notifyOnFailure: 失败时通知
+    enabled: 启用
+    dialogCreateTitle: 新建定时任务
+    dialogEditTitle: 编辑定时任务
+    dialogSave: 保存
+    dialogSaveError: 保存失败，请检查字段后重试。
+    dialogCancel: 取消
+    dialogDelete: 删除
+    deleteConfirmTitle: 删除定时任务？
+    deleteConfirmBody: 确认删除 "$1"？此操作不可撤销。
+    runNowButton: 立即运行
+    runNowSuccess: 任务 "$1" 已派发（查看结果通知）。
+    runNowFailure: 任务 "$1" 失败：$2
+    resultToastSuccess: $1 运行成功
+    resultToastFailure: $1 运行失败
+    table:
+      scheduleEvery: 每 $1 分钟
+      actionStatus200: 状态 200
+      actionContainsText: 包含 "$1"
+      dialogDescription: 保存时由后台校验，失败字段会在这里显示。
+      nameLabel: 名称
+      webcheckConditionStatus200: 状态 200
+      webcheckConditionContainsText: 包含文本
+      fetchUrlPlaceholder: https://example.com/api
+      webcheckUrlPlaceholder: https://example.com/health
+    permissionDeniedBody: 系统通知被关闭了。请在浏览器站点设置里启用通知，以接收定时任务的结果。
+  notifications:
+    title: 通知通道
+    description: 把定时任务结果推送到 ntfy、Telegram、Discord/Slack 风格的 webhook，或任何自定义端点。通道与浏览器内桌面通知并行触发。
+    empty:
+      title: 还没配置通知通道
+      hint: 在下面新增一个，让定时任务结果发到浏览器之外。
+    columns:
+      name: 名称
+      kind: 通道
+      enabled: 启用
+      lastTested: 上次测试
+    kinds:
+      ntfy: ntfy
+      telegram: Telegram
+      webhook: 通用 webhook
+    form:
+      name: 显示名
+      namePlaceholder: 我的提醒
+      topicLabel: Topic
+      topicPlaceholder: cebian-alerts
+      endpointLabel: 自托管 ntfy 端点（可空）
+      endpointPlaceholder: https://ntfy.example.com
+      chatIdLabel: Chat ID
+      chatIdPlaceholder: '123456789'
+      chatIdHint: 给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。
+      urlLabel: Webhook URL
+      urlPlaceholder: https://discord.com/api/webhooks/…
+      enabled: 启用
+      notifySuccess: 成功时通知
+      notifyFailure: 失败时通知
+    dialogAdd: 新增通知通道
+    dialogEdit: 编辑通知通道
+    buttons:
+      save: 保存
+      cancel: 取消
+      test: 发送测试
+      delete: 删除
+      enable: 启用
+      disable: 停用
+    deleteConfirmTitle: 删除通知通道？
+    deleteConfirmBody: 确认删除 "$1"？停止向该通道发送定时任务结果。
+    testInProgress: 发送中…
+    testResultSuccess: 上次测试：$1 ms
+    testResultFailure: 测试失败：$1
+    permissionRequired: 该通道需要 token / URL 才能工作，测试前先填对应 secret 字段。
+    basicAuthHint: 自托管 ntfy 端点加 `?user=<user>&pass=<pass>` 即可发 Basic auth 头。
+  telegramGateway:
+    title: Telegram 网关
+    description: Telegram 与 Cebian agent 的双向实时桥接。需要自部署 Cloudflare Worker 中转。
+    workerUrl: Worker URL
+    botToken: Bot token
+    webhookSecret: Webhook secret
+    wsAuthToken: WS auth token
+    allowedChatIds: 允许的 chat IDs
+    chatIdHint: 给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。
+    interactiveMode: 交互模式（把 Telegram 消息路由到 agent）
+    save: 保存
+    saved: 已保存
+  chat:
+    autoTitle:
+      followMain: 与对话模型相同
+      hint: 首轮回复结束后，用 AI 生成的简短标题替换默认标题（首条消息截断）。
+      label: 自动生成会话标题
+      model: 生成标题的模型
+    compaction:
+      followMain: 与对话模型相同
+      hint: 对话过长时用来自动压缩历史的模型，默认与对话模型相同。
+      label: 上下文压缩模型
+    instructions:
+      hint: 追加到默认规则之后，用于调整回复语言、风格或角色。无法覆盖工具协议和安全规则。
+      label: 自定义指引
+      placeholder: '例如：
+
+        - 用中文回复
+
+        - 回答尽量简洁
+
+        - 讨论代码时默认使用 TypeScript'
+    search:
+      allDisabled: 所有引擎均已停用。请至少启用一个引擎，以使用联网搜索。
+      create: 添加引擎
+      custom: 自定义
+      delete: 删除「$1」
+      deleteConfirmDescription: 删除「$1」后无法恢复。
+      deleteConfirmTitle: 删除这个引擎？
+      edit: 编辑「$1」
+      editBuiltin: 内置引擎
+      editCustom: 自定义引擎
+      engines:
+        baidu:
+          name: 百度
+          when: 中文查询
+        bing:
+          name: Bing
+        brave:
+          name: Brave
+        duckduckgo:
+          name: DuckDuckGo
+        google:
+          name: Google
+      generate: 生成模板
+      generateSelectorPlaceholder: '结果容器的选择器，例如 #results'
+      hint: 设置搜索引擎的尝试顺序，第一个启用的引擎为首选。AI 可根据适用场景优先选择其他引擎；搜索被拦截、没有结果或执行失败时，Cebian 会按顺序尝试其余已启用的引擎。
+      modified: 已修改
+      more: 查看「$1」的更多操作
+      moveDown: 下移「$1」
+      moveUp: 上移「$1」
+      name: 名称
+      namePlaceholder: 例如：Kagi
+      preferred: 首选
+      resetDefault: 恢复「$1」的默认值
+      script: 抽取脚本
+      scriptHint: 定义完整的 extract 函数，从搜索结果页提取标题、链接和摘要。返回对象中的 status 为 empty 时，Cebian 会短暂重试；为 blocked 时，会切换引擎；为 ok 时，会读取 results 数组。results 为空时也会切换引擎。
+      title: 联网搜索
+      url: 搜索地址
+      urlHint: 在搜索地址中用 $1 表示搜索词。Cebian 会自动编码并填入搜索词。
+      urlPreview: 搜索「$1」时打开的地址：$2
+      when: 适用场景（可选）
+      whenHint: 说明哪些搜索适合优先使用此引擎，供 AI 选择时参考。
+      whenPlaceholder: 例如：中文查询
+    title: 对话
+  data:
+    storage:
+      description: 按会话浏览 AI 生成的文件。浏览器是只读的，需要导出时用其中的下载按钮。
+      openBrowser: 打开文件浏览器
+      title: 本机存储
+      used: 已用空间
+      usedError: 无法计算
+    title: 数据
 chat:
   composer:
-    placeholder: "输入 / 查看命令…"
-    pickElement: "选择元素"
-    cancelPick: "取消选择"
-    pickRegion: "裁剪区域"
-    cancelRegionPick: "取消裁剪"
-    regionPickFailed: "区域截图失败"
-    openStorage: "文件系统"
-    screenshot: "截图"
-    uploadFile: "上传文件"
-    mobileMode: "移动端模式"
-    needModel: "请先选择一个 AI 模型"
-    goToSettings: "前往设置"
-    readPromptFailed: "读取 Prompt 失败"
-    elementAdded: "该元素已添加"
-    elementPickFailed: "元素选择失败"
-    elementPickUnsupported: "当前页面不支持元素选取"
-    elementPickNavigated: "页面已跳转，元素选取已取消"
-    imageAlreadyAdded: "该图片已添加"
-    screenshotFailed: "截图失败"
+    placeholder: 输入 / 查看命令…
+    pickElement: 选择元素
+    cancelPick: 取消选择
+    pickRegion: 裁剪区域
+    cancelRegionPick: 取消裁剪
+    regionPickFailed: 区域截图失败
+    openStorage: 文件系统
+    screenshot: 截图
+    uploadFile: 上传文件
+    mobileMode: 移动端模式
+    needModel: 请先选择一个 AI 模型
+    goToSettings: 前往设置
+    readPromptFailed: 读取 Prompt 失败
+    elementAdded: 该元素已添加
+    elementPickFailed: 元素选择失败
+    elementPickUnsupported: 当前页面不支持元素选取
+    elementPickNavigated: 页面已跳转，元素选取已取消
+    imageAlreadyAdded: 该图片已添加
+    screenshotFailed: 截图失败
     workerTeam:
-      fast: "快速"
-      team: "团队"
-      toggleHint: "切换快速模式（主代理直接产出）与团队模式（委派给 Worker 子代理）"
+      fast: 快速
+      team: 团队
+      toggleHint: 切换快速模式（主代理直接产出）与团队模式（委派给 Worker 子代理）
     persona:
-      normal: "普通"
-      openclaw: "OpenClaw"
-      toggleHint: "切换普通模式（默认 Cebian）与 OpenClaw 模式（自定义人设 + 身份信息）"
-    # $1 = 附件上限个数
-    maxAttachments: "最多添加 $1 个附件"
-    # $1 = 实际添加的文件数
-    truncatedFiles: "仅添加前 $1 个文件，已达上限"
-    # $1 = 文件名，$2 = 体积上限（已格式化，如 “5 MB”）
-    fileTooLarge: "$1 超过 $2 限制"
-    # $1 = 文件名
-    readFileFailed: "读取失败：$1"
-    # $1 = 文件名
-    unsupportedFileType: "不支持的文件类型：$1"
-    modelNoImage: "当前模型不支持多模态输入"
-    imageStripped: "已移除图片附件——当前模型不支持多模态输入"
-    quoteChips: "引用片段"
-    removeQuoteChip: "移除引用片段"
-    noPrompts: "暂无 Prompt，前往 AI 配置创建"
-    noMatch: "无匹配结果"
-    loadMore: "再显示 $1 条"
-    iframeEnterHint: "⏎ 点击进入"
-    # 语音输入（本地优先、云端兜底的语音识别）
-    voiceStart: "语音输入"
-    voiceStop: "停止语音输入"
-    voicePreparing: "正在准备语音模型…"
-    voiceNeedPermission: "需要麦克风权限——请在刚打开的标签页里授权，然后再点一次麦克风。"
-    voiceDenied: "麦克风权限被拒绝。请在 Chrome 设置里允许 Cebian 使用麦克风，然后重试。"
-    voiceLanguageUnavailable: "当前语言暂不支持语音识别。"
-    voiceNoSpeech: "没有听到语音，请重试。"
-    voiceAudioCapture: "没有找到麦克风，或无法访问。"
-    voiceNetworkFailed: "语音识别服务连接失败，请检查网络后重试。"
-    voiceFailed: "语音输入失败，请重试。"
-    mentionAdd: "添加上下文"
-    removeMentionChip: "移除上下文"
-    mentionChips: "已引用的上下文"
-    sectionSkills: "技能"
-    sectionPrompts: "提示词"
-    sectionFolders: "文件夹"
-    sectionKnowledge: "知识库"
-    sectionTabs: "添加标签页"
-    noSkills: "暂无技能——请到 AI 配置中创建"
-    noPromptsMention: "暂无提示词——请到 AI 配置中创建"
-    noFolders: "暂无可用文件夹"
-    noCollections: "暂无 RAG 知识库——请到 设置 → 知识库 中创建"
-    folderBack: "返回上一级"
-    folderEmpty: "空文件夹"
-    loading: "加载中…"
-    # $1 = 上下文名称
-    mentionReadFailed: "无法读取上下文——已丢弃：$1"
-    tabsNotReady: "标签页引用将在后续版本提供"
-    # $1 = 固定项名称（多个以逗号分隔）
-    pinReadFailed: "已固定的上下文读取失败——本轮跳过：$1"
-    # $1 = 固定项名称, $2 = 连续失败次数
-    pinAutoRemoved: "已取消固定「$1」——连续 $2 条消息未找到来源"
-    # 把 prompt / skill 固定到全局：每条对话的每条消息都会自动附带其内容；
-    # 跨会话持久生效，取消前会在所有对话中同步显示；文件夹 / 文件 / RAG
-    # 固定仍仅限当前会话。
-    sectionPinned: "已固定"
-    pinnedAutoHint: "自动"
-    pinnedChips: "每条对话自动附带"
-    togglePin: "固定到所有对话"
-    unpin: "从所有对话取消固定"
+      normal: 普通
+      openclaw: OpenClaw
+      toggleHint: 切换普通模式（默认 Cebian）与 OpenClaw 模式（自定义人设 + 身份信息）
+    maxAttachments: 最多添加 $1 个附件
+    truncatedFiles: 仅添加前 $1 个文件，已达上限
+    fileTooLarge: $1 超过 $2 限制
+    readFileFailed: 读取失败：$1
+    unsupportedFileType: 不支持的文件类型：$1
+    modelNoImage: 当前模型不支持多模态输入
+    imageStripped: 已移除图片附件——当前模型不支持多模态输入
+    quoteChips: 引用片段
+    removeQuoteChip: 移除引用片段
+    noPrompts: 暂无 Prompt，前往 AI 配置创建
+    noMatch: 无匹配结果
+    loadMore: 再显示 $1 条
+    iframeEnterHint: ⏎ 点击进入
+    voiceStart: 语音输入
+    voiceStop: 停止语音输入
+    voicePreparing: 正在准备语音模型…
+    voiceNeedPermission: 需要麦克风权限——请在刚打开的标签页里授权，然后再点一次麦克风。
+    voiceDenied: 麦克风权限被拒绝。请在 Chrome 设置里允许 Cebian 使用麦克风，然后重试。
+    voiceLanguageUnavailable: 当前语言暂不支持语音识别。
+    voiceNoSpeech: 没有听到语音，请重试。
+    voiceAudioCapture: 没有找到麦克风，或无法访问。
+    voiceNetworkFailed: 语音识别服务连接失败，请检查网络后重试。
+    voiceFailed: 语音输入失败，请重试。
+    mentionAdd: 添加上下文
+    removeMentionChip: 移除上下文
+    mentionChips: 已引用的上下文
+    sectionSkills: 技能
+    sectionPrompts: 提示词
+    sectionFolders: 文件夹
+    sectionKnowledge: 知识库
+    sectionTabs: 添加标签页
+    noSkills: 暂无技能——请到 AI 配置中创建
+    noPromptsMention: 暂无提示词——请到 AI 配置中创建
+    noFolders: 暂无可用文件夹
+    noCollections: 暂无 RAG 知识库——请到 设置 → 知识库 中创建
+    folderBack: 返回上一级
+    folderEmpty: 空文件夹
+    loading: 加载中…
+    mentionReadFailed: 无法读取上下文——已丢弃：$1
+    tabsNotReady: 标签页引用将在后续版本提供
+    pinReadFailed: 已固定的上下文读取失败——本轮跳过：$1
+    pinAutoRemoved: 已取消固定「$1」——连续 $2 条消息未找到来源
+    sectionPinned: 已固定
+    pinnedAutoHint: 自动
+    pinnedChips: 每条对话自动附带
+    togglePin: 固定到所有对话
+    unpin: 从所有对话取消固定
   mention:
     builtinSkill:
-      funFactsName: "趣味冷知识"
-      funFactsBody: |
-        每条回复中点缀 1-2 条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
-      hypeItUpName: "气氛拉满！"
-      hypeItUpBody: |
-        用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到 60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
-      explainInCharacterName: "角色扮演讲解"
-      explainInCharacterBody: |
-        为讲解设定一个鲜明的角色——沧桑的老船长、二十年代黑色电影侦探、穿越时空的历史学家等，挑最贴合主题的那个。贯穿始终保持角色一致：用词、比喻、腔调全部到位。第一次出现时简短引入角色（"诸位且听——老船长马洛在此……"），然后全情投入，结尾也要留在角色里。
+      funFactsName: 趣味冷知识
+      funFactsBody: '每条回复中点缀 1-2 条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
+
+        '
+      hypeItUpName: 气氛拉满！
+      hypeItUpBody: '用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到 60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
+
+        '
+      explainInCharacterName: 角色扮演讲解
+      explainInCharacterBody: '为讲解设定一个鲜明的角色——沧桑的老船长、二十年代黑色电影侦探、穿越时空的历史学家等，挑最贴合主题的那个。贯穿始终保持角色一致：用词、比喻、腔调全部到位。第一次出现时简短引入角色（"诸位且听——老船长马洛在此……"），然后全情投入，结尾也要留在角色里。
+
+        '
   attachments:
-    image: "图片"
-    screenshot: "截图"
-    region: "区域"
-    imageAlt: "附件图片"
-    # $1 = 事件数量, $2 = 时长 (M:SS)
-    recordingMeta: "$1 个事件 · $2"
-    recordingTruncated: "已截断"
-    recordingDownload: "下载录制 JSON"
-    # $1 = 事件数量, $2 = 简短字符数（如 1.2K、3M）
-    recordingHover: "$1 个事件 · 约 $2 字符"
-    # 目录提及徽章文案。$1 = 子项数
-    directoryItemCount: "$1 项"
-    # PDF 附件徽章文案。$1 = 页数
-    pdfPageCount: "$1 页"
-    # PDF 附件 tooltip（完整提取时）。$1 = 文件名, $2 = 页数
-    pdfPages: "$1 — 共 $2 页"
-    # PDF 附件 tooltip（文本被截断时）。$1 = 文件名, $2 = 总页数, $3 = 实际提取页数
-    pdfTruncated: "$1 — 提取了 $2 页中的 $3 页（文本超限截断）"
+    image: 图片
+    screenshot: 截图
+    region: 区域
+    imageAlt: 附件图片
+    recordingMeta: $1 个事件 · $2
+    recordingTruncated: 已截断
+    recordingDownload: 下载录制 JSON
+    recordingHover: $1 个事件 · 约 $2 字符
+    directoryItemCount: $1 项
+    pdfPageCount: $1 页
+    pdfPages: $1 — 共 $2 页
+    pdfTruncated: $1 — 提取了 $2 页中的 $3 页（文本超限截断）
   recorder:
-    start: "开始录制用户操作"
-    stop: "停止录制（会随下一条消息发送）"
-    startRejectedBusy: "另一个侧边栏正在录制，请先停止后再开始新的录制。"
-    autoStoppedEvents: "录制已自动停止：达到事件上限"
-    autoStoppedTime: "录制已自动停止：达到时长上限"
+    start: 开始录制用户操作
+    stop: 停止录制（会随下一条消息发送）
+    startRejectedBusy: 另一个侧边栏正在录制，请先停止后再开始新的录制。
+    autoStoppedEvents: 录制已自动停止：达到事件上限
+    autoStoppedTime: 录制已自动停止：达到时长上限
   askUser:
-    placeholder: "输入回复…"
-    # 多问题表单（翻页）：导航 + 每题交互
-    previous: "上一题"
-    next: "下一题"
-    submit: "提交"
-    skipped: "已跳过"
-    multiHint: "可多选"
+    placeholder: 输入回复…
+    previous: 上一题
+    next: 下一题
+    submit: 提交
+    skipped: 已跳过
+    multiHint: 可多选
   permission:
-    # 技能脚本运行前的授权提示。$1 = 技能名，$2 = 脚本路径
-    title: "技能 $1 想要运行 $2"
-    requests: "它申请以下权限："
-    deny: "拒绝"
-    allowOnce: "仅本次允许"
-    allowAlways: "始终允许此技能"
-    # 该请求已无法再被响应时显示（例如待决期间后台被重启）。
-    expired: "此授权请求已失效"
+    title: 技能 $1 想要运行 $2
+    requests: 它申请以下权限：
+    deny: 拒绝
+    allowOnce: 仅本次允许
+    allowAlways: 始终允许此技能
+    expired: 此授权请求已失效
     perm:
-      pageExecuteJs: "在你的网页中执行脚本 —— 读取和修改页面内容，并借助你的登录态进行操作"
-      vfsRead: "读取该技能自己工作区文件夹中的文件"
-      vfsWrite: "读写该技能自己工作区文件夹中的文件"
-      bgFetchAny: "在后台向任意网站发起网络请求，绕过跨域限制"
-      # $1 = 匹配模式（主机范围）
-      bgFetchPattern: "在后台向 $1 发起网络请求，绕过跨域限制"
-      chromeTabs: "查看和管理你的浏览器标签页（打开、关闭、移动、重新加载），并截取当前可见标签页的内容"
-      chromeWindows: "查看和管理你的浏览器窗口"
-      chromeAlarms: "创建和管理后台定时器"
-      chromeWebNavigation: "读取你已打开页面及其框架的导航信息"
-      chromeBookmarks: "读取和修改你的书签"
-      chromeHistory: "读取和修改你的浏览历史"
-      chromeCookies: "读取、修改和删除你访问站点的 Cookie，包括网页通常无法访问的登录会话 Cookie"
-      chromeTopSites: "读取你最常访问的网站"
-      chromeSessions: "查看并恢复最近关闭的标签页和窗口，包括从你其他设备同步过来的会话"
-      chromeDownloads: "查看和管理你的下载，并发起新的下载"
-      chromeNotifications: "创建和管理系统通知"
-      # $1 = chrome 命名空间
-      chromeFallback: "调用浏览器的 chrome.$1 接口"
+      pageExecuteJs: 在你的网页中执行脚本 —— 读取和修改页面内容，并借助你的登录态进行操作
+      vfsRead: 读取该技能自己工作区文件夹中的文件
+      vfsWrite: 读写该技能自己工作区文件夹中的文件
+      bgFetchAny: 在后台向任意网站发起网络请求，绕过跨域限制
+      bgFetchPattern: 在后台向 $1 发起网络请求，绕过跨域限制
+      chromeTabs: 查看和管理你的浏览器标签页（打开、关闭、移动、重新加载），并截取当前可见标签页的内容
+      chromeWindows: 查看和管理你的浏览器窗口
+      chromeAlarms: 创建和管理后台定时器
+      chromeWebNavigation: 读取你已打开页面及其框架的导航信息
+      chromeBookmarks: 读取和修改你的书签
+      chromeHistory: 读取和修改你的浏览历史
+      chromeCookies: 读取、修改和删除你访问站点的 Cookie，包括网页通常无法访问的登录会话 Cookie
+      chromeTopSites: 读取你最常访问的网站
+      chromeSessions: 查看并恢复最近关闭的标签页和窗口，包括从你其他设备同步过来的会话
+      chromeDownloads: 查看和管理你的下载，并发起新的下载
+      chromeNotifications: 创建和管理系统通知
+      chromeFallback: 调用浏览器的 chrome.$1 接口
   model:
-    select: "选择模型"
-    searchPlaceholder: "搜索模型…"
-    notFound: "未找到模型"
-    addMore: "前往设置添加更多提供商"
+    select: 选择模型
+    searchPlaceholder: 搜索模型…
+    notFound: 未找到模型
+    addMore: 前往设置添加更多提供商
   thinking:
-    # $1 = 当前等级 label
-    label: "思考：$1"
+    label: 思考：$1
     levels:
-      "off": "关闭"
-      minimal: "最小"
-      low: "低"
-      medium: "中"
-      high: "高"
-      xhigh: "极高"
-      max: "最大"
+      'off': 关闭
+      minimal: 最小
+      low: 低
+      medium: 中
+      high: 高
+      xhigh: 极高
+      max: 最大
   tool:
-    args: "参数"
-    result: "结果"
+    args: 参数
+    result: 结果
   mcpApp:
-    # MCP App HTML 拉取中显示
-    loading: "加载交互视图中…"
-    # 拉取失败时重试按钮文案
-    retry: "重试"
-    # 后台没给具体 message 时的兜底文案
-    errorGeneric: "加载交互视图失败"
-    # 按错误码分发的文案。BG 原始 message 会作为详情拼在后面
-    errorServerUnavailable: "该 MCP server 已不可用，请到设置里重新启用该服务。"
-    # $1 = 后台的原始错误描述
-    errorFetchFailed: "加载交互视图失败：$1"
+    loading: 加载交互视图中…
+    retry: 重试
+    errorGeneric: 加载交互视图失败
+    errorServerUnavailable: 该 MCP server 已不可用，请到设置里重新启用该服务。
+    errorFetchFailed: 加载交互视图失败：$1
   fork:
-    # Header 徽章标签，标记当前会话是另一会话的分支。
-    badgeLabel: "分叉自："
-    # 徽章里返回链接的 tooltip。
-    backTooltip: "回到原对话"
+    badgeLabel: 分叉自：
+    backTooltip: 回到原对话
   message:
-    # $1 = 输入 token 数（已格式化，如 "1.2k"），$2 = 输出 token 数（已格式化）
-    tokensInOut: "↑$1 ↓$2"
-    # 缓存明细（无写入）。$1 = 未缓存、$2 = 缓存命中（均已格式化）
-    tokensInBreakdownHit: "未缓存 $1 · 缓存 $2"
-    # 缓存明细（含写入）。$1 = 未缓存、$2 = 缓存命中、$3 = 写入缓存（均已格式化）
-    tokensInBreakdownHitWrite: "未缓存 $1 · 缓存 $2 · 写缓存 $3"
-    # 最新一轮 assistant 消息左下角重试按钮的 tooltip / aria-label
-    retry: "重试"
-    # 编辑已发送 user 消息时的提示（issue #44）
-    editHint: "将从这里重新生成回复"
-    # 存在并列版本的消息上「‹ n/m ›」分支切换器的 tooltip
-    prevBranch: "上一个版本"
-    nextBranch: "下一个版本"
-    # 展开被折叠的超长 user 消息气泡
-    expandLong: "展开更多"
-    # 重新收起已展开的超长 user 消息气泡
-    collapseLong: "收起"
+    tokensInOut: ↑$1 ↓$2
+    tokensInBreakdownHit: 未缓存 $1 · 缓存 $2
+    tokensInBreakdownHitWrite: 未缓存 $1 · 缓存 $2 · 写缓存 $3
+    retry: 重试
+    editHint: 将从这里重新生成回复
+    prevBranch: 上一个版本
+    nextBranch: 下一个版本
+    expandLong: 展开更多
+    collapseLong: 收起
+    fork: 分叉
   edit:
-    # 点击任意一条 user 消息上的铅笔后弹出的对话框标题
-    title: "编辑消息"
-    # 标题下方的说明文本——告知用户将从此处开始丢弃后续所有消息并重跑 agent
-    description: "编辑此消息并从此处重新运行 agent，此消息之后的所有内容将被丢弃。"
-    # 提交按钮文案
-    submit: "重新运行"
+    title: 编辑消息
+    description: 编辑此消息并从此处重新运行 agent，此消息之后的所有内容将被丢弃。
+    submit: 重新运行
   compaction:
-    # 历史压缩分割条上的标签
-    divider: "此前上下文已压缩"
-    # 压缩 LLM 调用进行中的底部状态条
-    status: "正在压缩上下文…"
-    # 玻璃胶囊分隔条上的展开 / 收起按钮：点击整条胶囊（或 chevron）查看
-    # LLM 生成的摘要原文。
-    dividerExpand: "查看摘要"
-    dividerCollapse: "收起摘要"
+    divider: 此前上下文已压缩
+    status: 正在压缩上下文…
+    dividerExpand: 查看摘要
+    dividerCollapse: 收起摘要
   context:
-    # ContextUsagePill 的 aria-label 与 popover 标题——说明这里在展示什么。
-    usage: "上下文用量"
-    # $1 = 整数百分比（由 severity.ts 已 round）。
-    percent: "$1%"
-    # $1 = token 数（已通过 formatCompactCount 套 K 后缀）。
-    headroom: "剩余 $1"
-    # 档位状态文案，位于堆叠条下方。
-    plenty: "余量充足"
-    tight: "已偏紧——建议压缩"
-    nearFull: "上下文即将用尽"
-    # 拆分行标签。
-    used: "已用"
-    cached: "已缓存"
-    free: "空闲"
-    # 最后一行拆解——上下文窗口总容量。
-    total: "总计"
-    # popover 底部链接——与工具栏按钮同一动作。
-    compactNow: "立即压缩"
+    usage: 上下文用量
+    percent: $1%
+    headroom: 剩余 $1
+    plenty: 余量充足
+    tight: 已偏紧——建议压缩
+    nearFull: 上下文即将用尽
+    used: 已用
+    cached: 已缓存
+    free: 空闲
+    total: 总计
+    compactNow: 立即压缩
   session:
-    loading: "加载会话中…"
-    modelError: "模型返回错误"
-    # 400 上下文溢出恢复卡片。Agent 已内部自动重试 2 次都失败；这张卡片
-    # 是第三次机会，由用户决定。Retry 丢掉最早 50% 消息后继续；Stop
-    # 终止本轮，用户可以新发一条消息。
+    loading: 加载会话中…
+    modelError: 模型返回错误
     contextOverflow:
-      title: "上下文超出模型上限"
-      retry: "重试 (丢弃更早历史)"
-      stop: "停止"
-    # 后台主动 80% 预检 (Subtask 2) 想压缩但找不到可用切点时弹的瞬时 toast——
-    # 通常是某条单条用户消息本身就超过 keepRecentTokens。Agent 不压缩继续
-    # 发请求，下一发很容易 400。这里只做提醒：丢大段粘贴或新开会话。
+      title: 上下文超出模型上限
+      retry: 重试 (丢弃更早历史)
+      stop: 停止
     compactionSkipped:
-      # $1 = 已用上下文百分比
-      toast: "上下文过满无法自动压缩（已用 $1%）。可尝试删除大段粘贴内容或开启新会话。"
-    # CompactNowButton 的 tooltip 文案——按禁用原因切换。
+      toast: 上下文过满无法自动压缩（已用 $1%）。可尝试删除大段粘贴内容或开启新会话。
     compactNow:
-      # 闲置：可点击。
-      idle: "立即压缩"
-      # agent 跑 / 正在压缩：spinner 出现，按钮禁用。
-      busy: "正在压缩…"
-      # messages.length < 2：单条 user 消息无法形成切点。
-      empty: "至少需要 2 条消息才能压缩"
-      # 模型选择器为空（还没选 provider/model）。
-      noModel: "请先选择模型"
-    # 用户中途点停后，在 assistant 气泡里显示的提示。
-    # 保持中性语气——不是错误，只是没跑完。
-    cancelled: "已取消"
-    # 后台端口还没连上时（通常发生在 SW 刚唤醒 / 断开重连期间）点发送/重试会看到这条
-    notConnected: "未连接到后台服务，请稍后再试"
-    # 自动重连多次失败后提示。语气是「还在试」，不保证能连上
-    reconnecting: "连接断开，正在重试…"
-    welcomeReady: "有什么我可以帮你的？"
-    # 新会话空状态里的示例卡片。*Title 是卡片上的短标题，*Prompt 是点击后
-    # 填入输入框的完整文案（用户可改后再发）。
-    exampleSummarizeTitle: "总结当前页面"
-    exampleSummarizePrompt: "请阅读当前页面的内容，用简洁的要点总结它的核心信息。"
-    exampleTranslateTitle: "翻译当前页面"
-    exampleTranslatePrompt: "请把当前页面的主要内容翻译成简体中文，保留原有结构。"
-    exampleExtractTitle: "提取页面要点"
-    exampleExtractPrompt: "请从当前页面中提取关键信息（标题、要点、重要链接），整理成清单。"
-    exampleTabsTitle: "整理我的标签页"
-    exampleTabsPrompt: "请看看我当前打开了哪些标签页，按主题帮我归类，并指出可以关掉的重复页面。"
-    scrollToBottom: "跳至最新消息"
+      idle: 立即压缩
+      busy: 正在压缩…
+      empty: 至少需要 2 条消息才能压缩
+      noModel: 请先选择模型
+    cancelled: 已取消
+    notConnected: 未连接到后台服务，请稍后再试
+    reconnecting: 连接断开，正在重试…
+    welcomeReady: 有什么我可以帮你的？
+    exampleSummarizeTitle: 总结当前页面
+    exampleSummarizePrompt: 请阅读当前页面的内容，用简洁的要点总结它的核心信息。
+    exampleTranslateTitle: 翻译当前页面
+    exampleTranslatePrompt: 请把当前页面的主要内容翻译成简体中文，保留原有结构。
+    exampleExtractTitle: 提取页面要点
+    exampleExtractPrompt: 请从当前页面中提取关键信息（标题、要点、重要链接），整理成清单。
+    exampleTabsTitle: 整理我的标签页
+    exampleTabsPrompt: 请看看我当前打开了哪些标签页，按主题帮我归类，并指出可以关掉的重复页面。
+    scrollToBottom: 跳至最新消息
+    forkFailed: 分叉失败
+    forked: 已从「$1」分叉出新会话
   workerTeamRoster:
-    title: "Worker 团队"
-    # $1 = 已配置数, $2 = 总角色数
-    configuredCount: "$1 / $2 已配置"
-    off: "关闭"
-    unconfigured: "尚未配置 worker 模型。打开 设置 → 高级设置 → Worker 模型 进行配置。"
-    expand: "展开 worker 团队"
-    collapse: "折叠 worker 团队"
+    title: Worker 团队
+    configuredCount: $1 / $2 已配置
+    false: 关闭
+    unconfigured: 尚未配置 worker 模型。打开 设置 → 高级设置 → Worker 模型 进行配置。
+    expand: 展开 worker 团队
+    collapse: 折叠 worker 团队
     role:
-      content_writer: "内容"
-      frontend_coder: "编码"
-      reviewer: "审查"
-      researcher: "研究"
+      content_writer: 内容
+      frontend_coder: 编码
+      reviewer: 审查
+      researcher: 研究
   delegation:
-    # 主代理调用 delegate_task 时，聊天流里渲染的 worker sub-agent 卡片。
-    # 状态徽章颜色与 Sidebar Team Roster 共用 Badge 变体——只本地化文案。
-    retryBadge: "重试"
-    openFile: "打开文件"
+    retryBadge: 重试
+    openFile: 打开文件
     section:
-      task: "任务"
-      model: "模型"
-      summary: "总结"
-      notes: "备注"
+      task: 任务
+      model: 模型
+      summary: 总结
+      notes: 备注
     status:
-      running: "运行中…"
-      success: "已完成"
-      partial: "部分完成"
-      failed: "失败"
-      cancelled: "已取消"
-      timedOut: "超时"
-    # Phase 2.3 角色动作 badge：status='running' 时挂在 header 的 outline
-    # badge，让用户一眼看出「这个 worker 现在在做什么」（不只是「在跑」）。
-    # 与 status badge 区分开——状态是「跑成/跑挂」，action 是「正在执行的动作」。
+      running: 运行中…
+      success: 已完成
+      partial: 部分完成
+      failed: 失败
+      cancelled: 已取消
+      timedOut: 超时
     action:
-      content_writer: "撰写中"
-      frontend_coder: "编码中"
-      reviewer: "审查中"
-      researcher: "研究中"
-    # Fail-Fast 路径（worker-runner.ts 在 120s 后自动 abort）。提示用户
-    # "去 Sidebar → Team Roster 换 model 再试"，而不是让用户对着停滞的
-    # 卡片干等。两种变体：withModel 带 modelKey，generic 在 modelKey 缺失时用。
+      content_writer: 撰写中
+      frontend_coder: 编码中
+      reviewer: 审查中
+      researcher: 研究中
     timeoutHint:
-      withModel: "Worker $1 超时 / API 出错。打开 Sidebar Team Roster 换一个 model 再试。"
-      generic: "这个 worker 超时 / API 出错了。打开 Sidebar Team Roster 换一个 model 再试。"
-    # 失败 / 超时卡片的页脚：让用户能判断「是真慢还是 API 卡死」。$1 = 秒（≥1）。
-    duration: "$1 秒后失败"
-    # Subtask 1.3 batch 容器：并行 delegate_task 调用的 header 计数。
-    # $1=总数，$2=成功数，$3=失败数。内层 DelegationCardItem 各自带状态/计时器。
+      withModel: Worker $1 超时 / API 出错。打开 Sidebar Team Roster 换一个 model 再试。
+      generic: 这个 worker 超时 / API 出错了。打开 Sidebar Team Roster 换一个 model 再试。
+    duration: $1 秒后失败
     batch:
-      header: "批量 · $1 个任务 — $2 成功，$3 失败"
-    # Subtask 2.3 审查员 audit 迷你表。header 标签 + per-row 状态图标无障碍标签
-    #（screen reader 念「通过 / 警告 / 失败」而不是 lucide 图标名）。具体计数
-    # 由 React 组件 inline 拼，i18n 只负责 label 文本。
+      header: 批量 · $1 个任务 — $2 成功，$3 失败
     reviewer:
-      auditHeader: "审查清单"
-      statusPass: "通过"
-      statusWarn: "警告"
-      statusFail: "失败"
-    # Phase 2 UI 反馈：运行中卡片内的实时微流式 box。
-    # screen reader 朗读的 ARIA 标签（LiveStreamBox 始终 aria-live="polite"）。
+      auditHeader: 审查清单
+      statusPass: 通过
+      statusWarn: 警告
+      statusFail: 失败
     liveStream:
-      label: "实时输出"
-      thinking: "思考中…"
-      writing: "撰写中…"
-      generating: "正在生成文件…"
-
-
-# ─── 提供商子组件（OAuth / API Key / 自定义）───
+      label: 实时输出
+      thinking: 思考中…
+      writing: 撰写中…
+      generating: 正在生成文件…
 provider:
   section:
-    viaApiKey: "通过 API Key"
-    # $1 = 被折叠的 provider 数量
-    showMore: "展开更多（$1）"
-    showLess: "收起"
+    viaApiKey: 通过 API Key
+    showMore: 展开更多（$1）
+    showLess: 收起
   status:
-    connected: "已连接"
-    notConfigured: "未配置"
-    configured: "已配置"
-    unverified: "未验证"
-    verifying: "验证中"
-    failed: "失败"
+    connected: 已连接
+    notConfigured: 未配置
+    configured: 已配置
+    unverified: 未验证
+    verifying: 验证中
+    failed: 失败
   oauth:
-    signIn: "登录"
-    signOut: "退出"
-    loggedIn: "已登录"
-    notLoggedIn: "未登录"
-    authorizing: "授权中"
-    authFailed: "授权失败"
-    enterCode: "请在浏览器中输入代码："
-    completeInBrowser: "请在弹出的浏览器窗口中完成授权…"
+    signIn: 登录
+    signOut: 退出
+    loggedIn: 已登录
+    notLoggedIn: 未登录
+    authorizing: 授权中
+    authFailed: 授权失败
+    enterCode: 请在浏览器中输入代码：
+    completeInBrowser: 请在弹出的浏览器窗口中完成授权…
     descriptions:
-      githubCopilot: "使用 Copilot 订阅访问 GPT/Claude"
-      openaiCodex: "使用 ChatGPT Plus/Pro 订阅"
+      githubCopilot: 使用 Copilot 订阅访问 GPT/Claude
+      openaiCodex: 使用 ChatGPT Plus/Pro 订阅
   apiKey:
-    placeholder: "输入 API Key"
-    disconnect: "断开连接"
-    noModels: "无可用模型"
-    savedUnverified: "已保存，但连通性测试未通过"
+    placeholder: 输入 API Key
+    disconnect: 断开连接
+    noModels: 无可用模型
+    savedUnverified: 已保存，但连通性测试未通过
   summary:
-    # $1 = 认证方式（OAuth / API Key），$2 = 模型数量
-    modelsAvailable: "$1 · $2 个模型可用"
+    modelsAvailable: $1 · $2 个模型可用
   form:
-    name: "名称"
-    namePlaceholder: "例如：My Ollama"
-    baseUrl: "Base URL"
-    baseUrlPlaceholder: "例如：http://localhost:11434/v1"
-    apiKeyOptional: "API Key（可选）"
-    apiKeyPlaceholder: "留空则不传认证"
-    models: "模型列表"
-    autoFetch: "自动获取"
-    showAll: "全部显示"
-    hideAll: "全部隐藏"
-    enabled: "显示"
-    hidden: "已隐藏"
-    reasoning: "推理"
-    image: "多模态"
-    # $1 = 模型 ID
-    modelSettingsFor: "$1 的模型设置"
-    # $1 = 模型 ID
-    removeModel: "移除 $1"
-    contextWindow: "上下文窗口"
-    contextWindowPlaceholder: "128000（默认）"
-    maxTokens: "最大输出"
-    maxTokensPlaceholder: "0（不限）"
-    tokensHint: "留空即用默认 · 上下文窗口决定何时压缩历史，并非硬上限"
-    manualModelPlaceholder: "手动输入 Model ID"
-    addManual: "手动添加模型"
-    advanced: "高级设置"
-    headers: "自定义 Headers"
-    authOverrideHint: "同时填了 API Key 和 Authorization 头，会优先用 API Key。若要用该 header 鉴权，请清空上面的 API Key。"
-    addCustom: "添加自定义提供商"
-    fetchFailed: "无法获取模型列表，请手动添加"
-# ─── 工具运行时标签（在 ToolCard 中显示）───
+    name: 名称
+    namePlaceholder: 例如：My Ollama
+    baseUrl: Base URL
+    baseUrlPlaceholder: 例如：http://localhost:11434/v1
+    apiKeyOptional: API Key（可选）
+    apiKeyPlaceholder: 留空则不传认证
+    models: 模型列表
+    autoFetch: 自动获取
+    showAll: 全部显示
+    hideAll: 全部隐藏
+    enabled: 显示
+    hidden: 已隐藏
+    reasoning: 推理
+    image: 多模态
+    modelSettingsFor: $1 的模型设置
+    removeModel: 移除 $1
+    contextWindow: 上下文窗口
+    contextWindowPlaceholder: 128000（默认）
+    maxTokens: 最大输出
+    maxTokensPlaceholder: 0（不限）
+    tokensHint: 留空即用默认 · 上下文窗口决定何时压缩历史，并非硬上限
+    manualModelPlaceholder: 手动输入 Model ID
+    addManual: 手动添加模型
+    advanced: 高级设置
+    headers: 自定义 Headers
+    authOverrideHint: 同时填了 API Key 和 Authorization 头，会优先用 API Key。若要用该 header 鉴权，请清空上面的 API Key。
+    addCustom: 添加自定义提供商
+    fetchFailed: 无法获取模型列表，请手动添加
 tools:
-  # $1 = mode（及可选 selector 后缀）
-  readPage: "正在阅读页面内容 ($1)"
-  executeJs: "正在执行脚本"
-  screenshot: "正在截取页面截图"
-  askUser: "等待用户回答"
+  readPage: 正在阅读页面内容 ($1)
+  executeJs: 正在执行脚本
+  screenshot: 正在截取页面截图
+  askUser: 等待用户回答
   pdf:
-    info: "正在读取 PDF 元信息"
-    # $1 = 页码范围（如 "1-10"）或字面量 "all pages"
-    read: "正在提取 PDF 文本 ($1)"
-    # $1 = 检索关键字（截断后）
-    search: "正在 PDF 内检索 \"$1\""
-    # $1 = action 名称
-    unknown: "pdf: $1"
-  # $1 = 技能名称
-  runSkill: "正在执行技能脚本 $1"
-  # $1 = RAG 知识库名称
-  ragInspect: "正在查看 RAG 知识库 $1"
-  # $1 = RAG 知识库名称，$2 = 查询关键词
-  ragSearch: "正在 RAG 知识库 $1 中检索 $2"
-  # $1 = MCP 服务器 slug（展示形式），$2 = 远端工具名
-  mcpCall: "$1 · $2"
+    info: 正在读取 PDF 元信息
+    read: 正在提取 PDF 文本 ($1)
+    search: 正在 PDF 内检索 "$1"
+    unknown: 'pdf: $1'
+  runSkill: 正在执行技能脚本 $1
+  ragInspect: 正在查看 RAG 知识库 $1
+  ragSearch: 正在 RAG 知识库 $1 中检索 $2
+  mcpCall: $1 · $2
   fs:
-    # $1 = 文件路径
-    createFile: "正在创建文件 $1"
-    # $1 = 文件路径
-    editFile: "正在编辑文件 $1"
-    # $1 = 目录路径
-    mkdir: "正在创建目录 $1"
-    # $1 = 原路径
-    rename: "正在重命名 $1"
-    # $1 = 路径
-    delete: "正在删除 $1"
-    # $1 = 文件路径
-    readFile: "正在读取文件 $1"
-    # $1 = 目录路径
-    list: "正在列出目录 $1"
-    # $1 = 搜索模式
-    searchFiles: "正在搜索文件 \"$1\""
-    # $1 = 搜索模式
-    searchContent: "正在搜索文件内容 \"$1\""
-    # $1 = 目标路径
-    saveUrl: "正在保存 URL 到 $1"
+    createFile: 正在创建文件 $1
+    editFile: 正在编辑文件 $1
+    mkdir: 正在创建目录 $1
+    rename: 正在重命名 $1
+    delete: 正在删除 $1
+    readFile: 正在读取文件 $1
+    list: 正在列出目录 $1
+    searchFiles: 正在搜索文件 "$1"
+    searchContent: 正在搜索文件内容 "$1"
+    saveUrl: 正在保存 URL 到 $1
   memory:
-    save: "保存记忆"
-    recall: "调取记忆"
-    forget: "删除记忆"
+    save: 保存记忆
+    recall: 调取记忆
+    forget: 删除记忆
   chromeApi:
-    help: "正在查询 Chrome API 文档"
-    # $1 = namespace，$2 = method
-    call: "正在调用 chrome.$1.$2"
+    help: 正在查询 Chrome API 文档
+    call: 正在调用 chrome.$1.$2
   interact:
-    # $1 = 目标后缀（含前导空格）或为空
-    click: "正在点击$1"
-    dblclick: "正在双击$1"
-    rightclick: "正在右键点击$1"
-    hover: "正在悬浮$1"
-    focus: "正在聚焦$1"
-    type: "正在输入文本$1"
-    clear: "正在清除输入框$1"
-    select: "正在选择选项$1"
-    scroll: "正在滚动页面"
-    # $1 = 按键名
-    keypress: "正在按键 $1"
-    # $1 = 目标后缀（含前导空格）或为空
-    wait: "正在等待元素出现$1"
-    waitHidden: "正在等待元素消失$1"
-    waitNavigation: "正在等待页面加载"
-    # $1 = 步骤数
-    sequence: "正在执行操作序列 ($1 步)"
-    # $1 = action 名称
-    unknown: "interact: $1"
+    click: 正在点击$1
+    dblclick: 正在双击$1
+    rightclick: 正在右键点击$1
+    hover: 正在悬浮$1
+    focus: 正在聚焦$1
+    type: 正在输入文本$1
+    clear: 正在清除输入框$1
+    select: 正在选择选项$1
+    scroll: 正在滚动页面
+    keypress: 正在按键 $1
+    wait: 正在等待元素出现$1
+    waitHidden: 正在等待元素消失$1
+    waitNavigation: 正在等待页面加载
+    sequence: 正在执行操作序列 ($1 步)
+    unknown: 'interact: $1'
   inspect:
-    # $1 = selector
-    selector: "正在检查 $1"
-    # $1 = 搜索文本
-    text: "正在按文本检查 \"$1\""
-    page: "正在检查页面"
+    selector: 正在检查 $1
+    text: 正在按文本检查 "$1"
+    page: 正在检查页面
   tab:
-    open: "正在打开新标签页"
-    # $1 = 标签页 id
-    close: "正在关闭标签页 $1"
-    # $1 = 标签页 id
-    switch: "正在切换标签页 $1"
-    reload: "正在刷新页面"
-    listFrames: "正在列出页面 frames"
-    # $1 = action 名称
-    unknown: "tab: $1"
-
-# ─── 对话框 ───
+    open: 正在打开新标签页
+    close: 正在关闭标签页 $1
+    switch: 正在切换标签页 $1
+    reload: 正在刷新页面
+    listFrames: 正在列出页面 frames
+    unknown: 'tab: $1'
+  webSearch: 正在联网搜索「$1」
 dialogs:
   imagePreview:
-    title: "图片预览"
-    alt: "预览"
+    title: 图片预览
+    alt: 预览
   updateNotice:
-    title: "发现新版本"
-    # $1 = latest version, $2 = current version
-    description: "Cebian v$1 已发布，当前版本 v$2。"
-    updateNow: "立即更新"
-    skipVersion: "跳过此版本"
-
-# ─── VFS 浏览入口 ───
+    title: 发现新版本
+    description: Cebian v$1 已发布，当前版本 v$2。
+    updateNow: 立即更新
+    skipVersion: 跳过此版本
 vfs:
-
-  backToRoot: "返回根目录"
-  zipping: "打包中…"
-  # $1 = 行数
-  lines: "$1 行"
-  # $1 = 格式化后的文件大小
-  binaryFile: "[二进制文件 — $1]"
-  # $1 = 格式化后的文件大小
-  tooLargeToPreview: "文件太大，无法预览（$1）。请改用下载。"
-  # $1 = 路径，$2 = 格式化后的大小，$3 = 格式化后的上限
-  inlineTooLarge: "$1（$2）—文件过大，不在对话中内联显示（上限 $3）"
-  # $1 = MIME 类型
-  inlineUnsupportedMime: "文件类型不支持内联预览：$1"
-  # $1 = 路径，$2 = 错误文本
-  inlineLoadFailed: "$1 — $2"
-  preview: "预览"
-  viewSource: "查看源码"
-  source: "源码"
-  defaultOpen: "默认打开方式"
-  openSmart: "智能"
-  unknownFile: "未知文件类型（$1）。请下载后安全打开。"
-  previousPage: "上一页"
-  nextPage: "下一页"
-  pageNumber: "页码"
-  zoomOut: "缩小"
-  zoomIn: "放大"
-  fitWidth: "适应宽度"
-  pdfPasswordRequired: "此 PDF 需要密码。"
-  pdfWrongPassword: "密码错误，请重试。"
-  pdfLoadFailed: "PDF 预览失败：$1"
-  viewMode: "视图模式"
-  location: "当前位置"
-  # 面包屑里代替裸路径显示的根目录锚点
+  backToRoot: 返回根目录
+  zipping: 打包中…
+  lines: $1 行
+  binaryFile: '[二进制文件 — $1]'
+  tooLargeToPreview: 文件太大，无法预览（$1）。请改用下载。
+  inlineTooLarge: $1（$2）—文件过大，不在对话中内联显示（上限 $3）
+  inlineUnsupportedMime: 文件类型不支持内联预览：$1
+  inlineLoadFailed: $1 — $2
+  preview: 预览
+  viewSource: 查看源码
+  source: 源码
+  defaultOpen: 默认打开方式
+  openSmart: 智能
+  unknownFile: 未知文件类型（$1）。请下载后安全打开。
+  previousPage: 上一页
+  nextPage: 下一页
+  pageNumber: 页码
+  zoomOut: 缩小
+  zoomIn: 放大
+  fitWidth: 适应宽度
+  pdfPasswordRequired: 此 PDF 需要密码。
+  pdfWrongPassword: 密码错误，请重试。
+  pdfLoadFailed: PDF 预览失败：$1
+  viewMode: 视图模式
+  location: 当前位置
   roots:
-    workspaces: "工作区"
-    cebian: "Cebian"
-  copyPath: "复制路径"
-  pathCopied: "已复制路径"
-  openInCanvas: "在 Canvas 中打开"
-  openInCanvasNoSession: "在 Canvas 中打开（文件不在任何会话工作区内）"
-  openedInCanvas: "已在 Canvas 中打开"
-  showCollapsed: "显示折叠的层级"
-  sandboxPreview: "沙箱预览"
-  sandboxPreviewHint: "在独立的沙箱页中渲染。脚本可以运行，但无法访问扩展 API 或 Cebian 存储的其他数据。"
-  staticPreview: "静态预览"
-  staticPreviewHint: "当前浏览器不能在预览中运行脚本，页面以无 JavaScript 的方式渲染。"
-  # $1 = 当前页，$2 = 总页数
-  pageIndicator: "第 $1 / $2 页"
-  # $1 = 总页数
+    workspaces: 工作区
+    cebian: Cebian
+  copyPath: 复制路径
+  pathCopied: 已复制路径
+  openInCanvas: 在 Canvas 中打开
+  openInCanvasNoSession: 在 Canvas 中打开（文件不在任何会话工作区内）
+  openedInCanvas: 已在 Canvas 中打开
+  showCollapsed: 显示折叠的层级
+  sandboxPreview: 沙箱预览
+  sandboxPreviewHint: 在独立的沙箱页中渲染。脚本可以运行，但无法访问扩展 API 或 Cebian 存储的其他数据。
+  staticPreview: 静态预览
+  staticPreviewHint: 当前浏览器不能在预览中运行脚本，页面以无 JavaScript 的方式渲染。
+  pageIndicator: 第 $1 / $2 页
   pageCount:
-    0: "0 页"
-    1: "1 页"
-    n: "$1 页"
-  # $1 = 文件夹内的条目数
+    0: 0 页
+    1: 1 页
+    n: $1 页
   itemCount:
-    0: "空"
-    1: "1 项"
-    n: "$1 项"  # $1 = 路径
-  pathNotFound: "路径不存在：$1"
-  unknownError: "未知错误"
-  # 列表上方的入口按钮：把每行切到多选模式
-  selectAll: "全选"
-  # 工作区目录还在、但对应会话已被删除。$1 = 短 id
-  # 工作区目录对应的会话已被删除：目录仍在磁盘，但已无法从任何会话访问。
-  # 直接显示完整目录名作为标题，不加任何前缀——仅靠灰字 + tooltip 表达状态。
-  unknownSessionTooltip: "已删除会话留下的工作区目录，可直接删除。"
-  untitledSession: "未命名会话"
-  # $1 = 格式化后的日期
-  workspaceCreated: "创建于 $1"
-  # 目录列表上方的工具栏按钮
+    0: 空
+    1: 1 项
+    n: $1 项
+  pathNotFound: 路径不存在：$1
+  unknownError: 未知错误
+  selectAll: 全选
+  unknownSessionTooltip: 已删除会话留下的工作区目录，可直接删除。
+  untitledSession: 未命名会话
+  workspaceCreated: 创建于 $1
   action:
-    newFile: "新建文件"
-    newFolder: "新建文件夹"
-    paste: "粘贴到这里"
-    # $1 = 操作（"复制" / "剪切"），$2 = 条目名 —— 用于工具栏上 paste 按钮的副标题，提示剪贴板里是什么
-    pasteHint: "$1 → $2"
-    # 行级 kebab 菜单（DirView 行右键 / MoreVertical 触发）
-    copyName: "复制名称"
-    copyPath: "复制路径"
-    copy: "复制"
-    cut: "剪切"
-  # 内联新建/重命名输入框的占位文本。$1 = 类型（"文件" 或 "文件夹"）
+    newFile: 新建文件
+    newFolder: 新建文件夹
+    paste: 粘贴到这里
+    pasteHint: $1 → $2
+    copyName: 复制名称
+    copyPath: 复制路径
+    copy: 复制
+    cut: 剪切
   prompt:
-    newName: "输入$1名"
-    # $1 = 当前名称
-    rename: "重命名 $1"
-  # 内联校验 / 状态提示，toast 形式
+    newName: 输入$1名
+    rename: 重命名 $1
   error:
-    # 名称为空、含 '/' 或 '..'
-    invalidName: "名称无效——不允许包含斜杠或空段"
-    # 试图删除结构根目录（'/'、'/workspaces'、~/.cebian/skills|prompts）。
-    cannotDeleteProtected: "该目录由 Cebian 保留，无法删除"
-  # 删除等危险操作前的确认弹窗
+    invalidName: 名称无效——不允许包含斜杠或空段
+    cannotDeleteProtected: 该目录由 Cebian 保留，无法删除
   confirm:
-    # $1 = 文件名
-    deleteFile: "删除「$1」？此操作无法撤销。"
-    # $1 = 文件夹名
-    deleteFolder: "删除「$1」及其全部内容？此操作无法撤销。"
-  # 操作成功后的 toast 提示
+    deleteFile: 删除「$1」？此操作无法撤销。
+    deleteFolder: 删除「$1」及其全部内容？此操作无法撤销。
   toast:
-    # $1 = 类型（"文件" / "文件夹"），$2 = 名称
-    created: "$1「$2」已创建"
-    # $1 = 新名称
-    renamed: "已重命名为「$1」"
-    # $1 = 已删除条目名
-    deleted: "「$1」已删除"
-    # $1 = 已粘贴条目名
-    pasted: "「$1」已粘贴"
-    # $1 = 名字，$2 = 原因（如"名称已存在"）
-    createFailed: "创建失败：$1 — $2"
-    renameFailed: "重命名失败：$1 — $2"
-    deleteFailed: "删除失败：$1 — $2"
-    # $1 = 源名，$2 = 原因
-    pasteFailed: "粘贴失败：$1 — $2"
-    # $1 = 源名 —— 粘贴目标是源自身或其子目录（仅对 cut/移动有意义；否则会空操作或把源改坏）
-    pasteSelf: "无法将「$1」粘贴到自身内"
-
-# ─── 独立授权页（entrypoints/user-permission）───
+    created: $1「$2」已创建
+    renamed: 已重命名为「$1」
+    deleted: 「$1」已删除
+    pasted: 「$1」已粘贴
+    createFailed: 创建失败：$1 — $2
+    renameFailed: 重命名失败：$1 — $2
+    deleteFailed: 删除失败：$1 — $2
+    pasteFailed: 粘贴失败：$1 — $2
+    pasteSelf: 无法将「$1」粘贴到自身内
+  unknownSession: 未知会话 · $1
 permission:
-  retry: "重新请求"
-  unknownType: "不支持的权限请求。"
+  retry: 重新请求
+  unknownType: 不支持的权限请求。
   microphone:
-    title: "请求使用麦克风"
-    description: "语音输入需要麦克风权限。点击下面的按钮，然后在浏览器弹窗中选择「允许」。"
-    allow: "允许麦克风"
-    requesting: "等待你的选择…"
-    granted: "已获得麦克风权限，此标签页将自动关闭。"
-    dismissed: "请求被关闭了，可以重新尝试。"
-    denied: "麦克风权限被拒绝了。"
-    deniedHint: "要使用语音输入，请在刚打开的 Chrome 设置页里允许 Cebian 使用麦克风。"
-    deviceError: "没有找到麦克风，或无法访问。请检查设备后重试。"
-
-# ─── 错误（toast、抛出的错误信息）───
+    title: 请求使用麦克风
+    description: 语音输入需要麦克风权限。点击下面的按钮，然后在浏览器弹窗中选择「允许」。
+    allow: 允许麦克风
+    requesting: 等待你的选择…
+    granted: 已获得麦克风权限，此标签页将自动关闭。
+    dismissed: 请求被关闭了，可以重新尝试。
+    denied: 麦克风权限被拒绝了。
+    deniedHint: 要使用语音输入，请在刚打开的 Chrome 设置页里允许 Cebian 使用麦克风。
+    deviceError: 没有找到麦克风，或无法访问。请检查设备后重试。
 errors:
-  pdfEncrypted: "这个 PDF 有密码保护，无法预览。请改用下载。"
-  pdfRenderFailed: "这个 PDF 无法渲染。请改用下载。"
+  pdfEncrypted: 这个 PDF 有密码保护，无法预览。请改用下载。
+  pdfRenderFailed: 这个 PDF 无法渲染。请改用下载。
   pagePattern:
-    invalid: "页面匹配规则格式错误。"
-    duplicate: "该规则已存在。"
-  modelUnavailable: "所选模型已不可用，请重新选择。"
-  pageActionGone: "找不到该操作。"
-  pageActionSaveFailed: "保存失败，请重试。"
+    invalid: 页面匹配规则格式错误。
+    duplicate: 该规则已存在。
+  modelUnavailable: 所选模型已不可用，请重新选择。
+  pageActionGone: 找不到该操作。
+  pageActionSaveFailed: 保存失败，请重试。
   oauth:
-    cancelled: "已取消"
-    timeout: "授权超时"
-    noCode: "未收到授权码"
-    stateMismatch: "State 不匹配"
-    # $1 = HTTP 状态码
-    tokenExchangeFailed: "Token 交换失败：$1"
-    missingTokenFields: "Token 响应缺少必要字段"
-    missingRefreshToken: "未收到 refresh token"
-    missingRefreshTokenLocal: "缺少 refresh token"
-    # $1 = provider id
-    unknownProvider: "未知的 OAuth provider：$1"
+    cancelled: 已取消
+    timeout: 授权超时
+    noCode: 未收到授权码
+    stateMismatch: State 不匹配
+    tokenExchangeFailed: Token 交换失败：$1
+    missingTokenFields: Token 响应缺少必要字段
+    missingRefreshToken: 未收到 refresh token
+    missingRefreshTokenLocal: 缺少 refresh token
+    unknownProvider: 未知的 OAuth provider：$1
   network:
-    invalidUrl: "URL 格式无效"
-    unsupportedScheme: "仅支持 http/https 协议"
-    # $1 = HTTP 状态码
-    requestFailed: "请求失败：$1"
+    invalidUrl: URL 格式无效
+    unsupportedScheme: 仅支持 http/https 协议
+    requestFailed: 请求失败：$1
   mobile:
-    toggleFailed: "移动端模式切换失败"
+    toggleFailed: 移动端模式切换失败
   skillPackage:
-    invalid: "无效的技能包。"
-    tooLarge: "技能包过大。"
-    tooManyFiles: "技能包包含过多文件。"
-    missingEntry: "技能包缺少 SKILL.md。"
-    # $1 = 路径
-    unsafePath: "技能包中存在不安全的路径：$1"
-    # $1 = 权限名称
-    unsupportedPermission: "申请了不支持的权限：$1"
-    # $1 = 技能名称
-    invalidName: "无效的技能名称：$1"
-    # $1 = 技能名称
-    reservedName: "该技能名称为系统保留：$1"
-    parseFrontmatter: "无法解析 SKILL.md 的 frontmatter。"
-
-
-# ─── Canvas 面板（侧边栏 chat 视图中的实时 HTML 预览）───
+    invalid: 无效的技能包。
+    tooLarge: 技能包过大。
+    tooManyFiles: 技能包包含过多文件。
+    missingEntry: 技能包缺少 SKILL.md。
+    unsafePath: 技能包中存在不安全的路径：$1
+    unsupportedPermission: 申请了不支持的权限：$1
+    invalidName: 无效的技能名称：$1
+    reservedName: 该技能名称为系统保留：$1
+    parseFrontmatter: 无法解析 SKILL.md 的 frontmatter。
+  searchEngineGone: 找不到该搜索引擎。
+  searchEngineSaveFailed: 保存搜索引擎设置失败，请重试。
+  searchEngineScriptInvalid: 脚本要定义一个名为 extract 的函数。
+  searchEngineUrlInvalid: 请输入以 http:// 或 https:// 开头的完整搜索地址。
+  searchEngineUrlMissingPlaceholder: 搜索地址必须包含 $1，用于填入搜索词。
 canvas:
   header:
-    # Header Eye/EyeOff 切换按钮的 tooltip + aria-label（Header 同一处用）。
-    openAria: "打开画布"
-    closeAria: "关闭画布"
+    openAria: 打开画布
+    closeAria: 关闭画布
   pane:
-    # Pane 顶部 title 回落文案（无文件打开时显示「画布」，有文件时显示 path）。
-    titleFallback: "画布"
-    # Pane 自身 close 按钮（右上角 EyeOff）的 tooltip + aria-label。
-    closeAria: "关闭画布"
-    # 拾取元素模式 toggle（tooltip 与 aria-label 同一处用）：inspectOn 为当前
-    # 关闭、点击开启的文案；inspectOff 为当前开启、点击关闭的文案。
-    inspectOn: "拾取元素"
-    inspectOff: "停止拾取"
+    titleFallback: 画布
+    closeAria: 关闭画布
+    inspectOn: 拾取元素
+    inspectOff: 停止拾取
     empty:
-      # Pane 处于 empty state 时（panel 开着但 BG 没有打开文件）的两行文案。
-      title: "画布中没有打开的文件。"
-      hint: "请让 agent 调用 canvas_open 打开一个文件。"
+      title: 画布中没有打开的文件。
+      hint: 请让 agent 调用 canvas_open 打开一个文件。

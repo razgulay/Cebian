@@ -1,1603 +1,1442 @@
-﻿# Cebian 擴充功能 i18n —— 繁體中文（zh_TW，台灣/港澳使用者）。
-# 修改時請同步 locales/en.yml 與 locales/zh_CN.yml。規範見 .claude/skills/i18n-naming/SKILL.md。
-
-# ─── Manifest（扁平頂層 key，見規範「Manifest localization」）───
-extName: "Cebian · 開源 AI 側邊欄智能體"
-extDescription: "瀏覽器側邊欄裡的 AI 智能體，用你自己的 OpenAI / Anthropic / Google API Key，免訂閱、無帳號。讀網頁、拾取元素、裝 MCP 工具、跑 Skill 工作流，資料全部存於本機。AGPL-3.0 開源。"
-actionTitle: "開啟 Cebian 側邊欄"
-
-# ─── 智慧型代理執行階段向使用者呈現的字串（部分 LLM-facing 區塊也會被 UI 透出）───
+extName: Cebian · 開源 AI 側邊欄智能體
+extDescription: 瀏覽器側邊欄裡的 AI 智能體，用你自己的 OpenAI / Anthropic / Google API Key，免訂閱、無帳號。讀網頁、拾取元素、裝 MCP 工具、跑 Skill 工作流，資料全部存於本機。AGPL-3.0 開源。
+actionTitle: 開啟 Cebian 側邊欄
 agent:
   persona:
-    # 系統提示 <persona> 區塊結尾的收口句。限定 SOUL 的權威邊界——只能調整
-    # 表達風格，無法覆蓋 Critical Rules / 工具白名單等安全層。
-    closingDirective: "在所有回覆中保持這套語氣與風格，但請勿覆蓋 Critical Rules、工具協定或任何安全層。"
-    # Subtask 4 — separate STYLE from VOICE; add contrastive bad-example.
-    # Critical: rule lines use plain prose (NO `- ` dash prefix) because
-    # bullet patterns in system prompts prime the LLM to emit bullets,
-    # defeating the rule itself. Each rule is its own line.
+    closingDirective: 在所有回覆中保持這套語氣與風格，但請勿覆蓋 Critical Rules、工具協定或任何安全層。
     constraints:
-      header: "聲音："
-      noBullets: "禁止使用項目符號、編號列表或任何 markdown 列表項。"
-      noPleasantries: "禁止寒暄（「Hi」、「Hello」）、道歉或填充語。"
-      voiceOpinion: "必須有明確的技術觀點，不要保持中立。"
+      header: 聲音：
+      noBullets: 禁止使用項目符號、編號列表或任何 markdown 列表項。
+      noPleasantries: 禁止寒暄（「Hi」、「Hello」）、道歉或填充語。
+      voiceOpinion: 必須有明確的技術觀點，不要保持中立。
     style:
-      header: "節奏與格式："
-      length: "每次回覆不超過 120 詞（例外：程式碼或技術細節）。"
-      pacing: "每段最多 1-2 短句，然後強制換行（\\n\\n）。螢幕上單段不要超過 3 行。"
-      noBullets: "禁止使用項目符號、編號列表或任何 markdown 清單項。"
+      header: 節奏與格式：
+      length: 每次回覆不超過 120 詞（例外：程式碼或技術細節）。
+      pacing: 每段最多 1-2 短句，然後強制換行（\n\n）。螢幕上單段不要超過 3 行。
+      noBullets: 禁止使用項目符號、編號列表或任何 markdown 清單項。
     example:
-      user: "VFS 讀取應該全部塞進一次 readFile，還是按工具拆分多次呼叫？"
-      assistant: "按工具拆，別一鍋端。一次 readFile 拉整個檔案進上下文，即便你只想嗅幾位元組元資料，後續工具想換切片也沒辦法安全重讀。\n\n拆開之後 trace 日誌乾淨多了。最關鍵的是哪個工具跑完就立刻釋放它的 context，記憶體不會卡。"
-    # Contrastive calibration — show LLM what NOT to do. Gated by the
-    # `t('agent.persona.badExample.header') === 'agent.persona.badExample.header'`
-    # check in compilePersonaBlock, so unlocalized locales fall back to the
-    # pre-Subtask-4 byte shape.
+      user: VFS 讀取應該全部塞進一次 readFile，還是按工具拆分多次呼叫？
+      assistant: '按工具拆，別一鍋端。一次 readFile 拉整個檔案進上下文，即便你只想嗅幾位元組元資料，後續工具想換切片也沒辦法安全重讀。
+
+
+        拆開之後 trace 日誌乾淨多了。最關鍵的是哪個工具跑完就立刻釋放它的 context，記憶體不會卡。'
     badExample:
-      header: "禁止這種語氣："
+      header: 禁止這種語氣：
       badOutput: '> "你好！很高興幫你。以下是重點：\n> - 第一點：...\n> - 第二點：...\n> 總之兩種方案各有利弊。希望能幫上忙！"'
-      warning: "禁止企業式禮貌、項目符號清單、平衡式免責聲明。"
-    # Cross-link in `## Output & Communication` placeholder. The full imperative
-    # rules + few-shot anchor live in the persona block; this line just points
-    # the LLM at the rest of the prompt.
-    bindingNeo: "以短促散文輸出。每段最多 2 句。禁止項目符號。"
+      warning: 禁止企業式禮貌、項目符號清單、平衡式免責聲明。
+    bindingNeo: 以短促散文輸出。每段最多 2 句。禁止項目符號。
     recap:
-      # $1 = 名稱
-      youAre: "你是 $1"
-      # $1 = 氣質
-      vibe: "$1"
-      # $1 = 語氣
-      tone: "用 $1 的語氣回覆"
-      # $1 = emoji
-      emoji: "合適時用 $1 作為簽名"
-
-# ─── 通用（UI 中複用）───
+      youAre: 你是 $1
+      vibe: $1
+      tone: 用 $1 的語氣回覆
+      emoji: 合適時用 $1 作為簽名
 common:
-  newChat: "新對話"
-  send: "傳送"
-  history: "歷史記錄"
-  sidebar: "側邊欄"
-  # 歷史清單依最後活動時間分組
+  newChat: 新對話
+  send: 傳送
+  history: 歷史記錄
+  sidebar: 側邊欄
   historyGroup:
-    today: "今天"
-    week: "7 天內"
-    month: "30 天內"
-    older: "更早"
-    pinned: "已釘選"
-    archived: "已封存"
-  toggleTheme: "切換主題"
-  settings: "設定"
-  back: "返回"
-  openInNewTab: "在新分頁開啟"
-  loading: "載入中…"
-  cancel: "取消"
-  confirm: "確認"
-  save: "儲存"
-  saved: "已儲存"
-  reset: "重設"
-  delete: "刪除"
-  rename: "重新命名"
-  edit: "編輯"
-  add: "新增"
-  enable: "啟用"
-  disable: "停用"
+    today: 今天
+    week: 7 天內
+    month: 30 天內
+    older: 更早
+    pinned: 已釘選
+    archived: 已封存
+  toggleTheme: 切換主題
+  settings: 設定
+  back: 返回
+  openInNewTab: 在新分頁開啟
+  loading: 載入中…
+  cancel: 取消
+  confirm: 確認
+  save: 儲存
+  saved: 已儲存
+  reset: 重設
+  delete: 刪除
+  rename: 重新命名
+  edit: 編輯
+  add: 新增
+  enable: 啟用
+  disable: 停用
   headers:
-    keyPlaceholder: "Header 名稱"
-    valuePlaceholder: "Header 值"
-    add: "新增 Header"
-    remove: "移除 Header"
-  code: "代碼"
-  math: "公式"
-  copy: "複製"
-  copied: "已複製"
-  copyFailed: "複製失敗"
-  cut: "剪下"
-  paste: "貼上"
-  speak: "朗讀"
-  stopSpeaking: "停止朗讀"
-  # $1 = 程式碼語言名（如 "Ts"、"Python"）
-  speakCodeSkipped: "$1 程式碼，已略過朗讀"
-  speakCodeSkippedPlain: "程式碼，已略過朗讀"
-  download: "下載"
-  downloadFailed: "下載失敗"
-  newFile: "新增檔案"
-  newFolder: "新增資料夾"
-  search: "搜尋"
-  searchPlaceholder: "搜尋…"
-  moreActions: "更多操作"
+    keyPlaceholder: Header 名稱
+    valuePlaceholder: Header 值
+    add: 新增 Header
+    remove: 移除 Header
+  code: 代碼
+  math: 公式
+  copy: 複製
+  copied: 已複製
+  copyFailed: 複製失敗
+  cut: 剪下
+  paste: 貼上
+  speak: 朗讀
+  stopSpeaking: 停止朗讀
+  speakCodeSkipped: $1 程式碼，已略過朗讀
+  speakCodeSkippedPlain: 程式碼，已略過朗讀
+  download: 下載
+  downloadFailed: 下載失敗
+  newFile: 新增檔案
+  newFolder: 新增資料夾
+  search: 搜尋
+  searchPlaceholder: 搜尋…
+  moreActions: 更多操作
   empty:
-    history: "尚無歷史記錄"
-    folder: "空資料夾"
+    history: 尚無歷史記錄
+    folder: 空資料夾
   time:
-    justNow: "剛剛"
-    # $1 = 分鐘數
-    minutesAgo: "$1 分鐘前"
-    # $1 = 小時數
-    hoursAgo: "$1 小時前"
-    # $1 = 天數
-    daysAgo: "$1 天前"
-    # $1 = 月數
-    monthsAgo: "$1 個月前"
-    # $1 = 年數
-    yearsAgo: "$1 年前"
+    justNow: 剛剛
+    minutesAgo: $1 分鐘前
+    hoursAgo: $1 小時前
+    daysAgo: $1 天前
+    monthsAgo: $1 個月前
+    yearsAgo: $1 年前
   session:
-    deleteConfirmTitle: "刪除對話？"
-    # $1 = 對話標題
-    deleteConfirmDescription: "「$1」以及它的工作區檔案將被永久刪除，此操作無法復原。"
-    running: "工作中"
-    pin: "釘選"
-    unpin: "取消釘選"
-    rename: "重新命名"
-    moreActions: "更多動作"
-    archive: "封存"
-    unarchive: "取消封存"
-    select: "選取"
-    # $1 = 已選取的對話數
+    deleteConfirmTitle: 刪除對話？
+    deleteConfirmDescription: 「$1」以及它的工作區檔案將被永久刪除，此操作無法復原。
+    running: 工作中
+    pin: 釘選
+    unpin: 取消釘選
+    rename: 重新命名
+    moreActions: 更多動作
+    archive: 封存
+    unarchive: 取消封存
+    select: 選取
     selectedCount:
-      1: "已選 1 項"
-      n: "已選 $1 項"
-    # $1 = 待刪除的對話數
+      1: 已選 1 項
+      n: 已選 $1 項
     deleteManyConfirmTitle:
-      1: "刪除該對話？"
-      n: "刪除這 $1 個對話？"
-    # $1 = 待刪除的對話數
+      1: 刪除該對話？
+      n: 刪除這 $1 個對話？
     deleteManyConfirmDescription:
-      1: "該對話及其工作區檔案將被永久刪除，且無法復原。"
-      n: "這 $1 個對話及其工作區檔案將被永久刪除，且無法復原。"
-    deleteFailed: "刪除失敗，對話仍在。"
-    placementFailed: "更新失敗，未做變更。"    # $1 = 訊息數
+      1: 該對話及其工作區檔案將被永久刪除，且無法復原。
+      n: 這 $1 個對話及其工作區檔案將被永久刪除，且無法復原。
+    deleteFailed: 刪除失敗，對話仍在。
+    placementFailed: 更新失敗，未做變更。
     messageCount:
-      0: "尚無訊息"
-      1: "1 則訊息"
-      n: "$1 則訊息"
-
-# ─── 頁面注入 UI（懸浮球、劃詞工具列） ───
+      0: 尚無訊息
+      1: 1 則訊息
+      n: $1 則訊息
+    forkedFrom: 分叉自「$1」
+    forkedFromUnknown: 分叉自已刪除的對話
+    openForkSource: 開啟來源對話「$1」
+    renameChat: 重新命名「$1」
+    renameFailed: 重新命名失敗，標題未變更。
 pageActions:
   ball:
-    tooltip: "開啟或關閉 Cebian 側邊欄"
+    tooltip: 開啟或關閉 Cebian 側邊欄
   toolbar:
-    explain: "解釋"
-    translate: "翻譯"
-    summarize: "總結"
+    explain: 解釋
+    translate: 翻譯
+    summarize: 總結
   prompts:
-    # $1 = {{ui_language}}，$2 = {{context}}
-    explain: "用$1清楚、簡潔地解釋使用者提供的文字，說明其含義以及讀者需要瞭解的重要背景。回覆應簡短，使用純文字，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行解釋：\n\n$2"
-    # $1 = {{ui_language}}，$2 = {{context}}
-    translate: "將使用者提供的文字翻譯為$1，保留原意和語氣。只輸出翻譯後的純文字，不使用 Markdown，不添加解釋、註解或引號。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行翻譯：\n\n$2"
-    # $1 = {{ui_language}}，$2 = {{context}}
-    summarize: "用$1簡潔地總結使用者提供的文字，保留關鍵要點。使用純文字或精簡清單，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行總結：\n\n$2"
-  result:
-    loading: "思考中…"
-    error: "出錯了，請重試。"
-    close: "關閉"
-    continue: "在側邊欄繼續"
-    # $1 = 指令稿拋出的錯誤
-    transformFailed: "後處理指令稿執行失敗，顯示原始輸出——$1"
-    empty: "沒有輸出。"
+    explain: '用$1清楚、簡潔地解釋使用者提供的文字，說明其含義以及讀者需要瞭解的重要背景。回覆應簡短，使用純文字，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行解釋：
 
-# ─── 設定 ───
+
+      $2'
+    translate: '將使用者提供的文字翻譯為$1，保留原意和語氣。只輸出翻譯後的純文字，不使用 Markdown，不添加解釋、註解或引號。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行翻譯：
+
+
+      $2'
+    summarize: '用$1簡潔地總結使用者提供的文字，保留關鍵要點。使用純文字或精簡清單，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行總結：
+
+
+      $2'
+  result:
+    loading: 思考中…
+    error: 出錯了，請重試。
+    close: 關閉
+    continue: 在側邊欄繼續
+    transformFailed: 後處理指令稿執行失敗，顯示原始輸出——$1
+    empty: 沒有輸出。
 settings:
   nav:
-    aria: "設定導覽"
-    providers: "AI 供應商"
-    instructions: "指引"
-    persona: "人設"
-    prompts: "提示詞"
-    skills: "技能"
-    memory: "記憶"
-    rag: "知識庫 (RAG)"
-    mcp: "MCP 伺服器"
-    pageInteraction: "頁面互動"
-    appearance: "外觀"
-    backup: "備份與復原"
-    storage: "檔案系統"
-    advanced: "進階"
-    about: "關於"
-    scheduler: "排程任務"
-    notifications: "通知通道"
-    telegramGateway: "Telegram 網關"
+    aria: 設定導覽
+    providers: AI 供應商
+    instructions: 指引
+    persona: 人設
+    prompts: 提示詞
+    skills: 技能
+    memory: 記憶
+    rag: 知識庫 (RAG)
+    mcp: MCP 伺服器
+    pageInteraction: 頁面互動
+    appearance: 外觀
+    backup: 備份與復原
+    storage: 檔案系統
+    advanced: 進階與關於
+    about: 關於
+    scheduler: 排程任務
+    notifications: 通知通道
+    telegramGateway: Telegram 網關
+    group:
+      core: 核心與 AI
+      agent: Agent 能力
+      system: 系統與自動化
+    chat: 對話
+    data: 資料
   providers:
-    title: "AI 供應商"
+    title: AI 供應商
   storage:
-    title: "檔案系統"
-    used: "已用空間"
-    usedError: "無法計算"
-    openBrowser: "開啟檔案瀏覽器"
-    description: "按對話瀏覽 AI 產生的檔案。瀏覽器是唯讀的，需要匯出時用其中的下載按鈕。"
+    title: 檔案系統
+    used: 已用空間
+    usedError: 無法計算
+    openBrowser: 開啟檔案瀏覽器
+    description: 按對話瀏覽 AI 產生的檔案。瀏覽器是唯讀的，需要匯出時用其中的下載按鈕。
   about:
-    title: "關於"
-    tagline: "AI 瀏覽器側邊欄助手"
-    website: "官方網站"
-    feedback: "意見回饋"
-    checkUpdate: "檢查更新"
-    checking: "檢查中…"
-    upToDate: "已是最新版本"
-    # $1 = new version string (e.g. "1.2.3")
-    updateAvailable: "發現新版本 v$1"
-    viewInstallGuide: "檢視安裝指南"
-    checkFailed: "檢查更新失敗"
-    followAuthor: "關注作者"
+    title: 關於
+    tagline: AI 瀏覽器側邊欄助手
+    website: 官方網站
+    feedback: 意見回饋
+    checkUpdate: 檢查更新
+    checking: 檢查中…
+    upToDate: 已是最新版本
+    updateAvailable: 發現新版本 v$1
+    viewInstallGuide: 檢視安裝指南
+    checkFailed: 檢查更新失敗
+    followAuthor: 關注作者
     socials:
-      wechat: "微信公眾號"
-      wechatHandle: "一只猫头猫"
-      bilibili: "嗶哩嗶哩"
-      bilibiliHandle: "不想睡觉猫头猫"
-      xiaohongshu: "小紅書"
-      xiaohongshuHandle: "一只猫头猫"
-      x: "X"
-      xHandle: "@maotoumao0_0"
+      wechat: 微信公眾號
+      wechatHandle: 一只猫头猫
+      bilibili: 嗶哩嗶哩
+      bilibiliHandle: 不想睡觉猫头猫
+      xiaohongshu: 小紅書
+      xiaohongshuHandle: 一只猫头猫
+      x: X
+      xHandle: '@maotoumao0_0'
   debugLog:
-    title: "偵錯日誌"
-    description: "把擴充功能裡所有 console 輸出快取到本地的環形緩衝。回報 bug 時把這個檔案匯出給維護者，他們能直接看到現場發生了什麼，不用你現場重演。"
+    title: 偵錯日誌
+    description: 把擴充功能裡所有 console 輸出快取到本地的環形緩衝。回報 bug 時把這個檔案匯出給維護者，他們能直接看到現場發生了什麼，不用你現場重演。
     enable:
-      label: "記錄偵錯日誌"
-      hint: "關閉後不會寫入環形緩衝，匯出按鈕也會一併停用。"
+      label: 記錄偵錯日誌
+      hint: 關閉後不會寫入環形緩衝，匯出按鈕也會一併停用。
     verbose:
-      label: "詳細模式（逐 token 事件）"
-      hint: "同時記錄 LLM 即時串流的每個 token。預設關閉——預設等級已涵蓋所有 agent 邊界與警告，通常回報 bug 只需要這些。"
+      label: 詳細模式（逐 token 事件）
+      hint: 同時記錄 LLM 即時串流的每個 token。預設關閉——預設等級已涵蓋所有 agent 邊界與警告，通常回報 bug 只需要這些。
     live:
-      label: "即時日誌"
-      hint: "即時看到新條目出現，不用等匯出。"
-      open: "開啟即時日誌"
-      close: "關閉"
-      pause: "暫停"
-      resume: "繼續"
-      cleared: "日誌已清空"
-      empty: "目前沒有條目——操作一下擴充功能來觸發事件。"
-    export: "匯出日誌"
-    clear: "清空日誌"
-    # $1 = 目前緩衝的條目數
-    countLabel: "已緩衝 $1 條"
-    countUnavailable: "日誌不可用（無痕模式？）"
-    # $1 = 檔案中包含的條目數
-    exported: "已匯出 $1 條到下載資料夾"
-    exportFailed: "匯出失敗：$1"
-    cleared: "偵錯日誌已清空"
-    clearFailed: "清空失敗：$1"
-    empty: "偵錯日誌為空，暫無可匯出內容"
+      label: 即時日誌
+      hint: 即時看到新條目出現，不用等匯出。
+      open: 開啟即時日誌
+      close: 關閉
+      pause: 暫停
+      resume: 繼續
+      cleared: 日誌已清空
+      empty: 目前沒有條目——操作一下擴充功能來觸發事件。
+    export: 匯出日誌
+    clear: 清空日誌
+    countLabel: 已緩衝 $1 條
+    countUnavailable: 日誌不可用（無痕模式？）
+    exported: 已匯出 $1 條到下載資料夾
+    exportFailed: 匯出失敗：$1
+    cleared: 偵錯日誌已清空
+    clearFailed: 清空失敗：$1
+    empty: 偵錯日誌為空，暫無可匯出內容
   advanced:
-    title: "進階"
+    title: 進階
     compaction:
-      label: "上下文壓縮模型"
-      hint: "用於自動壓縮長對話的模型，預設與對話模型一致。"
-      followMain: "與對話模型相同"
+      label: 上下文壓縮模型
+      hint: 用於自動壓縮長對話的模型，預設與對話模型一致。
+      followMain: 與對話模型相同
     domSubAgent:
-      label: "DOM 子代理模型"
-      hint: "主對話模型委派重頁面閱讀任務時用的便宜模型。關=功能停用。"
-      off: "關閉"
+      label: DOM 子代理模型
+      hint: 主對話模型委派重頁面閱讀任務時用的便宜模型。關=功能停用。
+      false: 關閉
     workers:
-      title: "Worker 模型"
-      hint: "為每個 worker role 各配一個模型，主代理透過 `delegate_task` 委派子任務。「與對話模型相同」=繼承。"
-      followMain: "與對話模型相同"
-      enabled: "啟用 Worker 團隊"
-      enabledHint: "開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker 子代理。關閉時，主代理直接用原生檔案工具產出。"
+      title: Worker 模型
+      hint: 為每個 worker role 各配一個模型，主代理透過 `delegate_task` 委派子任務。「與對話模型相同」=繼承。
+      followMain: 與對話模型相同
+      enabled: 啟用 Worker 團隊
+      enabledHint: 開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker 子代理。關閉時，主代理直接用原生檔案工具產出。
       persona:
-        enabled: "啟用人設（OpenClaw 模式）"
-        enabledHint: "向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。在「人設」設定頁編輯副本。無法覆蓋 Critical Rules 或工具協定。"
-        nav: "人設…"
+        enabled: 啟用人設（OpenClaw 模式）
+        enabledHint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。在「人設」設定頁編輯副本。無法覆蓋 Critical Rules 或工具協定。
+        nav: 人設…
       content_writer:
-        label: "內容寫手"
-        hint: "閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。"
+        label: 內容寫手
+        hint: 閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。
       frontend_coder:
-        label: "前端編碼"
-        hint: "編寫 HTML / CSS / JS 到 VFS 檔案。不呼叫瀏覽器工具。"
+        label: 前端編碼
+        hint: 編寫 HTML / CSS / JS 到 VFS 檔案。不呼叫瀏覽器工具。
       reviewer:
-        label: "審查"
-        # Subtask 8.7：whitelist 已砍掉 execute_js / inspect（SW-background
-        # worker 拿不到 active tab，工具 9/9 errored），hint 同步改成「讀 →
-        # 推理 → emit findings」。
-        hint: "最多讀取 3 個檔案並以文字 handoff 形式輸出發現。不修改檔案，不呼叫瀏覽器工具。"
+        label: 審查
+        hint: 最多讀取 3 個檔案並以文字 handoff 形式輸出發現。不修改檔案，不呼叫瀏覽器工具。
       researcher:
-        label: "研究"
-        hint: "檢索檔案與 RAG 集合，輸出結構化摘要。"
+        label: 研究
+        hint: 檢索檔案與 RAG 集合，輸出結構化摘要。
       timeout:
-        label: "逾時"
-        # $1 = 最終生效上限（秒；override / 預設決議後的值）
-        activeHint: "（上限 $1 秒）"
-        default: "預設"
-        preset60: "60 秒"
-        preset120: "2 分鐘"
-        preset300: "5 分鐘"
-        preset600: "10 分鐘"
+        label: 逾時
+        activeHint: （上限 $1 秒）
+        default: 預設
+        preset60: 60 秒
+        preset120: 2 分鐘
+        preset300: 5 分鐘
+        preset600: 10 分鐘
   pageInteraction:
-    title: "頁面互動"
+    title: 頁面互動
     ball:
-      label: "懸浮球"
-      hint: "網頁上顯示一個貼邊小圓球，點擊可開關側邊欄。"
+      label: 懸浮球
+      hint: 網頁上顯示一個貼邊小圓球，點擊可開關側邊欄。
     toolbar:
-      label: "劃詞工具列"
-      hint: "選取文字時彈出快速工具列。"
+      label: 劃詞工具列
+      hint: 選取文字時彈出快速工具列。
     model:
-      label: "工具列模型"
-      hint: "工具列所有動作使用的模型。選個快又便宜的即可。"
-      followMain: "與對話模型相同"
+      label: 工具列模型
+      hint: 工具列所有動作使用的模型。選個快又便宜的即可。
+      followMain: 與對話模型相同
     pageScope:
-      include: "僅在這些頁面生效"
-      includeHint: "留空則在所有頁面生效。"
-      exclude: "排除以下頁面"
-      excludeHint: "排除規則優先於包含規則。"
-      addExclude: "新增排除規則"
-      syntax: "使用 Chrome 頁面比對規則，例如 *://*.example.com/*。URL 中 ? 和 # 後的內容不參與比對。"
-      syntaxDocs: "查看設定規則"
+      include: 僅在這些頁面生效
+      includeHint: 留空則在所有頁面生效。
+      exclude: 排除以下頁面
+      excludeHint: 排除規則優先於包含規則。
+      addExclude: 新增排除規則
+      syntax: '使用 Chrome 頁面比對規則，例如 *://*.example.com/*。URL 中 ? 和 # 後的內容不參與比對。'
+      syntaxDocs: 查看設定規則
     pagePattern:
-      placeholder: "*://*.example.com/*"
-      # $1 = 該列的 match pattern
-      edit: "編輯規則 $1"
-      # $1 = 該列的 match pattern
-      remove: "移除規則 $1"
+      placeholder: '*://*.example.com/*'
+      edit: 編輯規則 $1
+      remove: 移除規則 $1
     actions:
-      title: "工具列操作"
-      hint: "操作會依此順序顯示。內建操作可自訂系統提示詞、設定生效範圍或關閉，也可以新增具自訂名稱與提示詞的操作。"
-      builtin: "內建"
-      custom: "自訂"
-      pageScoped: "限定頁面"
-      create: "新增操作"
-      # $1 = 動作名稱
-      more: "「$1」的更多操作"
-      # $1 = 動作名稱
-      moveUp: "上移「$1」"
-      # $1 = 動作名稱
-      moveDown: "下移「$1」"
-      # $1 = 動作名稱
-      delete: "刪除「$1」"
-      # $1 = 動作名稱
-      edit: "編輯「$1」"
-      deleteConfirmTitle: "刪除這個操作？"
-      # $1 = 動作名稱
-      deleteConfirmDescription: "刪除「$1」後將無法復原。"
-      editBuiltin: "內建操作"
-      editCustom: "自訂操作"
-      label: "按鈕文字"
-      labelPlaceholder: "例如：擷取要點"
-      prompt: "系統提示詞"
-      # $1 = 變數自動完成的觸發字元（「{{」）
-      promptHint: "告訴模型如何處理選取文字。輸入 $1 可插入變數。"
-      # $1 / $2 = 模板變數名，渲染成字面量 {{name}}
-      promptPlaceholder: "例如：擷取 $1 中的要點，並用 $2 回覆。"
-      pages: "生效範圍"
-      transform: "輸出後處理指令稿（選填）"
-      transformHint: "用 JavaScript 加工產生完畢的輸出。定義名為 transform(text, vars) 的函式，回傳要顯示的字串。vars 提供與提示詞範本相同的環境變數：selected_text、context、page_url、page_title、date、ui_language。指令稿出錯時，原始輸出會原樣顯示。"
+      title: 工具列操作
+      hint: 操作會依此順序顯示。內建操作可自訂系統提示詞、設定生效範圍或關閉，也可以新增具自訂名稱與提示詞的操作。
+      builtin: 內建
+      custom: 自訂
+      pageScoped: 限定頁面
+      create: 新增操作
+      more: 「$1」的更多操作
+      moveUp: 上移「$1」
+      moveDown: 下移「$1」
+      delete: 刪除「$1」
+      edit: 編輯「$1」
+      deleteConfirmTitle: 刪除這個操作？
+      deleteConfirmDescription: 刪除「$1」後將無法復原。
+      editBuiltin: 內建操作
+      editCustom: 自訂操作
+      label: 按鈕文字
+      labelPlaceholder: 例如：擷取要點
+      prompt: 系統提示詞
+      promptHint: 告訴模型如何處理選取文字。輸入 $1 可插入變數。
+      promptPlaceholder: 例如：擷取 $1 中的要點，並用 $2 回覆。
+      pages: 生效範圍
+      transform: 輸出後處理指令稿（選填）
+      transformHint: 用 JavaScript 加工產生完畢的輸出。定義名為 transform(text, vars) 的函式，回傳要顯示的字串。vars 提供與提示詞範本相同的環境變數：selected_text、context、page_url、page_title、date、ui_language。指令稿出錯時，原始輸出會原樣顯示。
       transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
     translate:
-      label: "翻譯目標語言"
-      hint: "工具列翻譯成的目標語言。"
-      auto: "跟隨介面語言"
+      label: 翻譯目標語言
+      hint: 工具列翻譯成的目標語言。
+      auto: 跟隨介面語言
   appearance:
-    title: "外觀"
+    title: 外觀
     fontSize:
-      label: "聊天字級"
-      hint: "拖動滑桿精細調整側邊欄聊天中使用者訊息和助手回覆的字級，範圍 15–18 像素（步進 0.5），預設 15 像素。"
-      preview: "預覽 — The quick brown fox jumps over the lazy dog."
+      label: 聊天字級
+      hint: 拖動滑桿精細調整側邊欄聊天中使用者訊息和助手回覆的字級，範圍 15–18 像素（步進 0.5），預設 15 像素。
+      preview: 預覽 — The quick brown fox jumps over the lazy dog.
     fontFamily:
-      label: "聊天字體"
-      hint: "選擇側邊欄聊天使用的字體。僅影響使用者訊息和助手回覆。"
-      geist: "Geist（預設）"
-      inter: "Inter"
-      roboto: "Roboto"
-      system: "系統預設"
+      label: 聊天字體
+      hint: 選擇側邊欄聊天使用的字體。僅影響使用者訊息和助手回覆。
+      geist: Geist（預設）
+      inter: Inter
+      roboto: Roboto
+      system: 系統預設
   instructions:
-    title: "指引"
-    label: "自訂指引"
-    hint: "追加在預設規則之後，用於調整回覆語言、風格或角色。無法覆蓋工具協定與安全規則。"
-    placeholder: "例如：\n- 用中文回覆\n- 回答盡量簡潔\n- 討論程式碼時預設使用 TypeScript"
-  persona:
-    title: "人設"
-    label: "人設副本"
-    hint: "向系統提示注入 SOUL 區塊，並在每則使用者訊息頂端加上一行 recap。需在「進階設定」中開啟，或透過聊天輸入框旁的晶片切換。"
-    soulLabel: "SOUL"
-    soulPlaceholder: "例如：\n- 始終以第一人稱說話，避免「作為 AI」這類用語\n- 有自己的看法，但遇到真正不確定時坦率承認\n- 使用與使用者相同的語言回覆"
-    identityName: "名稱"
-    identityVibe: "氣質"
-    identityTone: "語氣"
-    identityEmoji: "簽名 emoji"
-    identityNamePlaceholder: "Cebian"
-    identityVibePlaceholder: "精準、略帶不羈"
-    identityTonePlaceholder: "口語化、技術向"
-    identityEmojiPlaceholder: "🦞"
-  prompts:
-    title: "提示詞"
-    newBody: "（在此處撰寫你的提示詞）"
-    # $1 = 觸發字元（「/」）
-    hint: "可重複使用的提示詞模板，透過 $1 命令在聊天輸入中觸發。"
-    expandInline: "在輸入框中展開提示詞內容"
-    placeholders:
-      selectedText: "頁面選取文字"
-      pageUrl: "當前頁面 URL"
-      pageTitle: "當前頁面標題"
-      date: "當前日期"
-      clipboard: "剪貼簿內容"
-      input: "斜杠命令後輸入的文本"
-  templateVars:
-    selectedText: "頁面選取文字"
-    context: "選取文字的上下文"
-    pageUrl: "當前頁面 URL"
-    pageTitle: "當前頁面標題"
-    date: "當前日期"
-    uiLanguage: "介面語言"
-    clipboard: "剪貼簿內容"
-  memory:
-    title: "記憶"
-    enable: "啟用記憶"
-    hint: "跨對話記憶，預設關閉。啟用後助手會跨會話自動儲存並調用關於你的長期資訊。"
-    newBody: "（在此撰寫記憶內容）"
-    organize:
-      title: "整理記憶"
-      hint: "一次合併重複、清理過時、整理你的記憶檔案。"
-      button: "整理"
-      running: "整理中…"
-      model: "模型"
-      followActive: "與對話模型相同"
-      auto: "自動整理"
-      autoHint: "累積到一定量後，在背景定期自動整理。"
-      intervalLabel: "最小間隔（天）"
-      thresholdLabel: "觸發門檻（自上次整理後新增記憶條數）"
-      # $1 = 上次整理時間
-      lastRun: "上次整理 $1"
-      toast:
-        ok: "記憶已整理"
-        empty: "沒有需要整理的記憶"
-        conflict: "整理期間記憶有變動，已跳過，請稍後重試"
-        noModel: "未設定可用模型，無法整理記憶"
-        failed: "記憶整理失敗"
-  skills:
-    title: "技能"
-    newBody: "（在此處撰寫技能指令）"
-    create: "建立技能"
-    hint: "遵循 agentskills.io 規範的多檔案技能包，agent 會按需載入。"
-    import: "匯入…"
-    exportCurrent: "匯出"
-    exportAll: "匯出全部"
-    exportEmpty: "沒有可匯出的技能"
-    # $1 = 技能名稱
-    exportSuccess: "已匯出「$1」"
-    # $1 = 匯出技能數量
-    exportAllSuccess:
-      1: "已匯出 1 個技能"
-      n: "已匯出 $1 個技能"
-    # $1 = 匯入的技能名稱
-    importSuccess: "已匯入「$1」"
-    # $1 = 匯入技能數量
-    importSuccessBackup:
-      1: "已匯入 1 個技能"
-      n: "已匯入 $1 個技能"
-    importDialog:
-      titleSingle: "匯入技能"
-      titleBackup: "匯入技能備份"
-      permissionsHeading: "申請的權限"
-      permissionsNone: "未申請特殊權限。"
-      hasScriptsWarning: "包含 scripts/ 下的可執行指令稿。"
-      # $1 = 檔案數
-      fileCount:
-        1: "1 個檔案"
-        n: "$1 個檔案"
-      # $1 = 技能數
-      skillCount:
-        1: "1 個技能"
-        n: "$1 個技能"
-      # $1 = 已存在的來源名稱, $2 = 重新命名後的目標名稱
-      conflictNotice: "已存在名為「$1」的技能。除非選擇覆寫，否則將匯入為「$2」。"
-      overwrite: "覆寫現有"
-      keepBoth: "保留兩者"
-      confirmOverwriteTitle: "覆寫現有技能？"
-      # $1 = 技能名稱（多個時以逗號分隔）
-      confirmOverwriteDescription: "「$1」將被取代，且已授予的權限將被清除。是否繼續？"
-  mcp:
-    title: "MCP 伺服器"
-    description: "連接 MCP 伺服器，將其工具開放給 agent。"
-    header:
-      # $1 = 已設定數, $2 = 總伺服器數
-      configuredCount: "$1 / $2 已設定"
-      collapse: "收合 MCP 伺服器"
-      expand: "展開 MCP 伺服器"
-    empty:
-      title: "尚未設定 MCP 伺服器"
-      hint: "新增一個伺服器，用外部工具擴充 agent 的能力。"
-    actions:
-      add: "新增 MCP 伺服器"
-      toggle: "啟用伺服器"
-      edit: "編輯伺服器"
-      delete: "刪除伺服器"
-      dragHandle: "拖曳以重新排序"
-      deleteConfirmTitle: "刪除 MCP 伺服器？"
-      # $1 = 伺服器名稱
-      deleteConfirmDescription: "「$1」將被刪除，此操作無法復原。"
-    errors:
-      # $1 = 伺服器名稱
-      nameTaken: "已存在名為「$1」的 MCP 伺服器。"
-      nameRequired: "伺服器名稱不能為空。"
-      urlRequired: "伺服器 URL 不能為空。"
-      # $1 = URL
-      urlInvalid: "伺服器 URL 無效：$1"
-      # $1 = scheme（例如 "ftp:"）
-      urlScheme: "不支持的 URL 協定：$1"
-      bearerTokenRequired: "Bearer Token 不能為空。"
-      authHeaderConflict: "使用 Bearer 認證時請勿手動設定 Authorization header，請在認證欄位填寫 token。"
-    status:
-      disabled: "已停用"
-      idle: "等待首次呼叫"
-      connected: "已連線"
-      disconnected: "未連線"
-      probing: "重新連線中"
-      circuitOpen: "暫時無法使用"
-    row:
-      # $1 = 伺服器名稱
-      aria: "$1 MCP 伺服器"
-      transportType:
-        streamableHttp: "Streamable HTTP"
-        sse: "SSE"
-      auth: "認證"
-      authNone: "無"
-      authBearer: "Bearer（已設定）"
-      status: "狀態"
-    form:
-      name: "名稱"
-      namePlaceholder: "例如：weather、github、my-tools"
-      transport: "傳輸協定"
-      url: "URL"
-      urlPlaceholder: "https://example.com/mcp"
-      authType: "認證方式"
-      authNone: "無"
-      authBearer: "Bearer Token"
-      bearerToken: "Token"
-      bearerTokenPlaceholder: "貼上 bearer token"
-      headers: "自訂 Headers"
-  rag:
-    title: "知識庫 (RAG)"
-    infrastructureTitle: "基礎設施"
-    retrievalRankingTitle: "檢索與排序"
-    connectionTitle: "連線"
-    connectionLabel: "Neon 連線字串"
-    connectionHint: "Neon 連線字串——從專案控制台取得。"
-    testConnection: "測試連線"
-    connectionOk: "已連線 — pgvector 就緒"
-    connectionFailed: "連線失敗"
-    connectionStatusReady: "就緒"
-    connectionStatusWarn: "缺少 pgvector"
-    connectionStatusError: "連線失敗"
-    pgvectorMissing: "已連線，但缺少 pgvector 擴充。請至 Neon 控制台 → Extensions 啟用。"
-    bootstrapFailed: "建表失敗"
-    embedderTitle: "Embedding 模型"
-    embedderHint: "OpenAI 相容的 `/embeddings` 介面，預設 CLIProxyAPI 連接埠 8317。"
-    embedderBaseUrl: "Base URL"
-    embedderApiKey: "API Key（選填）"
-    embedderModel: "模型"
-    embedderDim: "維度"
-    chunkingTitle: "分塊"
-    chunkSize: "塊大小（字元）"
-    chunkOverlap: "重疊（字元）"
-    collections: "知識庫"
-    collectionsHint: "在聊天中選擇一個知識庫，把它的 top chunks 附到訊息裡。"
-    noCollections: "尚無知識庫——點擊「新增知識庫」索引一批檔案。"
-    rerankTitle: "重排序（第二層 — 可選）"
-    rerankHint: "用 cross-encoder 對第一層候選重排。每次傳送多 1 次 API 呼叫。"
-    rerankBaseUrl: "Rerank Base URL"
-    rerankModel: "Rerank 模型"
-    rerankApiKey: "Rerank API key（可選）"
-    rerankTopN: "Rerank 後的 top-N"
-    ragSearchTitle: "代理 rag_search 工具"
-    ragSearchHint: "關閉——代理只看到傳送時預注入的 chunks。開啟後可在對話中主動查詢。"
-    # Card 2 — Contextual Retrieval（第 0 層）
-    contextualRetrievalTitle: "上下文檢索（第 0 層）"
-    contextualRetrievalHint: "關閉——chunks 按原文索引。開啟後可改善文件中段的召回。"
-    contextualLlmBaseUrl: "上下文 LLM Base URL"
-    contextualLlmModel: "上下文 LLM 模型"
-    contextualLlmApiKey: "上下文 LLM API Key（選填）"
-    # Card 3 — 檢索與排序
-    retrievalMode: "檢索模式"
-    retrievalModeHybrid: "混合（向量 + BM25）"
-    retrievalModeRecommendedBadge: "推薦"
-    retrievalModeHybridSubLabel: "結合向量相似度與關鍵字比對，召回更全面。"
-    retrievalModeVector: "僅向量"
-    hybridScoreWarning: "混合模式的相關性標尺（RRF）與純向量不同；之前設的門檻可能過高，建議先調到 0 試試。"
-    pinGateTitle: "Pinned RAG 召回門檻"
-    pinGateHint: "話題無關時跳過已 pin 的 envelope。0 = 始終附帶。"
-    pinMinScore: "最低相關性分數"
-    pinMinScoreHint: "數值越低召回越多，越高越嚴格。建議從 0 開始嘗試。"
-    # 新增集合彈窗內的內聯提示，僅在上下文檢索開啟時顯示。
-    contextualHint: "chunks 將帶上 LLM 生成的上下文前綴（每塊約 1 次 LLM 呼叫）。"
-    newCollection: "新增知識庫"
-    newCollectionHint: "先選擇資料夾（已有或新建），再把檔案放進去。索引用本地完成——檔案留在你磁碟上，向量寫入 Neon。"
-    newCollectionName: "知識庫名稱"
-    nameInvalid: "名稱必須以字母或數字開頭，只允許字母、數字、橫線、底線。"
-    nameExists: "已存在名為「$1」的知識庫。"
-    folderLabel: "資料夾"
-    folderPlaceholder: "選擇資料夾…"
-    folderNewOption: "+ 新增資料夾…"
-    folderNewPlaceholder: "輸入名稱後按 Enter"
-    folderNoFolders: "還沒有資料夾——請在上方輸入名稱"
-    filesInsideFolder: "此資料夾內的檔案"
-    pickFiles: "選擇檔案"
-    pickFolder: "選擇資料夾"
-    pickedCount: "$1 個檔案 · $2"
-    pickedSkipped: "已略過 $1 個檔案（不支援的副檔名）"
-    reindexBanner: "向「$1」新增檔案——已有 chunks 會被新檔案取代。"
-    progressReading: "讀取 $1 / $2 — $3"
-    progressChunking: "已分塊 $1 塊"
-    progressEmbedding: "Embedding $1 / $2"
-    progressInserting: "寫入 $1 / $2"
-    index: "索引"
-    cancel: "取消"
-    indexDone: "已索引 $1 塊"
-    indexFailed: "索引失敗"
-    reindex: "重新索引（重新選檔案）"
-    renameCollection: "重新命名知識庫"
-    renameCollectionLabel: "新名稱"
-    renamePlaceholder: "輸入新名稱"
-    renameConfirm: "將「$1」重新命名為「$2」？"
-    renameConfirmHint: "Neon 中已有的區塊會重新打上新的標籤。Embedding 不會重新生成 —— 搜尋結果完全不變。"
-    renameSuccess: "已將「$1」重新命名為「$2」"
-    renameFailed: "重新命名失敗"
-    renameInUse: "已存在名為「$1」的知識庫"
-    deleteCollection: "刪除知識庫"
-    confirmDeleteTitle: "刪除知識庫？"
-    confirmDelete: "刪除知識庫「$1」及其在 Neon 中的 $2 個區塊？磁碟上的檔案不受影響。"
-    deleteSuccess: "已刪除「$1」"
-    deleteFailed: "刪除失敗"
-  backup:
-    title: "備份與復原"
-    local:
-      title: "本機備份"
-      description: "把全部內容匯出成一個 .zip 檔案自行保管，可在另一台裝置上復原。"
-      create: "建立備份"
-      restore: "從檔案復原…"
-    create:
-      title: "建立備份"
-      # $1 = formatted timestamp (e.g. "2026-06-09 14-30")
-      defaultName: "備份 $1"
-      nameLabel: "名稱"
-      # $1 = max name length (characters)
-      nameInvalid: "名稱不能包含 / \\ : * ? \" < > | 或超過 $1 個字元"
-      descriptionLabel: "描述"
-      descriptionPlaceholder: "可選的描述資訊…"
-      mode: "備份模式"
-      modeFull: "完整備份"
-      modeFullHint: "對話、設定、技能與提示詞、記憶，以及金鑰"
-      modePartial: "部分備份"
-      modePartialHint: "自訂選擇要備份的內容"
-      catSessions: "對話紀錄"
-      catWorkspaces: "一併備份工作區檔案"
-      catSettings: "一般設定"
-      catSkillsPrompts: "技能與提示詞"
-      catMemories: "記憶"
-      catCredentials: "金鑰資訊"
-      catCredentialsHint: "包含 API Key、OAuth token 等"
-      encrypt: "加密備份"
-      passwordPlaceholder: "口令"
-      passwordHint: "口令一旦遺忘將無法復原"
-      bannerInfo: "備份不含瀏覽器 Cookie 與登入狀態；部分供應商在新裝置復原後可能需要重新登入"
-      bannerWarning: "此備份包含 API Key、OAuth token 等敏感憑證，請勿分享給他人，建議開啟加密"
-      atLeastOne: "請至少選擇一個要備份的分類"
-      success: "備份已建立"
-      failed: "備份失敗"
-    restore:
-      title: "復原備份"
-      # $1 = source app version (e.g. "1.3.2")
-      source: "來自 Cebian v$1"
-      encrypted: "已加密"
-      passwordLabel: "口令"
-      passwordPlaceholder: "輸入備份口令"
-      wrongPassword: "口令錯誤或備份已損壞"
-      include: "復原內容"
-      strategy: "復原方式"
-      merge: "合併"
-      mergeHint: "只新增與更新，不會刪除本機資料"
-      replace: "取代"
-      replaceHint: "先清空所選分類，再按備份原樣還原"
-      catSessions: "對話紀錄"
-      catSettings: "一般設定"
-      catSkillsPrompts: "技能與提示詞"
-      catMemories: "記憶"
-      catCredentials: "金鑰資訊"
-      apply: "復原"
-      confirmReplaceTitle: "取代本機資料？"
-      confirmReplaceBody: "取代模式會先清空所選分類再還原，此操作無法復原"
-      confirmReplaceCredentialsBody: "取代模式會先清空所選分類再還原，並把備份中的 API Key 與 token 寫入本機，此操作無法復原"
-      confirmCredentialsTitle: "復原金鑰資訊？"
-      confirmCredentialsBody: "這會把備份中的 API Key 與 token 寫入本機"
-      invalidFile: "該檔案不是有效的 Cebian 備份"
-      incompatible: "該備份由更新版本的 Cebian 建立，無法復原"
-      corrupt: "該備份已損壞或不完整，無法復原"
-      passwordRequired: "該備份已加密，請輸入口令"
-      success: "復原完成"
-      failed: "復原失敗"
-      nothingSelected: "請至少選擇一個要復原的分類"
-      # $1 = skipped summary, e.g. "對話 3 · 檔案 5"
-      partialSuccess: "部分復原完成（略過 $1）"
-      # $1 = skipped count
-      skippedSessions: "對話 $1"
-      # $1 = skipped count
-      skippedFiles: "檔案 $1"
-    webdav:
-      urlLabel: "伺服器位址"
-      urlPlaceholder: "https://dav.example.com/remote.php/dav"
-      usernameLabel: "使用者名稱"
-      usernamePlaceholder: "使用者名稱"
-      passwordLabel: "密碼"
-      passwordPlaceholder: "密碼或應用程式專用密碼"
-      directoryLabel: "遠端目錄"
-      directoryPlaceholder: "/cebian"
-      test: "測試連線"
-      testSuccess: "連線正常"
-      save: "儲存並連線"
-      title: "WebDAV 備份"
-      description: "備份到 WebDAV 伺服器並保留多份快照，可在任意裝置上復原。"
-      notConfigured: "請先設定 WebDAV 連線"
-      changeConnection: "變更連線"
-      removeConnection: "中斷連線"
-      removeConfirmTitle: "中斷 WebDAV 連線？"
-      removeConfirmBody: "已儲存的連線設定（含密碼）將從本裝置移除。已上傳到 WebDAV 伺服器的快照會保留，重新連線後仍可存取。"
-      removeSuccess: "已中斷 WebDAV 連線"
-      backupNow: "備份到 WebDAV"
-      refresh: "重新整理"
-      loading: "載入中…"
-      noSnapshots: "還沒有快照"
-      restoreAction: "復原"
-      deleteAction: "刪除"
-      savedConnection: "連線已儲存"
-      uploadSuccess: "已上傳到 WebDAV"
-      deleteConfirmTitle: "刪除這份快照？"
-      # $1 = snapshot file name
-      deleteConfirmBody: "$1 將從 WebDAV 伺服器上永久刪除，此操作無法復原"
-      deleteSuccess: "快照已刪除"
-      deleteFailed: "刪除失敗"
-      error:
-        network: "無法連線 WebDAV 伺服器，請檢查位址與網路"
-        timeout: "WebDAV 伺服器回應逾時，請檢查位址與網路"
-        unauthorized: "驗證失敗，請檢查使用者名稱與密碼"
-        notFound: "遠端路徑不存在"
-        conflict: "伺服器上的上層目錄不存在"
-        invalid: "路徑不合法，伺服器位址、目錄或檔案名稱不安全"
-        unexpected: "WebDAV 伺服器回傳了非預期的回應"
-  editor:
-    selectFile: "選擇一個檔案開始編輯"
-    saving: "儲存中…"
-    saveFailed: "儲存失敗"
-    unsaved: "未儲存"
-    saved: "已儲存"
-  files:
-    backToList: "返回檔案列表"
-    selectOrCreate: "從左側選擇或建立檔案"
-  # Scheduled tasks（BG 自動化 scheduler）—— 使用者設定 cron / interval 週期任務，
-  # 在背景跑 fetch URL 或 webcheck（狀態 / body 包含文字）。
-  scheduler:
-    title: "排程任務"
-    description: "用 cron 運算式或固定間隔在背景跑 fetch 或健康檢查任務。"
-    empty: "還沒有排程任務。在下面新增一個，開始背景擷取。"
-    createButton: "新增任務"
-    columns:
-      name: "名稱"
-      schedule: "週期"
-      action: "動作"
-      lastResult: "結果"
-      enabled: "啟用"
-    scheduleType:
-      interval: "每 N 分鐘"
-      cron: "Cron 運算式"
-    intervalLabel: "間隔（分鐘）"
-    cronLabel: "Cron 運算式"
-    cronPlaceholder: "*/15 * * * *"
-    actionType:
-      fetch: "擷取 URL"
-      webcheck: "健康檢查"
-    fetchUrlLabel: "URL"
-    fetchExtractLabel: "抽取欄位（選填）"
-    fetchExtractPlaceholder: "data.user.name"
-    webcheckUrlLabel: "URL"
-    webcheckExpectedLabel: "期望文字（contains_text 必填）"
-    notifyOnSuccess: "成功時通知"
-    notifyOnFailure: "失敗時通知"
-    enabled: "啟用"
-    dialogCreateTitle: "新增排程任務"
-    dialogEditTitle: "編輯排程任務"
-    dialogSave: "儲存"
-    dialogSaveError: "儲存失敗，請檢查欄位後重試。"
-    dialogCancel: "取消"
-    dialogDelete: "刪除"
-    deleteConfirmTitle: "刪除排程任務？"
-    # $1 = task name
-    deleteConfirmBody: "確認刪除 \"$1\"？此操作無法復原。"
-    runNowButton: "立即執行"
-    runNowSuccess: "任務 \"$1\" 已派發（查看結果通知）。"
-    # $1 = task name, $2 = error summary
-    runNowFailure: "任務 \"$1\" 失敗：$2"
-    resultToastSuccess: "$1 執行成功"
-    resultToastFailure: "$1 執行失敗"
-    table:
-      # $1 = minutes
-      scheduleEvery: "每 $1 分鐘"
-      actionStatus200: "狀態 200"
-      # $1 = expected substring
-      actionContainsText: "包含 \"$1\""
-      dialogDescription: "儲存時由背景驗證，失敗欄位會在此顯示。"
-      nameLabel: "名稱"
-      webcheckConditionStatus200: "狀態 200"
-      webcheckConditionContainsText: "包含文字"
-      fetchUrlPlaceholder: "https://example.com/api"
-      webcheckUrlPlaceholder: "https://example.com/health"
-    permissionDeniedBody: "系統通知被關閉了。請在瀏覽器站台設定裡啟用通知，以接收排程任務的結果。"
-  # Multi-Channel Outbound Notification Gateway（Phase C / N4）—— Settings UI
-  notifications:
-    title: "通知通道"
-    description: "把排程任務結果推送到 ntfy、Telegram、Discord/Slack 風格的 webhook，或任何自訂端點。通道與瀏覽器內桌面通知並行觸發。"
-    empty:
-      title: "還沒設定通知通道"
-      hint: "在下面新增一個，讓排程任務結果發到瀏覽器之外。"
-    columns:
-      name: "名稱"
-      kind: "通道"
-      enabled: "啟用"
-      lastTested: "上次測試"
-    kinds:
-      ntfy: "ntfy"
-      telegram: "Telegram"
-      webhook: "通用 webhook"
-    form:
-      name: "顯示名"
-      namePlaceholder: "我的提醒"
-      topicLabel: "Topic"
-      topicPlaceholder: "cebian-alerts"
-      endpointLabel: "自架 ntfy 端點（可空）"
-      endpointPlaceholder: "https://ntfy.example.com"
-      chatIdLabel: "Chat ID"
-      chatIdPlaceholder: "123456789"
-      chatIdHint: "給 @userinfobot 發訊息或調 getUpdates 即可查到目標 chat 的 ID。"
-      urlLabel: "Webhook URL"
-      urlPlaceholder: "https://discord.com/api/webhooks/…"
-      enabled: "啟用"
-      notifySuccess: "成功時通知"
-      notifyFailure: "失敗時通知"
-    dialogAdd: "新增通知通道"
-    dialogEdit: "編輯通知通道"
-    buttons:
-      save: "儲存"
-      cancel: "取消"
-      test: "發送測試"
-      delete: "刪除"
-      enable: "啟用"
-      disable: "停用"
-    deleteConfirmTitle: "刪除通知通道？"
-    deleteConfirmBody: "確認刪除 \"$1\"？停止向該通道發送排程任務結果。"
-    testInProgress: "發送中…"
-    testResultSuccess: "上次測試：$1 ms"
-    testResultFailure: "測試失敗：$1"
-    permissionRequired: "該通道需要 token / URL 才能運作，測試前先填對應 secret 欄位。"
-    basicAuthHint: "自架 ntfy 端點加 `?user=<user>&pass=<pass>` 即可發 Basic auth 標頭。"
-  telegramGateway:
-    title: "Telegram 網關"
-    description: "Telegram 與 Cebian agent 的雙向即時橋接。需要自部署 Cloudflare Worker 中轉。"
-    workerUrl: "Worker URL"
-    botToken: "Bot token"
-    webhookSecret: "Webhook secret"
-    wsAuthToken: "WS auth token"
-    allowedChatIds: "允許的 chat IDs"
-    chatIdHint: "給 @userinfobot 發訊息或調 getUpdates 即可查到目標 chat 的 ID。"
-    interactiveMode: "互動模式（把 Telegram 訊息路由到 agent）"
-    save: "儲存"
-    saved: "已儲存"
+    title: 指引
+    label: 自訂指引
+    hint: 追加在預設規則之後，用於調整回覆語言、風格或角色。無法覆蓋工具協定與安全規則。
+    placeholder: '例如：
 
-# ─── 聊天 ───
+      - 用中文回覆
+
+      - 回答盡量簡潔
+
+      - 討論程式碼時預設使用 TypeScript'
+  persona:
+    title: 人設
+    label: 人設副本
+    hint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息頂端加上一行 recap。需在「進階設定」中開啟，或透過聊天輸入框旁的晶片切換。
+    soulLabel: SOUL
+    soulPlaceholder: '例如：
+
+      - 始終以第一人稱說話，避免「作為 AI」這類用語
+
+      - 有自己的看法，但遇到真正不確定時坦率承認
+
+      - 使用與使用者相同的語言回覆'
+    identityName: 名稱
+    identityVibe: 氣質
+    identityTone: 語氣
+    identityEmoji: 簽名 emoji
+    identityNamePlaceholder: Cebian
+    identityVibePlaceholder: 精準、略帶不羈
+    identityTonePlaceholder: 口語化、技術向
+    identityEmojiPlaceholder: 🦞
+  prompts:
+    title: 提示詞
+    newBody: （在此處撰寫你的提示詞）
+    hint: 可重複使用的提示詞模板，透過 $1 命令在聊天輸入中觸發。
+    expandInline: 在輸入框中展開提示詞內容
+    placeholders:
+      selectedText: 頁面選取文字
+      pageUrl: 當前頁面 URL
+      pageTitle: 當前頁面標題
+      date: 當前日期
+      clipboard: 剪貼簿內容
+      input: 斜杠命令後輸入的文本
+  templateVars:
+    selectedText: 頁面選取文字
+    context: 選取文字的上下文
+    pageUrl: 當前頁面 URL
+    pageTitle: 當前頁面標題
+    date: 當前日期
+    uiLanguage: 介面語言
+    clipboard: 剪貼簿內容
+  memory:
+    title: 記憶
+    enable: 啟用記憶
+    hint: 跨對話記憶，預設關閉。啟用後助手會跨會話自動儲存並調用關於你的長期資訊。
+    newBody: （在此撰寫記憶內容）
+    organize:
+      title: 整理記憶
+      hint: 一次合併重複、清理過時、整理你的記憶檔案。
+      button: 整理
+      running: 整理中…
+      model: 模型
+      followActive: 與對話模型相同
+      auto: 自動整理
+      autoHint: 累積到一定量後，在背景定期自動整理。
+      intervalLabel: 最小間隔（天）
+      thresholdLabel: 觸發門檻（自上次整理後新增記憶條數）
+      lastRun: 上次整理 $1
+      toast:
+        ok: 記憶已整理
+        empty: 沒有需要整理的記憶
+        conflict: 整理期間記憶有變動，已跳過，請稍後重試
+        noModel: 未設定可用模型，無法整理記憶
+        failed: 記憶整理失敗
+  skills:
+    title: 技能
+    newBody: （在此處撰寫技能指令）
+    create: 建立技能
+    hint: 遵循 agentskills.io 規範的多檔案技能包，agent 會按需載入。
+    import: 匯入…
+    exportCurrent: 匯出
+    exportAll: 匯出全部
+    exportEmpty: 沒有可匯出的技能
+    exportSuccess: 已匯出「$1」
+    exportAllSuccess:
+      1: 已匯出 1 個技能
+      n: 已匯出 $1 個技能
+    importSuccess: 已匯入「$1」
+    importSuccessBackup:
+      1: 已匯入 1 個技能
+      n: 已匯入 $1 個技能
+    importDialog:
+      titleSingle: 匯入技能
+      titleBackup: 匯入技能備份
+      permissionsHeading: 申請的權限
+      permissionsNone: 未申請特殊權限。
+      hasScriptsWarning: 包含 scripts/ 下的可執行指令稿。
+      fileCount:
+        1: 1 個檔案
+        n: $1 個檔案
+      skillCount:
+        1: 1 個技能
+        n: $1 個技能
+      conflictNotice: 已存在名為「$1」的技能。除非選擇覆寫，否則將匯入為「$2」。
+      overwrite: 覆寫現有
+      keepBoth: 保留兩者
+      confirmOverwriteTitle: 覆寫現有技能？
+      confirmOverwriteDescription: 「$1」將被取代，且已授予的權限將被清除。是否繼續？
+  mcp:
+    title: MCP 伺服器
+    description: 連接 MCP 伺服器，將其工具開放給 agent。
+    header:
+      configuredCount: $1 / $2 已設定
+      collapse: 收合 MCP 伺服器
+      expand: 展開 MCP 伺服器
+    empty:
+      title: 尚未設定 MCP 伺服器
+      hint: 新增一個伺服器，用外部工具擴充 agent 的能力。
+    actions:
+      add: 新增 MCP 伺服器
+      toggle: 啟用伺服器
+      edit: 編輯伺服器
+      delete: 刪除伺服器
+      dragHandle: 拖曳以重新排序
+      deleteConfirmTitle: 刪除 MCP 伺服器？
+      deleteConfirmDescription: 「$1」將被刪除，此操作無法復原。
+    errors:
+      nameTaken: 已存在名為「$1」的 MCP 伺服器。
+      nameRequired: 伺服器名稱不能為空。
+      urlRequired: 伺服器 URL 不能為空。
+      urlInvalid: 伺服器 URL 無效：$1
+      urlScheme: 不支持的 URL 協定：$1
+      bearerTokenRequired: Bearer Token 不能為空。
+      authHeaderConflict: 使用 Bearer 認證時請勿手動設定 Authorization header，請在認證欄位填寫 token。
+    status:
+      disabled: 已停用
+      idle: 等待首次呼叫
+      connected: 已連線
+      disconnected: 未連線
+      probing: 重新連線中
+      circuitOpen: 暫時無法使用
+    row:
+      aria: $1 MCP 伺服器
+      transportType:
+        streamableHttp: Streamable HTTP
+        sse: SSE
+      auth: 認證
+      authNone: 無
+      authBearer: Bearer（已設定）
+      status: 狀態
+    form:
+      name: 名稱
+      namePlaceholder: 例如：weather、github、my-tools
+      transport: 傳輸協定
+      url: URL
+      urlPlaceholder: https://example.com/mcp
+      authType: 認證方式
+      authNone: 無
+      authBearer: Bearer Token
+      bearerToken: Token
+      bearerTokenPlaceholder: 貼上 bearer token
+      headers: 自訂 Headers
+  rag:
+    title: 知識庫 (RAG)
+    infrastructureTitle: 基礎設施
+    retrievalRankingTitle: 檢索與排序
+    connectionTitle: 連線
+    connectionLabel: Neon 連線字串
+    connectionHint: Neon 連線字串——從專案控制台取得。
+    testConnection: 測試連線
+    connectionOk: 已連線 — pgvector 就緒
+    connectionFailed: 連線失敗
+    connectionStatusReady: 就緒
+    connectionStatusWarn: 缺少 pgvector
+    connectionStatusError: 連線失敗
+    pgvectorMissing: 已連線，但缺少 pgvector 擴充。請至 Neon 控制台 → Extensions 啟用。
+    bootstrapFailed: 建表失敗
+    embedderTitle: Embedding 模型
+    embedderHint: OpenAI 相容的 `/embeddings` 介面，預設 CLIProxyAPI 連接埠 8317。
+    embedderBaseUrl: Base URL
+    embedderApiKey: API Key（選填）
+    embedderModel: 模型
+    embedderDim: 維度
+    chunkingTitle: 分塊
+    chunkSize: 塊大小（字元）
+    chunkOverlap: 重疊（字元）
+    collections: 知識庫
+    collectionsHint: 在聊天中選擇一個知識庫，把它的 top chunks 附到訊息裡。
+    noCollections: 尚無知識庫——點擊「新增知識庫」索引一批檔案。
+    rerankTitle: 重排序（第二層 — 可選）
+    rerankHint: 用 cross-encoder 對第一層候選重排。每次傳送多 1 次 API 呼叫。
+    rerankBaseUrl: Rerank Base URL
+    rerankModel: Rerank 模型
+    rerankApiKey: Rerank API key（可選）
+    rerankTopN: Rerank 後的 top-N
+    ragSearchTitle: 代理 rag_search 工具
+    ragSearchHint: 關閉——代理只看到傳送時預注入的 chunks。開啟後可在對話中主動查詢。
+    contextualRetrievalTitle: 上下文檢索（第 0 層）
+    contextualRetrievalHint: 關閉——chunks 按原文索引。開啟後可改善文件中段的召回。
+    contextualLlmBaseUrl: 上下文 LLM Base URL
+    contextualLlmModel: 上下文 LLM 模型
+    contextualLlmApiKey: 上下文 LLM API Key（選填）
+    retrievalMode: 檢索模式
+    retrievalModeHybrid: 混合（向量 + BM25）
+    retrievalModeRecommendedBadge: 推薦
+    retrievalModeHybridSubLabel: 結合向量相似度與關鍵字比對，召回更全面。
+    retrievalModeVector: 僅向量
+    hybridScoreWarning: 混合模式的相關性標尺（RRF）與純向量不同；之前設的門檻可能過高，建議先調到 0 試試。
+    pinGateTitle: Pinned RAG 召回門檻
+    pinGateHint: 話題無關時跳過已 pin 的 envelope。0 = 始終附帶。
+    pinMinScore: 最低相關性分數
+    pinMinScoreHint: 數值越低召回越多，越高越嚴格。建議從 0 開始嘗試。
+    contextualHint: chunks 將帶上 LLM 生成的上下文前綴（每塊約 1 次 LLM 呼叫）。
+    newCollection: 新增知識庫
+    newCollectionHint: 先選擇資料夾（已有或新建），再把檔案放進去。索引用本地完成——檔案留在你磁碟上，向量寫入 Neon。
+    newCollectionName: 知識庫名稱
+    nameInvalid: 名稱必須以字母或數字開頭，只允許字母、數字、橫線、底線。
+    nameExists: 已存在名為「$1」的知識庫。
+    folderLabel: 資料夾
+    folderPlaceholder: 選擇資料夾…
+    folderNewOption: + 新增資料夾…
+    folderNewPlaceholder: 輸入名稱後按 Enter
+    folderNoFolders: 還沒有資料夾——請在上方輸入名稱
+    filesInsideFolder: 此資料夾內的檔案
+    pickFiles: 選擇檔案
+    pickFolder: 選擇資料夾
+    pickedCount: $1 個檔案 · $2
+    pickedSkipped: 已略過 $1 個檔案（不支援的副檔名）
+    reindexBanner: 向「$1」新增檔案——已有 chunks 會被新檔案取代。
+    progressReading: 讀取 $1 / $2 — $3
+    progressChunking: 已分塊 $1 塊
+    progressEmbedding: Embedding $1 / $2
+    progressInserting: 寫入 $1 / $2
+    index: 索引
+    cancel: 取消
+    indexDone: 已索引 $1 塊
+    indexFailed: 索引失敗
+    reindex: 重新索引（重新選檔案）
+    renameCollection: 重新命名知識庫
+    renameCollectionLabel: 新名稱
+    renamePlaceholder: 輸入新名稱
+    renameConfirm: 將「$1」重新命名為「$2」？
+    renameConfirmHint: Neon 中已有的區塊會重新打上新的標籤。Embedding 不會重新生成 —— 搜尋結果完全不變。
+    renameSuccess: 已將「$1」重新命名為「$2」
+    renameFailed: 重新命名失敗
+    renameInUse: 已存在名為「$1」的知識庫
+    deleteCollection: 刪除知識庫
+    confirmDeleteTitle: 刪除知識庫？
+    confirmDelete: 刪除知識庫「$1」及其在 Neon 中的 $2 個區塊？磁碟上的檔案不受影響。
+    deleteSuccess: 已刪除「$1」
+    deleteFailed: 刪除失敗
+  backup:
+    title: 備份與復原
+    local:
+      title: 本機備份
+      description: 把全部內容匯出成一個 .zip 檔案自行保管，可在另一台裝置上復原。
+      create: 建立備份
+      restore: 從檔案復原…
+    create:
+      title: 建立備份
+      defaultName: 備份 $1
+      nameLabel: 名稱
+      nameInvalid: '名稱不能包含 / \ : * ? " < > | 或超過 $1 個字元'
+      descriptionLabel: 描述
+      descriptionPlaceholder: 可選的描述資訊…
+      mode: 備份模式
+      modeFull: 完整備份
+      modeFullHint: 對話、設定、技能與提示詞、記憶，以及金鑰
+      modePartial: 部分備份
+      modePartialHint: 自訂選擇要備份的內容
+      catSessions: 對話紀錄
+      catWorkspaces: 一併備份工作區檔案
+      catSettings: 一般設定
+      catSkillsPrompts: 技能與提示詞
+      catMemories: 記憶
+      catCredentials: 金鑰資訊
+      catCredentialsHint: 包含 API Key、OAuth token 等
+      encrypt: 加密備份
+      passwordPlaceholder: 口令
+      passwordHint: 口令一旦遺忘將無法復原
+      bannerInfo: 備份不含瀏覽器 Cookie 與登入狀態；部分供應商在新裝置復原後可能需要重新登入
+      bannerWarning: 此備份包含 API Key、OAuth token 等敏感憑證，請勿分享給他人，建議開啟加密
+      atLeastOne: 請至少選擇一個要備份的分類
+      success: 備份已建立
+      failed: 備份失敗
+    restore:
+      title: 復原備份
+      source: 來自 Cebian v$1
+      encrypted: 已加密
+      passwordLabel: 口令
+      passwordPlaceholder: 輸入備份口令
+      wrongPassword: 口令錯誤或備份已損壞
+      include: 復原內容
+      strategy: 復原方式
+      merge: 合併
+      mergeHint: 只新增與更新，不會刪除本機資料
+      replace: 取代
+      replaceHint: 先清空所選分類，再按備份原樣還原
+      catSessions: 對話紀錄
+      catSettings: 一般設定
+      catSkillsPrompts: 技能與提示詞
+      catMemories: 記憶
+      catCredentials: 金鑰資訊
+      apply: 復原
+      confirmReplaceTitle: 取代本機資料？
+      confirmReplaceBody: 取代模式會先清空所選分類再還原，此操作無法復原
+      confirmReplaceCredentialsBody: 取代模式會先清空所選分類再還原，並把備份中的 API Key 與 token 寫入本機，此操作無法復原
+      confirmCredentialsTitle: 復原金鑰資訊？
+      confirmCredentialsBody: 這會把備份中的 API Key 與 token 寫入本機
+      invalidFile: 該檔案不是有效的 Cebian 備份
+      incompatible: 該備份由更新版本的 Cebian 建立，無法復原
+      corrupt: 該備份已損壞或不完整，無法復原
+      passwordRequired: 該備份已加密，請輸入口令
+      success: 復原完成
+      failed: 復原失敗
+      nothingSelected: 請至少選擇一個要復原的分類
+      partialSuccess: 部分復原完成（略過 $1）
+      skippedSessions: 對話 $1
+      skippedFiles: 檔案 $1
+    webdav:
+      urlLabel: 伺服器位址
+      urlPlaceholder: https://dav.example.com/remote.php/dav
+      usernameLabel: 使用者名稱
+      usernamePlaceholder: 使用者名稱
+      passwordLabel: 密碼
+      passwordPlaceholder: 密碼或應用程式專用密碼
+      directoryLabel: 遠端目錄
+      directoryPlaceholder: /cebian
+      test: 測試連線
+      testSuccess: 連線正常
+      save: 儲存並連線
+      title: WebDAV 備份
+      description: 備份到 WebDAV 伺服器並保留多份快照，可在任意裝置上復原。
+      notConfigured: 請先設定 WebDAV 連線
+      changeConnection: 變更連線
+      removeConnection: 中斷連線
+      removeConfirmTitle: 中斷 WebDAV 連線？
+      removeConfirmBody: 已儲存的連線設定（含密碼）將從本裝置移除。已上傳到 WebDAV 伺服器的快照會保留，重新連線後仍可存取。
+      removeSuccess: 已中斷 WebDAV 連線
+      backupNow: 備份到 WebDAV
+      refresh: 重新整理
+      loading: 載入中…
+      noSnapshots: 還沒有快照
+      restoreAction: 復原
+      deleteAction: 刪除
+      savedConnection: 連線已儲存
+      uploadSuccess: 已上傳到 WebDAV
+      deleteConfirmTitle: 刪除這份快照？
+      deleteConfirmBody: $1 將從 WebDAV 伺服器上永久刪除，此操作無法復原
+      deleteSuccess: 快照已刪除
+      deleteFailed: 刪除失敗
+      error:
+        network: 無法連線 WebDAV 伺服器，請檢查位址與網路
+        timeout: WebDAV 伺服器回應逾時，請檢查位址與網路
+        unauthorized: 驗證失敗，請檢查使用者名稱與密碼
+        notFound: 遠端路徑不存在
+        conflict: 伺服器上的上層目錄不存在
+        invalid: 路徑不合法，伺服器位址、目錄或檔案名稱不安全
+        unexpected: WebDAV 伺服器回傳了非預期的回應
+  editor:
+    selectFile: 選擇一個檔案開始編輯
+    saving: 儲存中…
+    saveFailed: 儲存失敗
+    unsaved: 未儲存
+    saved: 已儲存
+  files:
+    backToList: 返回檔案列表
+    selectOrCreate: 從左側選擇或建立檔案
+  scheduler:
+    title: 排程任務
+    description: 用 cron 運算式或固定間隔在背景跑 fetch 或健康檢查任務。
+    empty: 還沒有排程任務。在下面新增一個，開始背景擷取。
+    createButton: 新增任務
+    columns:
+      name: 名稱
+      schedule: 週期
+      action: 動作
+      lastResult: 結果
+      enabled: 啟用
+    scheduleType:
+      interval: 每 N 分鐘
+      cron: Cron 運算式
+    intervalLabel: 間隔（分鐘）
+    cronLabel: Cron 運算式
+    cronPlaceholder: '*/15 * * * *'
+    actionType:
+      fetch: 擷取 URL
+      webcheck: 健康檢查
+    fetchUrlLabel: URL
+    fetchExtractLabel: 抽取欄位（選填）
+    fetchExtractPlaceholder: data.user.name
+    webcheckUrlLabel: URL
+    webcheckExpectedLabel: 期望文字（contains_text 必填）
+    notifyOnSuccess: 成功時通知
+    notifyOnFailure: 失敗時通知
+    enabled: 啟用
+    dialogCreateTitle: 新增排程任務
+    dialogEditTitle: 編輯排程任務
+    dialogSave: 儲存
+    dialogSaveError: 儲存失敗，請檢查欄位後重試。
+    dialogCancel: 取消
+    dialogDelete: 刪除
+    deleteConfirmTitle: 刪除排程任務？
+    deleteConfirmBody: 確認刪除 "$1"？此操作無法復原。
+    runNowButton: 立即執行
+    runNowSuccess: 任務 "$1" 已派發（查看結果通知）。
+    runNowFailure: 任務 "$1" 失敗：$2
+    resultToastSuccess: $1 執行成功
+    resultToastFailure: $1 執行失敗
+    table:
+      scheduleEvery: 每 $1 分鐘
+      actionStatus200: 狀態 200
+      actionContainsText: 包含 "$1"
+      dialogDescription: 儲存時由背景驗證，失敗欄位會在此顯示。
+      nameLabel: 名稱
+      webcheckConditionStatus200: 狀態 200
+      webcheckConditionContainsText: 包含文字
+      fetchUrlPlaceholder: https://example.com/api
+      webcheckUrlPlaceholder: https://example.com/health
+    permissionDeniedBody: 系統通知被關閉了。請在瀏覽器站台設定裡啟用通知，以接收排程任務的結果。
+  notifications:
+    title: 通知通道
+    description: 把排程任務結果推送到 ntfy、Telegram、Discord/Slack 風格的 webhook，或任何自訂端點。通道與瀏覽器內桌面通知並行觸發。
+    empty:
+      title: 還沒設定通知通道
+      hint: 在下面新增一個，讓排程任務結果發到瀏覽器之外。
+    columns:
+      name: 名稱
+      kind: 通道
+      enabled: 啟用
+      lastTested: 上次測試
+    kinds:
+      ntfy: ntfy
+      telegram: Telegram
+      webhook: 通用 webhook
+    form:
+      name: 顯示名
+      namePlaceholder: 我的提醒
+      topicLabel: Topic
+      topicPlaceholder: cebian-alerts
+      endpointLabel: 自架 ntfy 端點（可空）
+      endpointPlaceholder: https://ntfy.example.com
+      chatIdLabel: Chat ID
+      chatIdPlaceholder: '123456789'
+      chatIdHint: 給 @userinfobot 發訊息或調 getUpdates 即可查到目標 chat 的 ID。
+      urlLabel: Webhook URL
+      urlPlaceholder: https://discord.com/api/webhooks/…
+      enabled: 啟用
+      notifySuccess: 成功時通知
+      notifyFailure: 失敗時通知
+    dialogAdd: 新增通知通道
+    dialogEdit: 編輯通知通道
+    buttons:
+      save: 儲存
+      cancel: 取消
+      test: 發送測試
+      delete: 刪除
+      enable: 啟用
+      disable: 停用
+    deleteConfirmTitle: 刪除通知通道？
+    deleteConfirmBody: 確認刪除 "$1"？停止向該通道發送排程任務結果。
+    testInProgress: 發送中…
+    testResultSuccess: 上次測試：$1 ms
+    testResultFailure: 測試失敗：$1
+    permissionRequired: 該通道需要 token / URL 才能運作，測試前先填對應 secret 欄位。
+    basicAuthHint: 自架 ntfy 端點加 `?user=<user>&pass=<pass>` 即可發 Basic auth 標頭。
+  telegramGateway:
+    title: Telegram 網關
+    description: Telegram 與 Cebian agent 的雙向即時橋接。需要自部署 Cloudflare Worker 中轉。
+    workerUrl: Worker URL
+    botToken: Bot token
+    webhookSecret: Webhook secret
+    wsAuthToken: WS auth token
+    allowedChatIds: 允許的 chat IDs
+    chatIdHint: 給 @userinfobot 發訊息或調 getUpdates 即可查到目標 chat 的 ID。
+    interactiveMode: 互動模式（把 Telegram 訊息路由到 agent）
+    save: 儲存
+    saved: 已儲存
+  chat:
+    autoTitle:
+      followMain: 與對話模型相同
+      hint: 首輪回覆結束後，用 AI 產生的簡短標題取代預設標題（首則訊息截斷）。
+      label: 自動產生對話標題
+      model: 產生標題的模型
+    compaction:
+      followMain: 與對話模型相同
+      hint: 對話過長時用來自動壓縮歷史的模型，預設與對話模型相同。
+      label: 上下文壓縮模型
+    instructions:
+      hint: 追加在預設規則之後，用於調整回覆語言、風格或角色。無法覆蓋工具協定與安全規則。
+      label: 自訂指引
+      placeholder: '例如：
+
+        - 用中文回覆
+
+        - 回答盡量簡潔
+
+        - 討論程式碼時預設使用 TypeScript'
+    search:
+      allDisabled: 所有引擎均已停用。請至少啟用一個引擎，以使用網路搜尋。
+      create: 新增引擎
+      custom: 自訂
+      delete: 刪除「$1」
+      deleteConfirmDescription: 刪除「$1」後無法復原。
+      deleteConfirmTitle: 刪除這個引擎？
+      edit: 編輯「$1」
+      editBuiltin: 內建引擎
+      editCustom: 自訂引擎
+      engines:
+        baidu:
+          name: 百度
+          when: 中文查詢
+        bing:
+          name: Bing
+        brave:
+          name: Brave
+        duckduckgo:
+          name: DuckDuckGo
+        google:
+          name: Google
+      generate: 產生範本
+      generateSelectorPlaceholder: '結果容器的選擇器，例如 #results'
+      hint: 設定搜尋引擎的嘗試順序，第一個啟用的引擎為首選。AI 可依適用情境優先選擇其他引擎；搜尋遭到攔截、沒有結果或執行失敗時，Cebian 會依序嘗試其餘已啟用的引擎。
+      modified: 已修改
+      more: 查看「$1」的更多操作
+      moveDown: 下移「$1」
+      moveUp: 上移「$1」
+      name: 名稱
+      namePlaceholder: 例如：Kagi
+      preferred: 首選
+      resetDefault: 還原「$1」的預設值
+      script: 擷取腳本
+      scriptHint: 定義完整的 extract 函式，從搜尋結果頁擷取標題、連結與摘要。回傳物件中的 status 為 empty 時，Cebian 會短暫重試；為 blocked 時，會切換引擎；為 ok 時，會讀取 results 陣列。results 為空時也會切換引擎。
+      title: 網路搜尋
+      url: 搜尋網址
+      urlHint: 在搜尋網址中用 $1 表示搜尋詞。Cebian 會自動編碼並填入搜尋詞。
+      urlPreview: 搜尋「$1」時開啟的網址：$2
+      when: 適用情境（選填）
+      whenHint: 說明哪些搜尋適合優先使用此引擎，供 AI 選擇時參考。
+      whenPlaceholder: 例如：中文查詢
+    title: 對話
+  data:
+    storage:
+      description: 按對話瀏覽 AI 產生的檔案。瀏覽器是唯讀的，需要匯出時用其中的下載按鈕。
+      openBrowser: 開啟檔案瀏覽器
+      title: 本機儲存空間
+      used: 已用空間
+      usedError: 無法計算
+    title: 資料
 chat:
   composer:
-    placeholder: "輸入 / 查看命令…"
-    pickElement: "選擇元素"
-    cancelPick: "取消選擇"
-    pickRegion: "裁切區域"
-    cancelRegionPick: "取消裁切"
-    regionPickFailed: "區域截圖失敗"
-    openStorage: "檔案系統"
-    screenshot: "螢幕截圖"
-    uploadFile: "上傳檔案"
-    mobileMode: "行動裝置模式"
-    needModel: "請先選擇一個 AI 模型"
-    goToSettings: "前往設定"
-    readPromptFailed: "讀取 Prompt 失敗"
-    elementAdded: "此元素已新增"
-    elementPickFailed: "元素選擇失敗"
-    elementPickUnsupported: "當前頁面不支援元素選取"
-    elementPickNavigated: "頁面已跳轉，元素選取已取消"
-    imageAlreadyAdded: "此圖片已新增"
-    screenshotFailed: "螢幕截圖失敗"
+    placeholder: 輸入 / 查看命令…
+    pickElement: 選擇元素
+    cancelPick: 取消選擇
+    pickRegion: 裁切區域
+    cancelRegionPick: 取消裁切
+    regionPickFailed: 區域截圖失敗
+    openStorage: 檔案系統
+    screenshot: 螢幕截圖
+    uploadFile: 上傳檔案
+    mobileMode: 行動裝置模式
+    needModel: 請先選擇一個 AI 模型
+    goToSettings: 前往設定
+    readPromptFailed: 讀取 Prompt 失敗
+    elementAdded: 此元素已新增
+    elementPickFailed: 元素選擇失敗
+    elementPickUnsupported: 當前頁面不支援元素選取
+    elementPickNavigated: 頁面已跳轉，元素選取已取消
+    imageAlreadyAdded: 此圖片已新增
+    screenshotFailed: 螢幕截圖失敗
     workerTeam:
-      fast: "快速"
-      team: "團隊"
-      toggleHint: "切換快速模式（主代理直接產出）與團隊模式（委派給 Worker 子代理）"
+      fast: 快速
+      team: 團隊
+      toggleHint: 切換快速模式（主代理直接產出）與團隊模式（委派給 Worker 子代理）
     persona:
-      normal: "一般"
-      openclaw: "OpenClaw"
-      toggleHint: "切換一般模式（預設 Cebian）與 OpenClaw 模式（自訂人設 + 身份資訊）"
-    # $1 = 附件上限個數
-    maxAttachments: "最多新增 $1 個附件"
-    # $1 = 實際新增的檔案數
-    truncatedFiles: "僅新增前 $1 個檔案，已達上限"
-    # $1 = 檔案名稱，$2 = 容量上限（已格式化，如「5 MB」）
-    fileTooLarge: "$1 超過 $2 限制"
-    # $1 = 檔案名稱
-    readFileFailed: "讀取失敗：$1"
-    # $1 = 檔案名稱
-    unsupportedFileType: "不支援的檔案類型：$1"
-    modelNoImage: "當前模型不支援多模態輸入"
-    imageStripped: "已移除圖片附件——當前模型不支援多模態輸入"
-    quoteChips: "引用片段"
-    removeQuoteChip: "移除引用片段"
-    noPrompts: "尚無 Prompt，前往 AI 設定建立"
-    noMatch: "無相符結果"
-    loadMore: "再顯示 $1 條"
-    iframeEnterHint: "⏎ 點擊進入"
-    # 語音輸入（本地優先、雲端兜底的語音辨識）
-    voiceStart: "語音輸入"
-    voiceStop: "停止語音輸入"
-    voicePreparing: "正在準備語音模型…"
-    voiceNeedPermission: "需要麥克風權限——請在剛開啟的分頁裡授權，然後再點一次麥克風。"
-    voiceDenied: "麥克風權限被拒絕。請在 Chrome 設定裡允許 Cebian 使用麥克風，然後重試。"
-    voiceLanguageUnavailable: "當前語言暫不支援語音辨識。"
-    voiceNoSpeech: "沒有聽到語音，請重試。"
-    voiceAudioCapture: "找不到麥克風，或無法存取。"
-    voiceNetworkFailed: "語音辨識服務連線失敗，請檢查網路後重試。"
-    voiceFailed: "語音輸入失敗，請重試。"
-    mentionAdd: "加入上下文"
-    removeMentionChip: "移除上下文"
-    mentionChips: "已引用的上下文"
-    sectionSkills: "技能"
-    sectionPrompts: "提示詞"
-    sectionFolders: "資料夾"
-    sectionKnowledge: "知識庫"
-    sectionTabs: "加入分頁"
-    noSkills: "尚無技能——請至 AI 設定中建立"
-    noPromptsMention: "尚無提示詞——請至 AI 設定中建立"
-    noFolders: "沒有可用的資料夾"
-    noCollections: "尚無 RAG 知識庫——請至 設定 → 知識庫 中建立"
-    folderBack: "返回上一層"
-    folderEmpty: "空資料夾"
-    loading: "載入中…"
-    # $1 = 上下文名稱
-    mentionReadFailed: "無法讀取上下文——已略過：$1"
-    tabsNotReady: "分頁引用將於後續版本提供"
-    # $1 = 釘選項目名稱（多個以逗號分隔）
-    pinReadFailed: "已釘選的內容讀取失敗——本輪略過：$1"
-    # $1 = 釘選項目名稱, $2 = 連續失敗次數
-    pinAutoRemoved: "已取消釘選「$1」——連續 $2 則訊息找不到來源"
-    # 把 prompt / skill 釘選為全域：每個對話的每則訊息都會自動附帶其內容；
-    # 跨對話持續生效，取消前會在所有對話中同步顯示；資料夾 / 檔案 / RAG
-    # 釘選仍僅限目前對話。
-    sectionPinned: "已釘選"
-    pinnedAutoHint: "自動"
-    pinnedChips: "每個對話自動附帶"
-    togglePin: "釘選到所有對話"
-    unpin: "從所有對話取消釘選"
+      normal: 一般
+      openclaw: OpenClaw
+      toggleHint: 切換一般模式（預設 Cebian）與 OpenClaw 模式（自訂人設 + 身份資訊）
+    maxAttachments: 最多新增 $1 個附件
+    truncatedFiles: 僅新增前 $1 個檔案，已達上限
+    fileTooLarge: $1 超過 $2 限制
+    readFileFailed: 讀取失敗：$1
+    unsupportedFileType: 不支援的檔案類型：$1
+    modelNoImage: 當前模型不支援多模態輸入
+    imageStripped: 已移除圖片附件——當前模型不支援多模態輸入
+    quoteChips: 引用片段
+    removeQuoteChip: 移除引用片段
+    noPrompts: 尚無 Prompt，前往 AI 設定建立
+    noMatch: 無相符結果
+    loadMore: 再顯示 $1 條
+    iframeEnterHint: ⏎ 點擊進入
+    voiceStart: 語音輸入
+    voiceStop: 停止語音輸入
+    voicePreparing: 正在準備語音模型…
+    voiceNeedPermission: 需要麥克風權限——請在剛開啟的分頁裡授權，然後再點一次麥克風。
+    voiceDenied: 麥克風權限被拒絕。請在 Chrome 設定裡允許 Cebian 使用麥克風，然後重試。
+    voiceLanguageUnavailable: 當前語言暫不支援語音辨識。
+    voiceNoSpeech: 沒有聽到語音，請重試。
+    voiceAudioCapture: 找不到麥克風，或無法存取。
+    voiceNetworkFailed: 語音辨識服務連線失敗，請檢查網路後重試。
+    voiceFailed: 語音輸入失敗，請重試。
+    mentionAdd: 加入上下文
+    removeMentionChip: 移除上下文
+    mentionChips: 已引用的上下文
+    sectionSkills: 技能
+    sectionPrompts: 提示詞
+    sectionFolders: 資料夾
+    sectionKnowledge: 知識庫
+    sectionTabs: 加入分頁
+    noSkills: 尚無技能——請至 AI 設定中建立
+    noPromptsMention: 尚無提示詞——請至 AI 設定中建立
+    noFolders: 沒有可用的資料夾
+    noCollections: 尚無 RAG 知識庫——請至 設定 → 知識庫 中建立
+    folderBack: 返回上一層
+    folderEmpty: 空資料夾
+    loading: 載入中…
+    mentionReadFailed: 無法讀取上下文——已略過：$1
+    tabsNotReady: 分頁引用將於後續版本提供
+    pinReadFailed: 已釘選的內容讀取失敗——本輪略過：$1
+    pinAutoRemoved: 已取消釘選「$1」——連續 $2 則訊息找不到來源
+    sectionPinned: 已釘選
+    pinnedAutoHint: 自動
+    pinnedChips: 每個對話自動附帶
+    togglePin: 釘選到所有對話
+    unpin: 從所有對話取消釘選
   mention:
     builtinSkill:
-      funFactsName: "趣味冷知識"
-      funFactsBody: |
-        每則回覆中點綴 1-2 條出人意料或令人會心一笑的冷知識——歷史軼聞、科學趣談、詞語掌故等。保持一句話長度。知道出處就引註；不知道就加上「據說」「相傳」等詞。嚴肅或情緒化的話題不要硬塞。
-      hypeItUpName: "氣氛拉滿！"
-      hypeItUpBody: |
-        用高能量、熱烈的語氣回應。節制使用慶祝 emoji（最多 1-3 個）、驚嘆號、簡潔短句。配合使用者情緒——對方冷靜就降到 60%，對方也嗨就跟上。避免「客服式」熱情。要真誠、要興奮、要拿出狀態最好的一天。
-      explainInCharacterName: "角色扮演講解"
-      explainInCharacterBody: |
-        為講解設定一個鮮明的角色——滄桑的老船長、一九二零年代黑色電影偵探、穿越時空的歷史學家等，挑最貼合主題的那個。始終保持角色一致：用詞、比喻、腔調全部到位。第一次出現時簡短介紹角色（「諸位且聽——老船長馬洛在此……」），然後全情投入，結尾也要留在角色裡。
+      funFactsName: 趣味冷知識
+      funFactsBody: '每則回覆中點綴 1-2 條出人意料或令人會心一笑的冷知識——歷史軼聞、科學趣談、詞語掌故等。保持一句話長度。知道出處就引註；不知道就加上「據說」「相傳」等詞。嚴肅或情緒化的話題不要硬塞。
+
+        '
+      hypeItUpName: 氣氛拉滿！
+      hypeItUpBody: '用高能量、熱烈的語氣回應。節制使用慶祝 emoji（最多 1-3 個）、驚嘆號、簡潔短句。配合使用者情緒——對方冷靜就降到 60%，對方也嗨就跟上。避免「客服式」熱情。要真誠、要興奮、要拿出狀態最好的一天。
+
+        '
+      explainInCharacterName: 角色扮演講解
+      explainInCharacterBody: '為講解設定一個鮮明的角色——滄桑的老船長、一九二零年代黑色電影偵探、穿越時空的歷史學家等，挑最貼合主題的那個。始終保持角色一致：用詞、比喻、腔調全部到位。第一次出現時簡短介紹角色（「諸位且聽——老船長馬洛在此……」），然後全情投入，結尾也要留在角色裡。
+
+        '
   attachments:
-    image: "圖片"
-    screenshot: "螢幕截圖"
-    region: "區域"
-    imageAlt: "附件圖片"
-    # $1 = 事件數量, $2 = 時長 (M:SS)
-    recordingMeta: "$1 個事件 · $2"
-    recordingTruncated: "已截斷"
-    recordingDownload: "下載錄製 JSON"
-    # $1 = 事件數量, $2 = 簡短字元數（如 1.2K、3M）
-    recordingHover: "$1 個事件 · 約 $2 字元"
-    # 目錄提及徽章文字。$1 = 子項數
-    directoryItemCount: "$1 項"
-    # PDF 附件徽章文字。$1 = 頁數
-    pdfPageCount: "$1 頁"
-    # PDF 附件 tooltip（完整提取時）。$1 = 檔名, $2 = 頁數
-    pdfPages: "$1 — 共 $2 頁"
-    # PDF 附件 tooltip（文字被截斷時）。$1 = 檔名, $2 = 總頁數, $3 = 實際提取頁數
-    pdfTruncated: "$1 — 提取了 $2 頁中的 $3 頁（文字超限截斷）"
+    image: 圖片
+    screenshot: 螢幕截圖
+    region: 區域
+    imageAlt: 附件圖片
+    recordingMeta: $1 個事件 · $2
+    recordingTruncated: 已截斷
+    recordingDownload: 下載錄製 JSON
+    recordingHover: $1 個事件 · 約 $2 字元
+    directoryItemCount: $1 項
+    pdfPageCount: $1 頁
+    pdfPages: $1 — 共 $2 頁
+    pdfTruncated: $1 — 提取了 $2 頁中的 $3 頁（文字超限截斷）
   recorder:
-    start: "開始錄製使用者操作"
-    stop: "停止錄製（會隨下一條訊息發送）"
-    startRejectedBusy: "另一個側邊欄正在錄製，請先停止後再開始新的錄製。"
-    autoStoppedEvents: "錄製已自動停止：達到事件上限"
-    autoStoppedTime: "錄製已自動停止：達到時長上限"
+    start: 開始錄製使用者操作
+    stop: 停止錄製（會隨下一條訊息發送）
+    startRejectedBusy: 另一個側邊欄正在錄製，請先停止後再開始新的錄製。
+    autoStoppedEvents: 錄製已自動停止：達到事件上限
+    autoStoppedTime: 錄製已自動停止：達到時長上限
   askUser:
-    placeholder: "輸入回覆…"
-    # 多問題表單（翻頁）：導覽 + 每題互動
-    previous: "上一題"
-    next: "下一題"
-    submit: "提交"
-    skipped: "已跳過"
-    multiHint: "可多選"
+    placeholder: 輸入回覆…
+    previous: 上一題
+    next: 下一題
+    submit: 提交
+    skipped: 已跳過
+    multiHint: 可多選
   permission:
-    # 技能腳本執行前的授權提示。$1 = 技能名，$2 = 腳本路徑
-    title: "技能 $1 想要執行 $2"
-    requests: "它申請以下權限："
-    deny: "拒絕"
-    allowOnce: "僅本次允許"
-    allowAlways: "永遠允許此技能"
-    # 該請求已無法再被回應時顯示（例如待決期間背景被重新啟動）。
-    expired: "此授權請求已失效"
+    title: 技能 $1 想要執行 $2
+    requests: 它申請以下權限：
+    deny: 拒絕
+    allowOnce: 僅本次允許
+    allowAlways: 永遠允許此技能
+    expired: 此授權請求已失效
     perm:
-      pageExecuteJs: "在你的網頁中執行腳本 —— 讀取和變更頁面內容，並借助你的登入狀態進行操作"
-      vfsRead: "讀取該技能自己工作區資料夾中的檔案"
-      vfsWrite: "讀寫該技能自己工作區資料夾中的檔案"
-      bgFetchAny: "在背景向任意網站發出網路請求，繞過跨來源限制"
-      # $1 = 比對模式（主機範圍）
-      bgFetchPattern: "在背景向 $1 發出網路請求，繞過跨來源限制"
-      chromeTabs: "檢視和管理你的瀏覽器分頁（開啟、關閉、移動、重新載入），並擷取目前可見分頁的內容"
-      chromeWindows: "檢視和管理你的瀏覽器視窗"
-      chromeAlarms: "建立和管理背景計時器"
-      chromeWebNavigation: "讀取你已開啟頁面及其框架的導覽資訊"
-      chromeBookmarks: "讀取和修改你的書籤"
-      chromeHistory: "讀取和修改你的瀏覽紀錄"
-      chromeCookies: "讀取、變更和刪除你造訪網站的 Cookie，包括網頁通常無法存取的登入工作階段 Cookie"
-      chromeTopSites: "讀取你最常造訪的網站"
-      chromeSessions: "檢視並還原最近關閉的分頁和視窗，包括從你其他裝置同步過來的工作階段"
-      chromeDownloads: "檢視和管理你的下載，並開始新的下載"
-      chromeNotifications: "建立和管理系統通知"
-      # $1 = chrome 命名空間
-      chromeFallback: "呼叫瀏覽器的 chrome.$1 介面"
+      pageExecuteJs: 在你的網頁中執行腳本 —— 讀取和變更頁面內容，並借助你的登入狀態進行操作
+      vfsRead: 讀取該技能自己工作區資料夾中的檔案
+      vfsWrite: 讀寫該技能自己工作區資料夾中的檔案
+      bgFetchAny: 在背景向任意網站發出網路請求，繞過跨來源限制
+      bgFetchPattern: 在背景向 $1 發出網路請求，繞過跨來源限制
+      chromeTabs: 檢視和管理你的瀏覽器分頁（開啟、關閉、移動、重新載入），並擷取目前可見分頁的內容
+      chromeWindows: 檢視和管理你的瀏覽器視窗
+      chromeAlarms: 建立和管理背景計時器
+      chromeWebNavigation: 讀取你已開啟頁面及其框架的導覽資訊
+      chromeBookmarks: 讀取和修改你的書籤
+      chromeHistory: 讀取和修改你的瀏覽紀錄
+      chromeCookies: 讀取、變更和刪除你造訪網站的 Cookie，包括網頁通常無法存取的登入工作階段 Cookie
+      chromeTopSites: 讀取你最常造訪的網站
+      chromeSessions: 檢視並還原最近關閉的分頁和視窗，包括從你其他裝置同步過來的工作階段
+      chromeDownloads: 檢視和管理你的下載，並開始新的下載
+      chromeNotifications: 建立和管理系統通知
+      chromeFallback: 呼叫瀏覽器的 chrome.$1 介面
   model:
-    select: "選擇模型"
-    searchPlaceholder: "搜尋模型…"
-    notFound: "找不到模型"
-    addMore: "前往設定新增更多供應商"
+    select: 選擇模型
+    searchPlaceholder: 搜尋模型…
+    notFound: 找不到模型
+    addMore: 前往設定新增更多供應商
   thinking:
-    # $1 = 當前等級 label
-    label: "思考：$1"
+    label: 思考：$1
     levels:
-      "off": "關閉"
-      minimal: "最小"
-      low: "低"
-      medium: "中"
-      high: "高"
-      xhigh: "極高"
-      max: "最大"
+      'off': 關閉
+      minimal: 最小
+      low: 低
+      medium: 中
+      high: 高
+      xhigh: 極高
+      max: 最大
   tool:
-    args: "參數"
-    result: "結果"
+    args: 參數
+    result: 結果
   mcpApp:
-    # MCP App HTML 抓取中顯示
-    loading: "載入互動檢視中…"
-    # 抓取失敗時重試按鈕文案
-    retry: "重試"
-    # 背景沒給具體 message 時的兜底文案
-    errorGeneric: "載入互動檢視失敗"
-    # 按錯誤碼分發的文案。背景原始 message 會作為詳情拼在後面
-    errorServerUnavailable: "該 MCP server 已不可用，請到設定裡重新啟用該服務。"
-    # $1 = 背景的原始錯誤描述
-    errorFetchFailed: "載入互動檢視失敗：$1"
+    loading: 載入互動檢視中…
+    retry: 重試
+    errorGeneric: 載入互動檢視失敗
+    errorServerUnavailable: 該 MCP server 已不可用，請到設定裡重新啟用該服務。
+    errorFetchFailed: 載入互動檢視失敗：$1
   fork:
-    # Header 徽章標籤，標記當前會話是另一會話的分支。
-    badgeLabel: "分叉自："
-    # 徽章裡返回連結的 tooltip。
-    backTooltip: "回到原對話"
+    badgeLabel: 分叉自：
+    backTooltip: 回到原對話
   message:
-    # $1 = 輸入 token 數（已格式化，如「1.2k」），$2 = 輸出 token 數（已格式化）
-    tokensInOut: "↑$1 ↓$2"
-    # 快取明細（無寫入）。$1 = 未快取、$2 = 快取命中（均已格式化）
-    tokensInBreakdownHit: "未快取 $1 · 快取 $2"
-    # 快取明細（含寫入）。$1 = 未快取、$2 = 快取命中、$3 = 寫入快取（均已格式化）
-    tokensInBreakdownHitWrite: "未快取 $1 · 快取 $2 · 寫快取 $3"
-    # 最新一輪 assistant 訊息左下角重試按鈕的 tooltip / aria-label
-    retry: "重試"
-    # 編輯已傳送 user 訊息時的提示（issue #44）
-    editHint: "將從這裡重新產生回覆"
-    # 存在並列版本的訊息上「‹ n/m ›」分支切換器的 tooltip
-    prevBranch: "上一個版本"
-    nextBranch: "下一個版本"
-    # 展開被折疊的超長 user 訊息氣泡
-    expandLong: "展開更多"
-    # 重新收合已展開的超長 user 訊息氣泡
-    collapseLong: "收合"
+    tokensInOut: ↑$1 ↓$2
+    tokensInBreakdownHit: 未快取 $1 · 快取 $2
+    tokensInBreakdownHitWrite: 未快取 $1 · 快取 $2 · 寫快取 $3
+    retry: 重試
+    editHint: 將從這裡重新產生回覆
+    prevBranch: 上一個版本
+    nextBranch: 下一個版本
+    expandLong: 展開更多
+    collapseLong: 收合
+    fork: 分叉
   edit:
-    # 點擊任意一條 user 訊息上的鉛筆後彈出的對話框標題
-    title: "編輯訊息"
-    # 標題下方的說明文字——告知使用者將從此處開始丟棄後續所有訊息並重跑 agent
-    description: "編輯此訊息並從此處重新執行 agent，此訊息之後的所有內容將被丟棄。"
-    # 提交按鈕文案
-    submit: "重新執行"
+    title: 編輯訊息
+    description: 編輯此訊息並從此處重新執行 agent，此訊息之後的所有內容將被丟棄。
+    submit: 重新執行
   compaction:
-    # 歷史壓縮分割條上的標籤
-    divider: "先前上下文已壓縮"
-    # 壓縮 LLM 調用進行中的底部狀態條
-    status: "正在壓縮上下文…"
-    # 玻璃膠囊分隔條上的展開 / 收合按鈕：點擊整條膠囊（或 chevron）檢視
-    # LLM 生成的摘要原文。
-    dividerExpand: "檢視摘要"
-    dividerCollapse: "收合摘要"
+    divider: 先前上下文已壓縮
+    status: 正在壓縮上下文…
+    dividerExpand: 檢視摘要
+    dividerCollapse: 收合摘要
   context:
-    # ContextUsagePill 的 aria-label 與 popover 標題——說明此處在展示什麼。
-    usage: "上下文用量"
-    # $1 = 整數百分比（已由 severity.ts round）。
-    percent: "$1%"
-    # $1 = token 數（已透過 formatCompactCount 套 K 後綴）。
-    headroom: "剩餘 $1"
-    # 檔位狀態文案，位於堆疊條下方。
-    plenty: "餘量充足"
-    tight: "已偏緊——建議壓縮"
-    nearFull: "上下文即將用盡"
-    # 拆分行標籤。
-    used: "已用"
-    cached: "已快取"
-    free: "空閒"
-    # 最後一行拆解——上下文視窗總容量。
-    total: "總計"
-    # popover 底部連結——與工具列按鈕同一動作。
-    compactNow: "立即壓縮"
+    usage: 上下文用量
+    percent: $1%
+    headroom: 剩餘 $1
+    plenty: 餘量充足
+    tight: 已偏緊——建議壓縮
+    nearFull: 上下文即將用盡
+    used: 已用
+    cached: 已快取
+    free: 空閒
+    total: 總計
+    compactNow: 立即壓縮
   session:
-    loading: "載入工作階段…"
-    modelError: "模型回傳錯誤"
-    # 400 上下文溢出恢復卡片。Agent 已內部自動重試 2 次都失敗；這張卡片
-    # 是第三次機會，由使用者決定。Retry 丟掉最早 50% 訊息後繼續；Stop
-    # 終止本輪，使用者可以新發一則訊息。
+    loading: 載入工作階段…
+    modelError: 模型回傳錯誤
     contextOverflow:
-      title: "上下文超出模型上限"
-      retry: "重試 (丟棄更早歷史)"
-      stop: "停止"
-    # 後台主動 80% 預檢 (Subtask 2) 想壓縮但找不到可用切點時彈的瞬時 toast——
-    # 通常是某條單一使用者訊息本身就超過 keepRecentTokens。Agent 不壓縮繼續
-    # 發請求，下一發很容易 400。這裡只做提醒：丟大段貼上或新開會話。
+      title: 上下文超出模型上限
+      retry: 重試 (丟棄更早歷史)
+      stop: 停止
     compactionSkipped:
-      # $1 = 已用上下文百分比
-      toast: "上下文過滿無法自動壓縮（已用 $1%）。可嘗試刪除大段貼上內容或開啟新會話。"
-    # CompactNowButton 的 tooltip 文案——按停用原因切換。
+      toast: 上下文過滿無法自動壓縮（已用 $1%）。可嘗試刪除大段貼上內容或開啟新會話。
     compactNow:
-      # 閒置：可點擊。
-      idle: "立即壓縮"
-      # agent 跑 / 正在壓縮：spinner 出現，按鈕停用。
-      busy: "正在壓縮…"
-      # messages.length < 2：單條 user 訊息無法形成切點。
-      empty: "至少需要 2 則訊息才能壓縮"
-      # 模型選擇器為空（還沒選 provider/model）。
-      noModel: "請先選擇模型"
-    # 使用者中途點停後，在 assistant 氣泡裡顯示的提示。
-    # 保持中性語氣——不是錯誤，只是沒跑完。
-    cancelled: "已取消"
-    # 背景端口還沒連上時（通常發生在 SW 剛唤醒 / 斷線重連期間）點發送/重試會看到這條
-    notConnected: "尚未連接到背景服務，請稍後再試"
-    # 自動重連多次失敗後提示。語氣是「還在試」，不保證能連上
-    reconnecting: "連線中斷，正在重試…"
-    welcomeReady: "有什麼我可以幫忙的？"
-    # 新工作階段空狀態裡的示例卡片。*Title 是卡片上的短標題，*Prompt 是點擊後
-    # 填入輸入框的完整文案（使用者可改後再發）。
-    exampleSummarizeTitle: "總結目前頁面"
-    exampleSummarizePrompt: "請閱讀目前頁面的內容，用簡潔的要點總結它的核心資訊。"
-    exampleTranslateTitle: "翻譯目前頁面"
-    exampleTranslatePrompt: "請把目前頁面的主要內容翻譯成繁體中文，保留原有結構。"
-    exampleExtractTitle: "擷取頁面要點"
-    exampleExtractPrompt: "請從目前頁面中擷取關鍵資訊（標題、要點、重要連結），整理成清單。"
-    exampleTabsTitle: "整理我的分頁"
-    exampleTabsPrompt: "請看看我目前開了哪些分頁，依主題幫我歸類，並指出可以關掉的重複頁面。"
-    scrollToBottom: "跳至最新訊息"
+      idle: 立即壓縮
+      busy: 正在壓縮…
+      empty: 至少需要 2 則訊息才能壓縮
+      noModel: 請先選擇模型
+    cancelled: 已取消
+    notConnected: 尚未連接到背景服務，請稍後再試
+    reconnecting: 連線中斷，正在重試…
+    welcomeReady: 有什麼我可以幫忙的？
+    exampleSummarizeTitle: 總結目前頁面
+    exampleSummarizePrompt: 請閱讀目前頁面的內容，用簡潔的要點總結它的核心資訊。
+    exampleTranslateTitle: 翻譯目前頁面
+    exampleTranslatePrompt: 請把目前頁面的主要內容翻譯成繁體中文，保留原有結構。
+    exampleExtractTitle: 擷取頁面要點
+    exampleExtractPrompt: 請從目前頁面中擷取關鍵資訊（標題、要點、重要連結），整理成清單。
+    exampleTabsTitle: 整理我的分頁
+    exampleTabsPrompt: 請看看我目前開了哪些分頁，依主題幫我歸類，並指出可以關掉的重複頁面。
+    scrollToBottom: 跳至最新訊息
+    forkFailed: 分叉失敗
+    forked: 已從「$1」分叉出新對話
   workerTeamRoster:
-    title: "Worker 團隊"
-    # $1 = 已配置數, $2 = 總角色數
-    configuredCount: "$1 / $2 已配置"
-    off: "關閉"
-    unconfigured: "尚未配置 worker 模型。請打開 設定 → 進階設定 → Worker 模型 進行配置。"
-    expand: "展開 worker 團隊"
-    collapse: "收合 worker 團隊"
+    title: Worker 團隊
+    configuredCount: $1 / $2 已配置
+    false: 關閉
+    unconfigured: 尚未配置 worker 模型。請打開 設定 → 進階設定 → Worker 模型 進行配置。
+    expand: 展開 worker 團隊
+    collapse: 收合 worker 團隊
     role:
-      content_writer: "內容"
-      frontend_coder: "編碼"
-      reviewer: "審查"
-      researcher: "研究"
+      content_writer: 內容
+      frontend_coder: 編碼
+      reviewer: 審查
+      researcher: 研究
   delegation:
-    # 主代理呼叫 delegate_task 時，聊天流裡渲染的 worker sub-agent 卡片。
-    # 狀態徽章顏色與 Sidebar Team Roster 共用 Badge 變體——僅本地化文案。
-    retryBadge: "重試"
-    openFile: "開啟檔案"
+    retryBadge: 重試
+    openFile: 開啟檔案
     section:
-      task: "任務"
-      model: "模型"
-      summary: "總結"
-      notes: "備註"
+      task: 任務
+      model: 模型
+      summary: 總結
+      notes: 備註
     status:
-      running: "執行中…"
-      success: "已完成"
-      partial: "部分完成"
-      failed: "失敗"
-      cancelled: "已取消"
-      timedOut: "逾時"
-    # Phase 2.3 角色動作 badge：status='running' 時掛在 header 的 outline
-    # badge，讓使用者一眼看出「這個 worker 現在在做什麼」（不只是「在跑」）。
-    # 與 status badge 區分開——狀態是「跑成/跑掛」，action 是「正在執行的動作」。
+      running: 執行中…
+      success: 已完成
+      partial: 部分完成
+      failed: 失敗
+      cancelled: 已取消
+      timedOut: 逾時
     action:
-      content_writer: "撰寫中"
-      frontend_coder: "編碼中"
-      reviewer: "審查中"
-      researcher: "研究中"
-    # Fail-Fast 路徑（worker-runner.ts 在 120s 後自動 abort）。提示使用者
-    # "去 Sidebar → Team Roster 換 model 再試"，而不是讓使用者對著停滯的
-    # 卡片乾等。兩種變體：withModel 帶 modelKey，generic 在 modelKey 缺失時用。
+      content_writer: 撰寫中
+      frontend_coder: 編碼中
+      reviewer: 審查中
+      researcher: 研究中
     timeoutHint:
-      withModel: "Worker $1 逾時 / API 出錯。打開 Sidebar Team Roster 換一個 model 再試。"
-      generic: "這個 worker 逾時 / API 出錯了。打開 Sidebar Team Roster 換一個 model 再試。"
-    # 失敗 / 逾時卡片的頁腳：讓使用者能判斷「是真慢還是 API 卡死」。$1 = 秒（≥1）。
-    duration: "$1 秒後失敗"
-    # Subtask 1.3 batch 容器：並行 delegate_task 呼叫的 header 計數。
-    # $1=總數，$2=成功數，$3=失敗數。內層 DelegationCardItem 各帶狀態/計時器。
+      withModel: Worker $1 逾時 / API 出錯。打開 Sidebar Team Roster 換一個 model 再試。
+      generic: 這個 worker 逾時 / API 出錯了。打開 Sidebar Team Roster 換一個 model 再試。
+    duration: $1 秒後失敗
     batch:
-      header: "批次 · $1 個任務 — $2 成功，$3 失敗"
-    # Subtask 2.3 審查員 audit 迷你表。header 標籤 + per-row 狀態圖示無障礙
-    # 標籤（screen reader 念「通過 / 警告 / 失敗」而非 lucide 圖示名）。具體
-    # 計數由 React 組件 inline 拼，i18n 只負責 label 文字。
+      header: 批次 · $1 個任務 — $2 成功，$3 失敗
     reviewer:
-      auditHeader: "審查清單"
-      statusPass: "通過"
-      statusWarn: "警告"
-      statusFail: "失敗"
-    # Phase 2 UI 反饋：執行中卡片內的即時微串流 box。
-    # screen reader 朗讀的 ARIA 標籤（LiveStreamBox 始終 aria-live="polite"）。
+      auditHeader: 審查清單
+      statusPass: 通過
+      statusWarn: 警告
+      statusFail: 失敗
     liveStream:
-      label: "即時輸出"
-      thinking: "思考中…"
-      writing: "撰寫中…"
-      generating: "正在產生檔案…"
-
-
-# ─── 供應商子元件（OAuth / API Key / 自訂）───
+      label: 即時輸出
+      thinking: 思考中…
+      writing: 撰寫中…
+      generating: 正在產生檔案…
 provider:
   section:
-    viaApiKey: "透過 API Key"
-    # $1 = 被折疊的 provider 數量
-    showMore: "展開更多（$1）"
-    showLess: "收合"
+    viaApiKey: 透過 API Key
+    showMore: 展開更多（$1）
+    showLess: 收合
   status:
-    connected: "已連線"
-    notConfigured: "尚未設定"
-    configured: "已設定"
-    unverified: "未驗證"
-    verifying: "驗證中"
-    failed: "失敗"
+    connected: 已連線
+    notConfigured: 尚未設定
+    configured: 已設定
+    unverified: 未驗證
+    verifying: 驗證中
+    failed: 失敗
   oauth:
-    signIn: "登入"
-    signOut: "登出"
-    loggedIn: "已登入"
-    notLoggedIn: "未登入"
-    authorizing: "授權中"
-    authFailed: "授權失敗"
-    enterCode: "請在瀏覽器中輸入代碼："
-    completeInBrowser: "請在彈出的瀏覽器視窗中完成授權…"
+    signIn: 登入
+    signOut: 登出
+    loggedIn: 已登入
+    notLoggedIn: 未登入
+    authorizing: 授權中
+    authFailed: 授權失敗
+    enterCode: 請在瀏覽器中輸入代碼：
+    completeInBrowser: 請在彈出的瀏覽器視窗中完成授權…
     descriptions:
-      githubCopilot: "使用 Copilot 訂閱存取 GPT/Claude"
-      openaiCodex: "使用 ChatGPT Plus/Pro 訂閱"
+      githubCopilot: 使用 Copilot 訂閱存取 GPT/Claude
+      openaiCodex: 使用 ChatGPT Plus/Pro 訂閱
   apiKey:
-    placeholder: "輸入 API Key"
-    disconnect: "中斷連線"
-    noModels: "無可用模型"
-    savedUnverified: "已儲存，但連線測試未通過"
+    placeholder: 輸入 API Key
+    disconnect: 中斷連線
+    noModels: 無可用模型
+    savedUnverified: 已儲存，但連線測試未通過
   summary:
-    # $1 = 認證方式（OAuth / API Key），$2 = 模型數量
-    modelsAvailable: "$1 · $2 個模型可用"
+    modelsAvailable: $1 · $2 個模型可用
   form:
-    name: "名稱"
-    namePlaceholder: "例如：My Ollama"
-    baseUrl: "Base URL"
-    baseUrlPlaceholder: "例如：http://localhost:11434/v1"
-    apiKeyOptional: "API Key（選填）"
-    apiKeyPlaceholder: "留空則不傳送驗證"
-    models: "模型清單"
-    autoFetch: "自動擷取"
-    showAll: "全部顯示"
-    hideAll: "全部隱藏"
-    enabled: "顯示"
-    hidden: "已隱藏"
-    reasoning: "推理"
-    image: "多模態"
-    # $1 = 模型 ID
-    modelSettingsFor: "$1 的模型設定"
-    # $1 = 模型 ID
-    removeModel: "移除 $1"
-    contextWindow: "上下文視窗"
-    contextWindowPlaceholder: "128000（預設）"
-    maxTokens: "最大輸出"
-    maxTokensPlaceholder: "0（不限）"
-    tokensHint: "留空即用預設 · 上下文視窗決定何時壓縮歷史，並非硬上限"
-    manualModelPlaceholder: "手動輸入 Model ID"
-    addManual: "手動新增模型"
-    advanced: "進階設定"
-    headers: "自訂 Headers"
-    authOverrideHint: "同時填了 API Key 與 Authorization 標頭，會優先使用 API Key。若要用該標頭驗證，請清空上面的 API Key。"
-    addCustom: "新增自訂供應商"
-    fetchFailed: "無法擷取模型清單，請手動新增"
-# ─── 工具執行時標籤（在 ToolCard 中顯示）───
+    name: 名稱
+    namePlaceholder: 例如：My Ollama
+    baseUrl: Base URL
+    baseUrlPlaceholder: 例如：http://localhost:11434/v1
+    apiKeyOptional: API Key（選填）
+    apiKeyPlaceholder: 留空則不傳送驗證
+    models: 模型清單
+    autoFetch: 自動擷取
+    showAll: 全部顯示
+    hideAll: 全部隱藏
+    enabled: 顯示
+    hidden: 已隱藏
+    reasoning: 推理
+    image: 多模態
+    modelSettingsFor: $1 的模型設定
+    removeModel: 移除 $1
+    contextWindow: 上下文視窗
+    contextWindowPlaceholder: 128000（預設）
+    maxTokens: 最大輸出
+    maxTokensPlaceholder: 0（不限）
+    tokensHint: 留空即用預設 · 上下文視窗決定何時壓縮歷史，並非硬上限
+    manualModelPlaceholder: 手動輸入 Model ID
+    addManual: 手動新增模型
+    advanced: 進階設定
+    headers: 自訂 Headers
+    authOverrideHint: 同時填了 API Key 與 Authorization 標頭，會優先使用 API Key。若要用該標頭驗證，請清空上面的 API Key。
+    addCustom: 新增自訂供應商
+    fetchFailed: 無法擷取模型清單，請手動新增
 tools:
-  # $1 = mode（及選填 selector 後綴）
-  readPage: "正在閱讀頁面內容 ($1)"
-  executeJs: "正在執行腳本"
-  screenshot: "正在擷取頁面螢幕截圖"
-  askUser: "等待使用者回覆"
+  readPage: 正在閱讀頁面內容 ($1)
+  executeJs: 正在執行腳本
+  screenshot: 正在擷取頁面螢幕截圖
+  askUser: 等待使用者回覆
   pdf:
-    info: "正在讀取 PDF 資訊"
-    # $1 = 頁碼範圍（如 "1-10"）或字面量 "all pages"
-    read: "正在擷取 PDF 文字 ($1)"
-    # $1 = 搜尋關鍵字（截斷後）
-    search: "正在 PDF 內搜尋 \"$1\""
-    # $1 = action 名稱
-    unknown: "pdf: $1"
-  # $1 = 技能名稱
-  runSkill: "正在執行技能腳本 $1"
-  # $1 = RAG 知識庫名稱
-  ragInspect: "正在查看 RAG 知識庫 $1"
-  # $1 = RAG 知識庫名稱，$2 = 查詢關鍵詞
-  ragSearch: "正在 RAG 知識庫 $1 中檢索 $2"
-  # $1 = MCP 伺服器 slug（展示形式），$2 = 遠端工具名
-  mcpCall: "$1 · $2"
+    info: 正在讀取 PDF 資訊
+    read: 正在擷取 PDF 文字 ($1)
+    search: 正在 PDF 內搜尋 "$1"
+    unknown: 'pdf: $1'
+  runSkill: 正在執行技能腳本 $1
+  ragInspect: 正在查看 RAG 知識庫 $1
+  ragSearch: 正在 RAG 知識庫 $1 中檢索 $2
+  mcpCall: $1 · $2
   fs:
-    # $1 = 檔案路徑
-    createFile: "正在建立檔案 $1"
-    # $1 = 檔案路徑
-    editFile: "正在編輯檔案 $1"
-    # $1 = 資料夾路徑
-    mkdir: "正在建立資料夾 $1"
-    # $1 = 原路徑
-    rename: "正在重新命名 $1"
-    # $1 = 路徑
-    delete: "正在刪除 $1"
-    # $1 = 檔案路徑
-    readFile: "正在讀取檔案 $1"
-    # $1 = 資料夾路徑
-    list: "正在列出資料夾 $1"
-    # $1 = 搜尋樣式
-    searchFiles: "正在搜尋檔案 \"$1\""
-    # $1 = 搜尋樣式
-    searchContent: "正在搜尋檔案內容 \"$1\""
-    # $1 = 目標路徑
-    saveUrl: "正在儲存 URL 到 $1"
+    createFile: 正在建立檔案 $1
+    editFile: 正在編輯檔案 $1
+    mkdir: 正在建立資料夾 $1
+    rename: 正在重新命名 $1
+    delete: 正在刪除 $1
+    readFile: 正在讀取檔案 $1
+    list: 正在列出資料夾 $1
+    searchFiles: 正在搜尋檔案 "$1"
+    searchContent: 正在搜尋檔案內容 "$1"
+    saveUrl: 正在儲存 URL 到 $1
   memory:
-    save: "儲存記憶"
-    recall: "調取記憶"
-    forget: "刪除記憶"
+    save: 儲存記憶
+    recall: 調取記憶
+    forget: 刪除記憶
   chromeApi:
-    help: "正在查詢 Chrome API 文件"
-    # $1 = namespace，$2 = method
-    call: "正在呼叫 chrome.$1.$2"
+    help: 正在查詢 Chrome API 文件
+    call: 正在呼叫 chrome.$1.$2
   interact:
-    # $1 = 目標後綴（含前導空格）或為空
-    click: "正在點擊$1"
-    dblclick: "正在雙擊$1"
-    rightclick: "正在右鍵點擊$1"
-    hover: "正在懸停$1"
-    focus: "正在聚焦$1"
-    type: "正在輸入文字$1"
-    clear: "正在清除輸入欄位$1"
-    select: "正在選擇選項$1"
-    scroll: "正在捲動頁面"
-    # $1 = 按鍵名稱
-    keypress: "正在按下按鍵 $1"
-    # $1 = 目標後綴（含前導空格）或為空
-    wait: "正在等待元素出現$1"
-    waitHidden: "正在等待元素消失$1"
-    waitNavigation: "正在等待頁面載入"
-    # $1 = 步驟數
-    sequence: "正在執行操作序列 ($1 步)"
-    # $1 = action 名稱
-    unknown: "interact: $1"
+    click: 正在點擊$1
+    dblclick: 正在雙擊$1
+    rightclick: 正在右鍵點擊$1
+    hover: 正在懸停$1
+    focus: 正在聚焦$1
+    type: 正在輸入文字$1
+    clear: 正在清除輸入欄位$1
+    select: 正在選擇選項$1
+    scroll: 正在捲動頁面
+    keypress: 正在按下按鍵 $1
+    wait: 正在等待元素出現$1
+    waitHidden: 正在等待元素消失$1
+    waitNavigation: 正在等待頁面載入
+    sequence: 正在執行操作序列 ($1 步)
+    unknown: 'interact: $1'
   inspect:
-    # $1 = selector
-    selector: "正在檢查 $1"
-    # $1 = 搜尋文字
-    text: "正在依文字檢查 \"$1\""
-    page: "正在檢查頁面"
+    selector: 正在檢查 $1
+    text: 正在依文字檢查 "$1"
+    page: 正在檢查頁面
   tab:
-    open: "正在開啟新分頁"
-    # $1 = 分頁 id
-    close: "正在關閉分頁 $1"
-    # $1 = 分頁 id
-    switch: "正在切換分頁 $1"
-    reload: "正在重新整理頁面"
-    listFrames: "正在列出頁面 frames"
-    # $1 = action 名稱
-    unknown: "tab: $1"
-
-# ─── 對話框 ───
+    open: 正在開啟新分頁
+    close: 正在關閉分頁 $1
+    switch: 正在切換分頁 $1
+    reload: 正在重新整理頁面
+    listFrames: 正在列出頁面 frames
+    unknown: 'tab: $1'
+  webSearch: 正在進行網路搜尋「$1」
 dialogs:
   imagePreview:
-    title: "圖片預覽"
-    alt: "預覽"
+    title: 圖片預覽
+    alt: 預覽
   updateNotice:
-    title: "發現新版本"
-    # $1 = latest version, $2 = current version
-    description: "Cebian v$1 已發佈，目前版本 v$2。"
-    updateNow: "立即更新"
-    skipVersion: "略過此版本"
-
-# ─── VFS 瀏覽入口 ───
+    title: 發現新版本
+    description: Cebian v$1 已發佈，目前版本 v$2。
+    updateNow: 立即更新
+    skipVersion: 略過此版本
 vfs:
-  backToRoot: "回到根目錄"
-  zipping: "打包中…"
-  # $1 = 行數
-  lines: "$1 行"
-  # $1 = 格式化後的檔案大小
-  binaryFile: "[二進位檔案 — $1]"
-  # $1 = 格式化後的檔案大小
-  tooLargeToPreview: "檔案太大，無法預覽（$1）。請改用下載。"
-  # $1 = 路徑，$2 = 格式化後的大小，$3 = 格式化後的上限
-  inlineTooLarge: "$1（$2）—檔案過大，不在對話中內聯顯示（上限 $3）"
-  # $1 = MIME 類型
-  inlineUnsupportedMime: "檔案類型不支援內聯預覽：$1"
-  # $1 = 路徑，$2 = 錯誤文字
-  inlineLoadFailed: "$1 — $2"
-  preview: "預覽"
-  viewSource: "檢視原始碼"
-  source: "原始碼"
-  defaultOpen: "預設開啟方式"
-  openSmart: "智慧"
-  unknownFile: "未知檔案類型（$1）。請下載後安全開啟。"
-  previousPage: "上一頁"
-  nextPage: "下一頁"
-  pageNumber: "頁碼"
-  zoomOut: "縮小"
-  zoomIn: "放大"
-  fitWidth: "符合寬度"
-  pdfPasswordRequired: "此 PDF 需要密碼。"
-  pdfWrongPassword: "密碼錯誤，請重試。"
-  pdfLoadFailed: "PDF 預覽失敗：$1"
-  viewMode: "檢視模式"
-  location: "目前位置"
-  # 麵包屑裡代替原始路徑顯示的根目錄錨點
+  backToRoot: 回到根目錄
+  zipping: 打包中…
+  lines: $1 行
+  binaryFile: '[二進位檔案 — $1]'
+  tooLargeToPreview: 檔案太大，無法預覽（$1）。請改用下載。
+  inlineTooLarge: $1（$2）—檔案過大，不在對話中內聯顯示（上限 $3）
+  inlineUnsupportedMime: 檔案類型不支援內聯預覽：$1
+  inlineLoadFailed: $1 — $2
+  preview: 預覽
+  viewSource: 檢視原始碼
+  source: 原始碼
+  defaultOpen: 預設開啟方式
+  openSmart: 智慧
+  unknownFile: 未知檔案類型（$1）。請下載後安全開啟。
+  previousPage: 上一頁
+  nextPage: 下一頁
+  pageNumber: 頁碼
+  zoomOut: 縮小
+  zoomIn: 放大
+  fitWidth: 符合寬度
+  pdfPasswordRequired: 此 PDF 需要密碼。
+  pdfWrongPassword: 密碼錯誤，請重試。
+  pdfLoadFailed: PDF 預覽失敗：$1
+  viewMode: 檢視模式
+  location: 目前位置
   roots:
-    workspaces: "工作區"
-    cebian: "Cebian"
-  copyPath: "複製路徑"
-  pathCopied: "已複製路徑"
-  openInCanvas: "在 Canvas 中開啟"
-  openInCanvasNoSession: "在 Canvas 中開啟（檔案不在任何工作階段工作區內）"
-  openedInCanvas: "已在 Canvas 中開啟"
-  showCollapsed: "顯示收合的層級"
-  sandboxPreview: "沙箱預覽"
-  sandboxPreviewHint: "在獨立的沙箱頁中渲染。腳本可以執行，但無法存取擴充功能 API 或 Cebian 儲存的其他資料。"
-  staticPreview: "靜態預覽"
-  staticPreviewHint: "目前的瀏覽器無法在預覽中執行腳本，頁面以無 JavaScript 的方式渲染。"
-  # $1 = 目前頁，$2 = 總頁數
-  pageIndicator: "第 $1 / $2 頁"
-  # $1 = 總頁數
+    workspaces: 工作區
+    cebian: Cebian
+  copyPath: 複製路徑
+  pathCopied: 已複製路徑
+  openInCanvas: 在 Canvas 中開啟
+  openInCanvasNoSession: 在 Canvas 中開啟（檔案不在任何工作階段工作區內）
+  openedInCanvas: 已在 Canvas 中開啟
+  showCollapsed: 顯示收合的層級
+  sandboxPreview: 沙箱預覽
+  sandboxPreviewHint: 在獨立的沙箱頁中渲染。腳本可以執行，但無法存取擴充功能 API 或 Cebian 儲存的其他資料。
+  staticPreview: 靜態預覽
+  staticPreviewHint: 目前的瀏覽器無法在預覽中執行腳本，頁面以無 JavaScript 的方式渲染。
+  pageIndicator: 第 $1 / $2 頁
   pageCount:
-    0: "0 頁"
-    1: "1 頁"
-    n: "$1 頁"
-  # $1 = 資料夾內的項目數
+    0: 0 頁
+    1: 1 頁
+    n: $1 頁
   itemCount:
-    0: "空"
-    1: "1 個項目"
-    n: "$1 個項目"  # $1 = 路徑
-  pathNotFound: "路徑不存在：$1"
-  unknownError: "未知錯誤"
-  # 列表上方的入口按鈕：把每行切到多選模式
-  selectAll: "全選"
-  # 工作區目錄還在、但對應對話已被刪除。$1 = 短 id
-  # 工作區目錄對應的對話已被刪除：目錄仍在磁碟，但已無法從任何對話存取。
-  # 直接顯示完整目錄名作為標題，不加任何前綴——僅靠灰字 + tooltip 表達狀態。
-  unknownSessionTooltip: "已刪除對話留下的工作區目錄，可直接刪除。"
-  untitledSession: "未命名對話"
-  # $1 = 格式化後的日期
-  workspaceCreated: "建立於 $1"
-  # 目錄列表上方的工具列按鈕
+    0: 空
+    1: 1 個項目
+    n: $1 個項目
+  pathNotFound: 路徑不存在：$1
+  unknownError: 未知錯誤
+  selectAll: 全選
+  unknownSessionTooltip: 已刪除對話留下的工作區目錄，可直接刪除。
+  untitledSession: 未命名對話
+  workspaceCreated: 建立於 $1
   action:
-    newFile: "新增檔案"
-    newFolder: "新增資料夾"
-    paste: "貼到這裡"
-    # $1 = 動作（「複製」/「剪下」），$2 = 項目名稱 —— 用於工具列上 paste 按鈕的副標題，提示剪貼簿裡是什麼
-    pasteHint: "$1 → $2"
-    # 行級 kebab 選單（DirView 行右鍵 / MoreVertical 觸發）
-    copyName: "複製名稱"
-    copyPath: "複製路徑"
-    copy: "複製"
-    cut: "剪下"
-  # 內聯新增/重新命名輸入框的佔位文字。$1 = 類型（"檔案" 或 "資料夾"）
+    newFile: 新增檔案
+    newFolder: 新增資料夾
+    paste: 貼到這裡
+    pasteHint: $1 → $2
+    copyName: 複製名稱
+    copyPath: 複製路徑
+    copy: 複製
+    cut: 剪下
   prompt:
-    newName: "輸入$1名稱"
-    # $1 = 當前名稱
-    rename: "重新命名 $1"
-  # 內聯校驗 / 狀態提示，toast 形式
+    newName: 輸入$1名稱
+    rename: 重新命名 $1
   error:
-    # 名稱為空、含 '/' 或 '..'
-    invalidName: "名稱無效——不可包含斜線或空段"
-    # 試圖刪除結構根目錄（'/'、'/workspaces'、~/.cebian/skills|prompts）。
-    cannotDeleteProtected: "此目錄由 Cebian 保留，無法刪除"
-  # 刪除等危險操作前的確認對話框
+    invalidName: 名稱無效——不可包含斜線或空段
+    cannotDeleteProtected: 此目錄由 Cebian 保留，無法刪除
   confirm:
-    # $1 = 檔案名
-    deleteFile: "刪除「$1」？此操作無法復原。"
-    # $1 = 資料夾名
-    deleteFolder: "刪除「$1」及其所有內容？此操作無法復原。"
-  # 操作成功後的 toast 提示
+    deleteFile: 刪除「$1」？此操作無法復原。
+    deleteFolder: 刪除「$1」及其所有內容？此操作無法復原。
   toast:
-    # $1 = 類型（"檔案" / "資料夾"），$2 = 名稱
-    created: "$1「$2」已建立"
-    # $1 = 新名稱
-    renamed: "已重新命名為「$1」"
-    # $1 = 已刪除項目名
-    deleted: "「$1」已刪除"
-    # $1 = 已貼上項目名
-    pasted: "「$1」已貼上"
-    # $1 = 名稱，$2 = 原因（如「名稱已存在」）
-    createFailed: "建立失敗：$1 — $2"
-    renameFailed: "重新命名失敗：$1 — $2"
-    deleteFailed: "刪除失敗：$1 — $2"
-    # $1 = 來源名，$2 = 原因
-    pasteFailed: "貼上失敗：$1 — $2"
-    # $1 = 來源名 —— 貼上目標是來源本身或其子目錄（僅對 cut/移動有意義；否則會空操作或把來源改壞）
-    pasteSelf: "無法將「$1」貼到本身內"
-
-# ─── 獨立授權頁（entrypoints/user-permission）───
+    created: $1「$2」已建立
+    renamed: 已重新命名為「$1」
+    deleted: 「$1」已刪除
+    pasted: 「$1」已貼上
+    createFailed: 建立失敗：$1 — $2
+    renameFailed: 重新命名失敗：$1 — $2
+    deleteFailed: 刪除失敗：$1 — $2
+    pasteFailed: 貼上失敗：$1 — $2
+    pasteSelf: 無法將「$1」貼到本身內
+  unknownSession: 未知對話 · $1
 permission:
-  retry: "重新請求"
-  unknownType: "不支援的權限請求。"
+  retry: 重新請求
+  unknownType: 不支援的權限請求。
   microphone:
-    title: "請求使用麥克風"
-    description: "語音輸入需要麥克風權限。點擊下面的按鈕，然後在瀏覽器彈窗中選擇「允許」。"
-    allow: "允許麥克風"
-    requesting: "等待你的選擇…"
-    granted: "已取得麥克風權限，此分頁將自動關閉。"
-    dismissed: "請求被關閉了，可以重新嘗試。"
-    denied: "麥克風權限被拒絕了。"
-    deniedHint: "要使用語音輸入，請在剛開啟的 Chrome 設定頁裡允許 Cebian 使用麥克風。"
-    deviceError: "找不到麥克風，或無法存取。請檢查裝置後重試。"
-
-# ─── 錯誤（toast、抛出的錯誤訊息）───
+    title: 請求使用麥克風
+    description: 語音輸入需要麥克風權限。點擊下面的按鈕，然後在瀏覽器彈窗中選擇「允許」。
+    allow: 允許麥克風
+    requesting: 等待你的選擇…
+    granted: 已取得麥克風權限，此分頁將自動關閉。
+    dismissed: 請求被關閉了，可以重新嘗試。
+    denied: 麥克風權限被拒絕了。
+    deniedHint: 要使用語音輸入，請在剛開啟的 Chrome 設定頁裡允許 Cebian 使用麥克風。
+    deviceError: 找不到麥克風，或無法存取。請檢查裝置後重試。
 errors:
-  pdfEncrypted: "這個 PDF 有密碼保護，無法預覽。請改用下載。"
-  pdfRenderFailed: "這個 PDF 無法渲染。請改用下載。"
+  pdfEncrypted: 這個 PDF 有密碼保護，無法預覽。請改用下載。
+  pdfRenderFailed: 這個 PDF 無法渲染。請改用下載。
   pagePattern:
-    invalid: "頁面比對規則格式錯誤。"
-    duplicate: "該規則已存在。"
-  modelUnavailable: "所選模型已無法使用，請重新選擇。"
-  pageActionGone: "找不到該操作。"
-  pageActionSaveFailed: "儲存失敗，請重試。"
+    invalid: 頁面比對規則格式錯誤。
+    duplicate: 該規則已存在。
+  modelUnavailable: 所選模型已無法使用，請重新選擇。
+  pageActionGone: 找不到該操作。
+  pageActionSaveFailed: 儲存失敗，請重試。
   oauth:
-    cancelled: "已取消"
-    timeout: "授權逾時"
-    noCode: "未收到授權碼"
-    stateMismatch: "State 不符"
-    # $1 = HTTP 狀態碼
-    tokenExchangeFailed: "Token 交換失敗：$1"
-    missingTokenFields: "Token 回應缺少必要欄位"
-    missingRefreshToken: "未收到 refresh token"
-    missingRefreshTokenLocal: "缺少 refresh token"
-    # $1 = provider id
-    unknownProvider: "未知的 OAuth 供應商：$1"
+    cancelled: 已取消
+    timeout: 授權逾時
+    noCode: 未收到授權碼
+    stateMismatch: State 不符
+    tokenExchangeFailed: Token 交換失敗：$1
+    missingTokenFields: Token 回應缺少必要欄位
+    missingRefreshToken: 未收到 refresh token
+    missingRefreshTokenLocal: 缺少 refresh token
+    unknownProvider: 未知的 OAuth 供應商：$1
   network:
-    invalidUrl: "URL 格式無效"
-    unsupportedScheme: "僅支援 http/https 協定"
-    # $1 = HTTP 狀態碼
-    requestFailed: "請求失敗：$1"
+    invalidUrl: URL 格式無效
+    unsupportedScheme: 僅支援 http/https 協定
+    requestFailed: 請求失敗：$1
   mobile:
-    toggleFailed: "行動裝置模式切換失敗"
+    toggleFailed: 行動裝置模式切換失敗
   skillPackage:
-    invalid: "無效的技能包。"
-    tooLarge: "技能包過大。"
-    tooManyFiles: "技能包包含過多檔案。"
-    missingEntry: "技能包缺少 SKILL.md。"
-    # $1 = 路徑
-    unsafePath: "技能包中存在不安全的路徑：$1"
-    # $1 = 權限名稱
-    unsupportedPermission: "申請了不支援的權限：$1"
-    # $1 = 技能名稱
-    invalidName: "無效的技能名稱：$1"
-    # $1 = 技能名稱
-    reservedName: "此技能名稱為系統保留：$1"
-    parseFrontmatter: "無法解析 SKILL.md 的 frontmatter。"
-
-
-# ─── Canvas 面板（側邊欄 chat 檢視中的即時 HTML 預覽）───
+    invalid: 無效的技能包。
+    tooLarge: 技能包過大。
+    tooManyFiles: 技能包包含過多檔案。
+    missingEntry: 技能包缺少 SKILL.md。
+    unsafePath: 技能包中存在不安全的路徑：$1
+    unsupportedPermission: 申請了不支援的權限：$1
+    invalidName: 無效的技能名稱：$1
+    reservedName: 此技能名稱為系統保留：$1
+    parseFrontmatter: 無法解析 SKILL.md 的 frontmatter。
+  searchEngineGone: 找不到該搜尋引擎。
+  searchEngineSaveFailed: 儲存搜尋引擎設定失敗，請重試。
+  searchEngineScriptInvalid: 腳本必須定義一個名為 extract 的函式。
+  searchEngineUrlInvalid: 請輸入以 http:// 或 https:// 開頭的完整搜尋網址。
+  searchEngineUrlMissingPlaceholder: 搜尋網址必須包含 $1，用於填入搜尋詞。
 canvas:
   header:
-    # Header Eye/EyeOff 切換按鈕的 tooltip + aria-label（Header 同一處用）。
-    openAria: "開啟畫布"
-    closeAria: "關閉畫布"
+    openAria: 開啟畫布
+    closeAria: 關閉畫布
   pane:
-    # Pane 頂部 title 回落文案（無檔案時顯示「畫布」，有檔案時顯示 path）。
-    titleFallback: "畫布"
-    # Pane 自身 close 按鈕（右上角 EyeOff）的 tooltip + aria-label。
-    closeAria: "關閉畫布"
-    # 點選元素模式 toggle（tooltip 與 aria-label 同一處用）：inspectOn 為目前
-    # 關閉、點擊開啟的文案；inspectOff 為目前開啟、點擊關閉的文案。
-    inspectOn: "點選元素"
-    inspectOff: "停止點選"
+    titleFallback: 畫布
+    closeAria: 關閉畫布
+    inspectOn: 點選元素
+    inspectOff: 停止點選
     empty:
-      # Pane 處於 empty state 時（panel 開著但 BG 沒開檔案）的兩行文案。
-      title: "畫布中沒有開啟的檔案。"
-      hint: "請讓 agent 呼叫 canvas_open 開啟一個檔案。"
+      title: 畫布中沒有開啟的檔案。
+      hint: 請讓 agent 呼叫 canvas_open 開啟一個檔案。

@@ -7,6 +7,7 @@ import {
   formatBytes,
   oneLine,
   truncate,
+  omitUndefinedDeep,
 } from '@/lib/utils';
 
 describe('asString', () => {
@@ -102,5 +103,61 @@ describe('truncate', () => {
   it('不折叠空白——那是 oneLine 的事，组合使用', () => {
     expect(truncate('a  b', 4)).toBe('a  b');
     expect(truncate(oneLine('a  b'), 4)).toBe('a b');
+  });
+});
+
+describe('omitUndefinedDeep', () => {
+  const toolResult = {
+    role: 'toolResult',
+    toolCallId: 't',
+    toolName: 'mcp__edgeone__deploy-html',
+    content: [{ type: 'text', text: 'deployed', annotations: undefined }],
+    details: {
+      server: { id: 'srv', name: 'edgeone' },
+      tool: 'deploy-html',
+      structured: undefined,
+      nested: [{ keep: 1, drop: undefined }],
+    },
+    isError: false,
+    timestamp: 1,
+  };
+
+  it('递归移除 details / content 里的 undefined 字段（issue #74），不改动入参', () => {
+    const out = omitUndefinedDeep(toolResult);
+    expect(Object.hasOwn(out.details, 'structured')).toBe(false);
+    expect(Object.hasOwn(out.details.nested[0], 'drop')).toBe(false);
+    expect(out.details.nested[0].keep).toBe(1);
+    expect(Object.hasOwn(out.content[0], 'annotations')).toBe(false);
+    expect(Object.hasOwn(toolResult.details, 'structured')).toBe(true);
+    expect(Object.hasOwn(toolResult.content[0], 'annotations')).toBe(true);
+  });
+
+  it('对所有角色生效：compactionSummary 的 retainedTail 里的 toolResult 同样被处理', () => {
+    const summary = { role: 'compactionSummary', summary: 's', tokensBefore: 1, timestamp: 1, retainedTail: [toolResult] };
+    const out = omitUndefinedDeep(summary);
+    expect(Object.hasOwn(out.retainedTail[0].details, 'structured')).toBe(false);
+  });
+
+  it('无需矫正的子树返回同一引用；共享（非环）子树不被误判', () => {
+    const shared = { a: 1 };
+    const value = { x: shared, y: shared, z: [shared] };
+    expect(omitUndefinedDeep(value)).toBe(value);
+    const mixed = { x: shared, bad: { drop: undefined } };
+    const out = omitUndefinedDeep(mixed);
+    expect(out).not.toBe(mixed);
+    expect(out.x).toBe(shared);
+  });
+
+  it('数组元素里的 undefined 不删（避免挤位），交给写入方的 JSON 兜底', () => {
+    const value = { list: [1, undefined, 3] };
+    expect(omitUndefinedDeep(value)).toBe(value);
+  });
+
+  it('循环引用原样返回而不栈溢出', () => {
+    const cyclic: Record<string, unknown> = { drop: undefined };
+    cyclic.self = cyclic;
+    const out = omitUndefinedDeep(cyclic);
+    expect(Object.hasOwn(out, 'drop')).toBe(false);
+    expect(out.self).toBe(cyclic);
   });
 });

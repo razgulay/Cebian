@@ -8,6 +8,7 @@ import { debugLog, withSession } from '@/lib/debug/log';
 // 划词动作配置与页面范围的形状归属其概念（lib/page-actions），这里只声明持久化位置。
 import type { PageActionsConfig } from '@/lib/page-actions/types';
 import { resolvePageScope, type PageScope } from '@/lib/page-actions/match';
+import type { SearchEnginesConfig } from '@/lib/search/types';
 
 // ─── Debug-log chokepoint ───
 
@@ -254,6 +255,31 @@ export type WorkerTimeoutMap = Partial<Record<WorkerRole, number>>;
 export const workerRoleTimeouts = defineLoggedItem<WorkerTimeoutMap>(
   'local:workerRoleTimeouts',
   { fallback: {} },
+);
+
+/** 自动生成会话标题：首轮结束后用一次短补全把「首句截断」换成简短标题。
+ *  `model: null` = 跟随对话主模型（默认）。 */
+export interface AutoTitleSettings {
+  /** 总开关。默认开。 */
+  enabled: boolean;
+  /** 生成用模型；null 跟随对话主模型。解析失败时后台静默回退主模型。 */
+  model: ModelIdentity | null;
+}
+
+const DEFAULT_AUTO_TITLE: AutoTitleSettings = { enabled: true, model: null };
+
+/** 取规范的自动标题设置：旧值缺字段时补默认（WXT fallback 只在 key 整体缺失时生效，
+ *  同 `resolveOrganizeSettings` 的理由）。所有读取自动标题设置的地方都走这里。 */
+export function resolveAutoTitleSettings(s: Partial<AutoTitleSettings> | null | undefined): AutoTitleSettings {
+  return {
+    enabled: s?.enabled ?? DEFAULT_AUTO_TITLE.enabled,
+    model: s?.model ?? DEFAULT_AUTO_TITLE.model,
+  };
+}
+
+export const autoTitleSettings = storage.defineItem<AutoTitleSettings>(
+  'local:autoTitleSettings',
+  { fallback: { ...DEFAULT_AUTO_TITLE } },
 );
 
 export const customProviders = defineLoggedItem<CustomProviderConfig[]>(
@@ -666,6 +692,31 @@ export function resolvePageActionsConfig(
 export const pageActionsConfig = storage.defineItem<PageActionsConfig>(
   'local:pageActionsConfig',
   { fallback: { ...DEFAULT_PAGE_ACTIONS_CONFIG } },
+);
+
+/**
+ * 联网搜索引擎配置：内置引擎的覆盖层（启停 / 改地址 / 改抽取脚本 / 改适用场景）、
+ * 用户自定义引擎与回退顺序。形状归属其概念（lib/search），这里只声明持久化位置。
+ */
+export const DEFAULT_SEARCH_ENGINES_CONFIG: SearchEnginesConfig = {
+  builtin: {},
+  custom: [],
+};
+
+/** 取规范的搜索引擎配置：补齐缺失字段并复制集合，读配置的唯一入口。 */
+export function resolveSearchEnginesConfig(
+  c: Partial<SearchEnginesConfig> | undefined,
+): SearchEnginesConfig {
+  return {
+    builtin: { ...(c?.builtin ?? {}) },
+    custom: [...(c?.custom ?? [])],
+    ...(c?.order ? { order: [...c.order] } : {}),
+  };
+}
+
+export const searchEnginesConfig = storage.defineItem<SearchEnginesConfig>(
+  'local:searchEnginesConfig',
+  { fallback: { ...DEFAULT_SEARCH_ENGINES_CONFIG } },
 );
 
 /**

@@ -82,3 +82,6 @@ export const TOOL_SCHEDULER_RUN_NOW = 'scheduler_run_now' as const;
  *  system-prompt augmentation is gated on the same flag. The two must
  *  agree so the LLM never hallucinates a call to a non-existent tool. */
 export const TOOL_RAG_SEARCH = 'rag_search' as const;
+/** 联网搜索：按用户配置的引擎顺序在后台标签页里搜索并返回结构化结果 */
+export const TOOL_WEB_SEARCH = 'web_search' as const;
+

@@ -9,10 +9,12 @@ import type { WxtStorageItem } from 'wxt/utils/storage';
 import type { RestoreStrategy } from './types';
 import { isEmptyValue } from './is-empty-value';
 import type { PageActionsConfig } from '@/lib/page-actions/types';
+import type { SearchEnginesConfig } from '@/lib/search/types';
 import {
   lastSelectedModel,
   compactionModel,
   domSubAgentModel,
+  autoTitleSettings,
   customProviders,
   userInstructions,
   themePreference,
@@ -33,6 +35,7 @@ import {
   memoryOrganizeState,
   pageInteractionSettings,
   pageActionsConfig,
+  searchEnginesConfig,
   floatingBallPosition,
   pendingSidePanelHandoff,
   expandPromptsInline,
@@ -56,12 +59,12 @@ import {
   type CustomProviderConfig,
   type WorkerModelMap,
   type WorkerTimeoutMap,
-  type TelegramGatewayConfig,
 } from '@/lib/persistence/storage';
 import { ragSettings, ragCollections } from '@/lib/rag/settings';
 import type { RagSettings, RagCollection } from '@/lib/rag/types';
-import type { ChannelSecret } from '@/lib/scheduler/notify-channels/types';
-import type { TelegramGatewaySecret } from '@/lib/telegram-gateway/types';
+import type { ChannelSecret, ChannelConfig } from '@/lib/scheduler/notify-channels/types';
+import type { TelegramGatewaySecret, TelegramGatewayConfig } from '@/lib/telegram-gateway/types';
+import type { ScheduledTask } from '@/lib/scheduler/types';
 
 /**
  * 一个 storage item 在备份中的归属：
@@ -427,6 +430,7 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
       ...local,
     }),
   }),
+  entry({ item: autoTitleSettings, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',
@@ -510,6 +514,21 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
       };
     },
   }),
+  // 搜索引擎配置（内置覆盖层 + 自定义引擎 + 顺序；地址模板与抽取脚本均非密钥）。
+  // 合并语义与 pageActionsConfig 相同：自定义按 id 补缺、内置覆盖层逐 id 补缺、
+  // order 本地优先、本地缺失才采用备份的。
+  entry({
+    item: searchEnginesConfig,
+    storageClass: 'settings',
+    fillMissing: (local: SearchEnginesConfig, backup: SearchEnginesConfig) => {
+      const order = local.order ?? backup.order;
+      return {
+        builtin: { ...backup.builtin, ...local.builtin },
+        custom: fillMissingById(local.custom ?? [], backup.custom ?? [], (e) => e.id),
+        ...(order ? { order: [...order] } : {}),
+      };
+    },
+  }),
   // 悬浮球位置（设备本地 UI 状态）。
   entry({ item: floatingBallPosition, storageClass: 'exclude' }),
   // 「在侧边栏继续」的一次性交接标记（派生，备份无意义）。
@@ -530,13 +549,26 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: composerPinnedContexts, storageClass: 'settings' }),
   // Scheduler tasks（用户在 Settings → Scheduler 里 CRUD 的定时任务；非密钥，
   // 走 settings 分类以便备份/恢复时一起同步）。
-  entry({ item: scheduledTasks, storageClass: 'settings' }),
+  entry({
+    item: scheduledTasks,
+    storageClass: 'settings',
+    // 合并：按任务 id 补缺——本地已存在的任务保留本地，备份里多出来的任务
+    // 补入（lastRunAt / lastResult 也一并带入）。本地为空（新 profile / 全新
+    // 安装）时备份整体生效，避免用户被迫重配所有 cron。
+    fillMissing: (local: ScheduledTask[], backup: ScheduledTask[]) =>
+      fillMissingById(local, backup, (t) => t.id),
+  }),
   // scheduler 多通道外部通知（Phase C / N2）：
   //  - notifyChannels 走 settings（channel name / kind / topic / chatId / 开关 / notify-on flags）随备份走 config.json
   //  - notifyChannelSecrets 走 credentials（token / URL）走 splitSecret，token 不进 config.json
   entry({
     item: notifyChannels,
     storageClass: 'settings',
+    // 合并：按 channel id 补缺。secret（token / URL）由同 entry 的
+    // notifyChannelSecrets (credentials class) 的 fillMissing 独立补入，
+    // 二者不耦合。
+    fillMissing: (local: ChannelConfig[], backup: ChannelConfig[]) =>
+      fillMissingById(local, backup, (c) => c.id),
   }),
   entry({
     item: notifyChannelSecrets,
@@ -568,6 +600,17 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({
     item: telegramGatewayConfig,
     storageClass: 'settings',
+    // 合并：本地任一字段非空 → 视为「已配过」整体保留本地；全空 → 用备份整体
+    // 覆盖。workerUrl + allowedChatIdsCsv 是用户痛点（restore merge 后被清空）。
+    // 与 personaIdentity (line ~410) 同形态——caller 自定多字段合并，与 storageClass
+    // 解耦。
+    // Caveat：无法区分「user 主动关 interactiveMode」与「从未配置」，后者会被
+    // 备份重新填回（merge「只增不减」契约使然），与 personaEnabled 注释同 caveat。
+    fillMissing: (local: TelegramGatewayConfig, backup: TelegramGatewayConfig) => {
+      const localConfigured =
+        !isEmptyValue(local.workerUrl) || !isEmptyValue(local.allowedChatIdsCsv);
+      return localConfigured ? local : backup;
+    },
   }),
   //  - telegramGatewaySecrets 走 credentials（botToken / webhookSecret / wsAuthToken）走 splitSecret，token 不进 config.json
   entry({

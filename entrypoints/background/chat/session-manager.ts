@@ -37,6 +37,7 @@ import {
   usableCompactionTarget,
   type CompactionTarget,
 } from '@/lib/agent/compaction';
+import { usableModelTarget, type ModelTarget } from '@/lib/providers/model-target';
 import {
   createCompactionSummaryMessage,
   getRetainedTail,
@@ -73,11 +74,16 @@ import type { BroadcastMessage, TurnSettings } from '@/lib/ipc/protocol';
 import { replaceUserText, truncateForRetry, sanitizeAgentMessages, extractUserText, getAssistantText } from '@/lib/agent/message-helpers';
 import { rewriteReminderInstructions, wrapPersonaReminder } from '@/lib/agent/prompt-envelope';
 import { createWorkerTeamRoutingHook } from '@/lib/agent/worker-team-routing';
+import { collectTitleSource, defaultSessionTitle } from '@/lib/agent/session-title';
+import { generateSessionTitle } from './title-generator';
+import { broadcastAll } from '../ipc/port-registry';
 import {
   providerCredentials,
   customProviders as customProvidersStorage,
   lastSelectedModel,
   compactionModel,
+  autoTitleSettings,
+  resolveAutoTitleSettings,
   lastSelectedThinkingLevel,
   userInstructions as userInstructionsStorage,
   memorySettings,
@@ -85,6 +91,7 @@ import {
   personaEnabled,
   personaSoul,
   personaIdentity,
+  searchEnginesConfig,
   type ModelIdentity,
   type ThinkingLevel,
 } from '@/lib/persistence/storage';
@@ -92,9 +99,7 @@ import { getMCPManager } from '@/lib/mcp/manager';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { t } from '@/lib/i18n';
 import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
-import { broadcastAll } from '../ipc/port-registry';
 import { broadcastToViewers, sendSessionStateToAllViewers } from './viewers';
-import { generateSessionTitle } from '@/lib/agent/title-generation';
 import { renameSession } from '@/lib/persistence/db';
 import { vfs } from '@/lib/persistence/vfs';
 import { WORKSPACES_ROOT } from '@/lib/persistence/vfs-paths';
@@ -198,6 +203,18 @@ interface AgentSession {
    * to abandon the turn. Cleared back to `undefined` when compaction ends.
    */
   compactionController?: AbortController;
+  /**
+   * 首轮结束后的自动标题生成在途时持有。`destroySession` 中 abort，让删掉的会话不会
+   * 被迟到的生成结果「复活」一条标题写入（rename 对不存在的行返回 false，双保险）。
+   */
+  titleController?: AbortController;
+  /**
+   * 首轮自动标题已经向模型发过请求（不论成败）——「只生成一次」的明确标记，不靠标题文本
+   * 比对推断。只活在内存：SW 被回收后重建的会话对象不带它，此时若首次调用失败、用户又重试
+   * 首轮，会再调一次模型。这是有意的取舍——为一个罕见路径多付一次廉价调用，不值得给会话行
+   * 加持久字段。
+   */
+  titleAttempted?: true;
   modelKey: string;
   /** 当前主会话模型身份；worker role 未单独配置 model 时用它兜底。 */
   modelIdentity: ModelIdentity;
@@ -327,19 +344,26 @@ class SessionManager {
   /** Worker Team 开关（Fast/Team）翻转的 storage watch 退订句柄，与
    *  `mcpUnsubscribe` 同款（幂等注册、活到 SW 结束，不必显式 dispose）。 */
   private workerTeamUnsubscribe?: () => void;
+  /** 搜索引擎配置的 storage watch；变更后重建各会话的 `web_search`（描述里列的引擎会变）。 */
+  private searchEnginesUnwatch?: () => void;
   /** `refreshAllSessionTools` 的单调序号：多轮重建并发时（MCP 刷新 + Fast/Team
    *  快速连翻）只让最后启动的那轮落盘赋值，防止慢的先完成轮把旧工具集盖回去。 */
   private refreshToolsSeq = 0;
 
   /**
-   * 订阅 MCPManager 变更，把刷新后的工具集推给所有活跃会话。由 background 启动序列
-   * 调用一次；幂等
+   * 订阅会影响工具集的配置变更（MCP 服务端、搜索引擎），把刷新后的工具集推给所有活跃
+   * 会话。由 background 启动序列调用一次；幂等
    */
-  watchMCPTools(): void {
+  watchToolConfig(): void {
     // Subscribe to MCPManager so we react AFTER its internal entries map is
     // reconciled — avoids racing two independent storage watchers.
     if (!this.mcpUnsubscribe) {
       this.mcpUnsubscribe = getMCPManager().subscribe(() => {
+        void this.refreshAllSessionTools();
+      });
+    }
+    if (!this.searchEnginesUnwatch) {
+      this.searchEnginesUnwatch = searchEnginesConfig.watch(() => {
         void this.refreshAllSessionTools();
       });
     }
@@ -616,9 +640,9 @@ class SessionManager {
   }
 
   /**
-   * 依据**当前工具配置**（MCP servers + 条件工具，如按 `workerTeamEnabled`
+   * 依据**当前工具配置**（MCP servers + 搜索引擎 + 条件工具，如按 `workerTeamEnabled`
    * 决定进不进的 `delegate_task`）重建所有活会话的 tool array。由
-   * `watchMCPTools`（MCP 增删改）与 `watchWorkerTeam`（Fast/Team 翻转）调用。
+   * `watchToolConfig`（MCP 增删改 + 搜索引擎配置）与 `watchWorkerTeam`（Fast/Team 翻转）调用。
    * agent 的 `state.tools` setter 接受整数组替换，跑中刷新安全——下一个
    * assistant turn 用新工具集。
    *
@@ -715,30 +739,95 @@ class SessionManager {
   }
 
   /**
-   * 解析压缩（摘要）该用哪个模型 + 凭证。读全局 `compactionModel` 配置：
-   * - 未配置（null）→ 跟随主模型 `fallback`（默认语义）。
-   * - 配置了但解析不出（模型被删 / provider 没了）或无可用凭证 → console.warn
-   *   后静默回退主模型。压缩是后台增益，绝不因配错而中断本轮发送。
+   * 解析一个「辅助任务」（压缩摘要 / 自动标题）该用哪个模型 + 凭证：
+   * - `configuredId` 为 null → 跟随主模型 `fallback`（默认语义）。
+   * - 配置了但解析不出（模型被删 / provider 没了）或无可用凭证 → console.warn 后静默
+   *   回退主模型。辅助任务是后台增益，绝不因配错而中断本轮发送。
    *
-   * 返回 `{ model, apiKey }`；apiKey 可能为 undefined（连主模型都无凭证），由
-   * maybeCompact 现有的「无 key 则裸发」分支处理。
+   * 返回 `{ model, apiKey }`；apiKey 可能为 undefined（连主模型都无凭证），由调用方处理
+   * （压缩走「无 key 则裸发」，标题直接放弃）。`tag` 只用于日志前缀。
    */
-  private async resolveCompactionModel(fallback: Model<Api>): Promise<CompactionTarget> {
-    const configuredId = await compactionModel.getValue();
+  private async resolveAuxiliaryModel(
+    configuredId: ModelIdentity | null,
+    fallback: Model<Api>,
+    tag: string,
+  ): Promise<ModelTarget> {
     if (configuredId) {
       const resolved = await this.resolveSessionModel(configuredId);
       if (!resolved) {
-        console.warn('[compaction] configured model cannot be resolved (possibly deleted), falling back to main model', configuredId);
+        console.warn(`[${tag}] configured model cannot be resolved (possibly deleted), falling back to main model`, configuredId);
       } else {
         const apiKey = await resolveProviderApiKey(resolved.model.provider);
-        const usable = usableCompactionTarget({ model: resolved.model, apiKey });
+        const usable = usableModelTarget({ model: resolved.model, apiKey });
         if (usable) return usable;
-        console.warn('[compaction] configured model has no usable credentials, falling back to main model', configuredId);
+        console.warn(`[${tag}] configured model has no usable credentials, falling back to main model`, configuredId);
       }
     }
     // 回退主模型（未配置 / 解析失败 / 无凭证）：此刻才解析主模型凭证，避免配置可用时
     // 对主 provider 做无谓的 OAuth 刷新。
     return { model: fallback, apiKey: await resolveProviderApiKey(fallback.provider) };
+  }
+
+  /** 压缩（摘要）模型：读全局 `compactionModel` 配置后走辅助模型解析。 */
+  private async resolveCompactionModel(fallback: Model<Api>): Promise<ModelTarget> {
+    return this.resolveAuxiliaryModel(await compactionModel.getValue(), fallback, 'compaction');
+  }
+
+  /**
+   * 首轮结束后自动生成标题（设置可开关 / 选模型）。只在「transcript 恰有一条 user 消息、
+   * 本轮产出了正文、行标题仍是默认的首句截断」时跑一次；用户在首轮中已改名则让位。
+   * 不占 phase（不阻塞下一轮发送、不改 isRunning），但要自己持 keepalive——agent_end
+   * 已把 phase 置回 idle，否则 SW 可能在补全返回前被回收。失败只 warn，保留默认标题。
+   */
+  private async maybeGenerateTitle(agentSession: AgentSession, messages: AgentMessage[]): Promise<void> {
+    // 已发过请求（只生成一次）或有一次在途（首轮重试得快）：都不再来。
+    if (!agentSession.sessionCreated || agentSession.titleAttempted || agentSession.titleController) return;
+    const source = collectTitleSource(messages);
+    if (!source) return;
+
+    // 纯同步的资格判断做完就登记 controller、持 keepalive：后面每个 await（读设置 / 读行 /
+    // 解析凭证含 OAuth 刷新 / 补全）都可能撞上 cancel / destroySession，必须可 abort；
+    // agent_end 已把 phase 置 idle、主流程的保活已放，准备阶段也不能让 SW 被回收。
+    const controller = new AbortController();
+    agentSession.titleController = controller;
+    acquireKeepAlive();
+    try {
+      const settings = resolveAutoTitleSettings(await autoTitleSettings.getValue());
+      if (!settings.enabled || controller.signal.aborted) return;
+
+      const { sessionId } = agentSession;
+      const expected = defaultSessionTitle(source.userText);
+      const before = await sessionStore.loadMeta(sessionId);
+      if (controller.signal.aborted || before?.title !== expected) return;
+
+      const target = await this.resolveAuxiliaryModel(settings.model, agentSession.agent.state.model, 'auto-title');
+      if (controller.signal.aborted) return;
+      if (!target.apiKey) {
+        // 无凭证的 provider（本地 Ollama 等）：开关看着是开的却不会生效，留条 debug 可查。
+        console.debug('[auto-title] no usable credentials for the title model, skipping');
+        return;
+      }
+
+      // 进入模型调用即消耗掉唯一的一次机会（失败也不重来：与「首轮结束生成一次」的语义一致）。
+      agentSession.titleAttempted = true;
+      const title = await generateSessionTitle({
+        model: target.model,
+        apiKey: target.apiKey,
+        userText: source.userText,
+        assistantText: source.assistantText,
+        signal: controller.signal,
+      });
+      if (!title || controller.signal.aborted) return;
+      // 生成期间用户可能已改名：条件写——事务内仍是默认标题才替换（手动改名走另一条写路径，
+      // 事务外的「读比写」不原子）。
+      if (!(await sessionStore.renameIfTitle(sessionId, expected, title))) return;
+      broadcastAll({ type: 'session_renamed', sessionId, title });
+    } catch (err) {
+      if (!controller.signal.aborted) console.warn('[auto-title] generation failed:', err);
+    } finally {
+      if (agentSession.titleController === controller) agentSession.titleController = undefined;
+      releaseKeepAlive();
+    }
   }
 
   /** Get or create the `AgentSession` for a session id.
@@ -1175,107 +1264,17 @@ class SessionManager {
           const assistantCount = messages.filter((m) => m.role === 'assistant').length;
           if (assistantCount === 1) {
             agentSession.titleGenerated = true;
-            void this.maybeGenerateTitle(agentSession, messages);
+            // 首轮收尾后的自动标题：独立后台任务，不阻塞事件派发、失败不影响会话。
+            // 方法内部已 try/catch；这里再兜一层是防 try 之前的同步段抛出变成 unhandled rejection。
+            void this.maybeGenerateTitle(agentSession, messages).catch((err) => {
+              console.warn('[auto-title] unexpected failure:', err);
+            });
           }
         }
         break;
+
+        break;
       }
-    }
-  }
-
-  /**
-   * One-shot 自动标题生成：agent_end 看到首条 assistant 消息时触发，异步
-   * fire-and-forget 调 LLM 拿 topic-name 标题，成功后写回并广播。
-   *
-   * 设计要点：
-   * - **触发唯一性**：`titleGenerated` 在 await 之前置位（agent_end 处），故
-   *   同一会话的并发 agent_end 不会再触发第二次。SW 重启会丢失该标志，但
-   *   `agent_end` 还有 `assistantCount === 1` 兜底（>=2 时跳过）。
-   * - **失败静默**：LLM 失败 / abort / 用户中途改名 → 不抛、不改 DB、保留
-   *   heuristic 标题。`generateSessionTitle` 本身已经 `null` on error。
-   * - **race vs 手动改名**：`agentSession.heuristicTitle` 是 prompt() 当时写入
-   *   的原标题（DB 真值），LLM 回来后与 `current.title` 重新比对——不等就
-   *   说明用户在 stream 中途改名过，跳过覆盖。这覆盖了 capture-window 之前的
-   *   rename（不仅仅是 LLM 调用中的 rename）。
-   * - **keep-alive**：agent_end 已把 phase 置 idle（updateKeepAlive 已释放一次），
-   *   故必须显式 `acquireKeepAlive` 才能保证 SW 不在 LLM 调用中途被挂掉。
-   *   复用 keepalive.ts 已有的 ref-counted 机制（与 `maybeCompact` 的 compacting
-   *   阶段共用同一计数器）。
-   * - **不重命名 pre-feature 会话**：仅 `heuristicTitle !== undefined` 的会话
-   *   会进 agent_end 闸门（由 prompt() 注入），冷加载的会话 heuristicTitle 缺省
-   *   → 跳过。
-   */
-  private async maybeGenerateTitle(
-    agentSession: AgentSession,
-    messages: AgentMessage[],
-  ): Promise<void> {
-    const { sessionId, heuristicTitle } = agentSession;
-    // 防御性：agent_end 闸门已保证这里一定有，但显式守卫让本函数在不依赖
-    // 上游判定的情况下依然安全（未来被复用时不会 silently 重命名会话）。
-    if (heuristicTitle === undefined) return;
-
-    const userMsg = messages.find((m) => m.role === 'user');
-    const asstMsg = messages.find((m) => m.role === 'assistant');
-    if (!userMsg || !asstMsg) return;
-
-    // extractUserText 已经剥掉 DIRECTIVE 块；assistant 文本由 generateSessionTitle
-    // 内部 strip system/think tags。空文本 / 纯 directive → 早返，避免浪费 LLM。
-    const userText = extractUserText(userMsg as Message);
-    const assistantText = getAssistantText(asstMsg as AssistantMessage);
-    if (!userText.trim() || !assistantText.trim()) return;
-
-    acquireKeepAlive();
-    try {
-      // 用会话**已 resolve** 的主模型（agent.state.model = pi-ai 的 Model<Api>）。
-      // 该会话选了什么模型就拿什么模型生成标题，与 prompt/retry 完全一致；不引
-      // 入新设置项（用户选择「用主模型」）。
-      const model = agentSession.agent.state.model;
-      const apiKey = await resolveProviderApiKey(model.provider);
-      // 临时诊断：自动标题生成是 fire-and-forget LLM 调用——agent_end 之
-      // 后还会再花一个 LLM round-trip 才能把标题写回。`pendingTraces` 在
-      // agent_end 时已经 delete（handle 在那一刻使命完成），所以这里开新
-      // 锚点：标题生成耗时是相对「agent_end 完结」而言，不是相对「用户
-      // 发问」。`trace` 仅用于本次 LLM 调用的起止标记，便于排查标题卡
-      // 死 / 超时问题。
-      const titleTrace = startTrace('bg', sessionId);
-      titleTrace.mark('bg:title_gen_start', { model: model.id });
-
-      const result = await generateSessionTitle({
-        userMessage: userText,
-        assistantMessage: assistantText,
-        model,
-        apiKey,
-        sessionId,
-      });
-      titleTrace.mark('bg:title_gen_done', { ok: result !== null });
-      if (!result) return;
-
-      // Race guard: 用户可能在 prompt() → agent_end 这段时间里（甚至 agent_end
-      // 异步触发 LLM 后）已经手动改过名。heuristicTitle 是 prompt() 当时写入的
-      // 原始 DB 标题；现在 DB 标题不等就说明用户动过 → 尊重用户选择不覆盖。
-      const current = await sessionStore.load(sessionId);
-      if (!current || current.title !== heuristicTitle) return;
-
-      const ok = await renameSession(sessionId, result);
-      if (!ok) return;
-
-      // broadcastAll（不走 broadcastToViewers）：侧边栏可能在任意窗口显示，未必
-      // 是当前 viewing 那个会话的窗口——与 client-handlers.ts:297 session_pin
-      // / :315 session_rename 共用同一投递面。
-      const { messages: _drop, ...meta } = current;
-      broadcastAll({
-        type: 'session_changed',
-        session: {
-          ...meta,
-          title: result,
-          isRunning: this.getSessionState(sessionId)?.isRunning === true,
-        },
-      });
-    } catch {
-      // 静默：LLM 异常 / DB 异常 / 广播异常都吞掉，原 heuristic 标题保留。
-      // 与 generateSessionTitle 本身的 null-on-error 语义一致。
-    } finally {
-      releaseKeepAlive();
     }
   }
 
@@ -1323,9 +1322,7 @@ class SessionManager {
         if (!modelCfg) {
           throw new Error(t('errors.modelUnavailable'));
         }
-        const trimmed = text.trim();
-        const title = trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : '');
-        const sessionTitle = title || t('common.newChat');
+        const sessionTitle = defaultSessionTitle(text);
         try {
           await sessionStore.create({
             id: sessionId,
@@ -2063,8 +2060,8 @@ class SessionManager {
    * The live agent is reused as-is. We truncate, then refresh the mutable
    * `state.messages` / `model` / `thinkingLevel` / `systemPrompt` fields in
    * place to pick up any settings the user changed while idle, then call
-   * `continue()`. Tools are kept current by `refreshAllSessionTools` (MCP
-   * changes), so they're not touched here. Because the agent is never torn
+   * `continue()`. Tools are kept current by `refreshAllSessionTools` (MCP /
+   * search-engine changes), so they're not touched here. Because the agent is never torn
    * down, a `cancel()` racing this flow always finds a live agent — this is
    * the root-cause fix for the historical "stop button stuck after retry"
    * bug (there is no agent-less window to get stuck in).
@@ -2240,7 +2237,7 @@ class SessionManager {
 
       // 模型 / 思考档：仅当 retry 携带 turn（用户在重试前切了模型 / 思考）且与活
       // agent 当前选择不同时才换并落库；否则保持不动——没有「空闲时改了
-      // 全局」需要补读的场景。Tools 由 `refreshAllSessionTools` 保活（MCP 变更），
+      // 全局」需要补读的场景。Tools 由 `refreshAllSessionTools` 保活（MCP / 搜索引擎变更），
       // 此处不动。model 与 thinking 各自可选、分别判断、分别落库。
       // 模型的解析已在本 try 顶部完成（见那里的注释），此处只负责应用与落库。
 
@@ -2747,6 +2744,8 @@ class SessionManager {
     // 分支信息须在会话出表前算（getBranchInfo 按 sessionId 查活会话）——中断的
     // retry / 编辑可能刚在树上造出新分支，撤下的 agent_end 帧要携带它
     const branchInfo = await this.getBranchInfo(sessionId).catch(() => undefined);
+    // 在途的自动标题一并取消：会话出表后 destroySession 就找不到它了。
+    agentSession.titleController?.abort();
     this.sessions.delete(sessionId);
     // 临时诊断：cancel 走完「running/idle」路径后，`handleAgentEvent` 不会收到
     // `agent_end`（我们主动 unsubscribe 了），原本的 `releaseTrace` 链路不会触发。
@@ -2888,6 +2887,7 @@ class SessionManager {
       // broadcasting.
       agentSession.compactionController?.abort();
       agentSession.prepareController?.abort();
+      agentSession.titleController?.abort();
       agentSession.unsubscribeAgent();
       agentSession.toolCtx.dispose();
       agentSession.permissionBridge.cancel();

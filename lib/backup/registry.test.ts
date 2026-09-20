@@ -5,6 +5,10 @@ import type { MCPServerConfig, CustomProviderConfig, PersonaIdentity } from '@/l
 import type { RagSettings } from '@/lib/rag/types';
 import { DEFAULT_RAG_SETTINGS } from '@/lib/rag/types';
 import type { CustomPageAction, PageActionsConfig } from '@/lib/page-actions/types';
+import type { CustomSearchEngine, SearchEnginesConfig } from '@/lib/search/types';
+import type { ScheduledTask } from '@/lib/scheduler/types';
+import type { ChannelConfig } from '@/lib/scheduler/notify-channels/types';
+import type { TelegramGatewayConfig } from '@/lib/telegram-gateway/types';
 import {
   BACKUP_REGISTRY,
   registeredStorageKeys,
@@ -539,5 +543,193 @@ describe('ragSettings 密钥拆分 / 恢复', () => {
     expect(restored.embedderApiKey).toBe('sk-123');
     expect(restored.rerankApiKey).toBe('sk-456');
     expect(restored.contextualLlmApiKey).toBe('sk-cr-789');
+});
+
+describe('searchEnginesConfig 合并补缺', () => {
+  const fillMissing = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:searchEnginesConfig',
+  )!.fillMissing! as (local: SearchEnginesConfig, backup: SearchEnginesConfig) => SearchEnginesConfig;
+
+  const custom = (id: string, name: string): CustomSearchEngine => ({
+    id,
+    name,
+    urlTemplate: 'https://example.com/?q={query}',
+    extract: 'function extract() { return { status: "ok", results: [] }; }',
   });
+
+  it('自定义引擎按 id 只增不减：本地保留，备份里本地没有的补入', () => {
+    const merged = fillMissing(
+      { builtin: {}, custom: [custom('custom-aaaaaaaa', 'local')] },
+      { builtin: {}, custom: [custom('custom-aaaaaaaa', 'backup'), custom('custom-bbbbbbbb', 'added')] },
+    );
+    expect(merged.custom.map((e) => e.id)).toEqual(['custom-aaaaaaaa', 'custom-bbbbbbbb']);
+    expect(merged.custom[0].name).toBe('local');
+  });
+
+  it('内置覆盖层逐 id 补缺：本地改过的保留，本地没碰过的从备份补入', () => {
+    const merged = fillMissing(
+      { builtin: { bing: { enabled: false } }, custom: [] },
+      { builtin: { bing: { enabled: true }, google: { when: 'x' } }, custom: [] },
+    );
+    expect(merged.builtin.bing).toEqual({ enabled: false });
+    expect(merged.builtin.google).toEqual({ when: 'x' });
+  });
+
+  it('order 本地优先，本地没排过才采用备份的', () => {
+    expect(
+      fillMissing({ builtin: {}, custom: [] }, { builtin: {}, custom: [], order: ['google', 'bing'] }).order,
+    ).toEqual(['google', 'bing']);
+    expect(
+      fillMissing({ builtin: {}, custom: [], order: ['baidu'] }, { builtin: {}, custom: [], order: ['google'] }).order,
+    ).toEqual(['baidu']);
+    expect(fillMissing({ builtin: {}, custom: [] }, { builtin: {}, custom: [] }).order).toBeUndefined();
+  });
+});
+
+describe('scheduledTasks / notifyChannels / telegramGatewayConfig 合并补缺', () => {
+  // 3 个 settings 之前都没声明 fillMissing → merge 模式下被 storage.ts:113 跳过，
+  // 造成 restore merge 备份后配置被清空（user 报告 Telegram Gateway workerUrl +
+  // allowedChatIdsCsv 丢空）。本 describe 覆盖「补缺 + 本地优先」契约。
+
+  const fillScheduledTasks = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:scheduledTasks',
+  )!.fillMissing! as (local: ScheduledTask[], backup: ScheduledTask[]) => ScheduledTask[];
+
+  const fillNotifyChannels = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:notifyChannels',
+  )!.fillMissing! as (local: ChannelConfig[], backup: ChannelConfig[]) => ChannelConfig[];
+
+  const fillTelegramConfig = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:telegramGatewayConfig',
+  )!.fillMissing! as (
+    local: TelegramGatewayConfig,
+    backup: TelegramGatewayConfig,
+  ) => TelegramGatewayConfig;
+
+  // ── scheduledTasks ──
+  const task = (id: string, name: string): ScheduledTask => ({
+    id,
+    name,
+    schedule: { kind: 'interval', minutes: 60 },
+    action: { kind: 'webcheck', url: 'https://example.com', condition: 'status_200' },
+    notify: { onSuccess: false, onFailure: true },
+    enabled: true,
+    createdAt: 1000,
+    lastRunAt: null,
+    lastResult: null,
+  });
+
+  describe('scheduledTasks', () => {
+    it('本地空 + 备份有任务 → 整体取备份', () => {
+      const merged = fillScheduledTasks([], [task('a', 'A'), task('b', 'B')]);
+      expect(merged.map((t) => t.id)).toEqual(['a', 'b']);
+    });
+
+    it('本地有 + 备份有 → 按 id 合并，本地优先，备份补缺', () => {
+      const merged = fillScheduledTasks(
+        [task('a', 'local-A')],
+        [task('a', 'backup-A'), task('b', 'backup-B')],
+      );
+      // 本地 id=a 保留，备份 id=b 补入
+      expect(merged).toHaveLength(2);
+      expect(merged.find((t) => t.id === 'a')?.name).toBe('local-A');
+      expect(merged.find((t) => t.id === 'b')?.name).toBe('backup-B');
+    });
+
+    it('本地空 + 备份空 → 空 (idempotent)', () => {
+      expect(fillScheduledTasks([], [])).toEqual([]);
+    });
+  });
+
+  // ── notifyChannels ──
+  const channel = (id: string, name: string): ChannelConfig => ({
+    id,
+    kind: 'ntfy',
+    name,
+    enabled: true,
+    notifyOnSuccess: false,
+    notifyOnFailure: true,
+    topic: `topic-${id}`,
+  });
+
+  describe('notifyChannels', () => {
+    it('本地空 + 备份有 channel → 整体取备份', () => {
+      const merged = fillNotifyChannels([], [channel('a', 'A'), channel('b', 'B')]);
+      expect(merged.map((c) => c.id)).toEqual(['a', 'b']);
+    });
+
+    it('本地有 + 备份有 → 按 id 合并，本地优先', () => {
+      const merged = fillNotifyChannels(
+        [channel('a', 'local-A')],
+        [channel('a', 'backup-A'), channel('b', 'backup-B')],
+      );
+      expect(merged).toHaveLength(2);
+      expect(merged.find((c) => c.id === 'a')?.name).toBe('local-A');
+      expect(merged.find((c) => c.id === 'b')?.name).toBe('backup-B');
+    });
+
+    it('本地空 + 备份空 → 空', () => {
+      expect(fillNotifyChannels([], [])).toEqual([]);
+    });
+  });
+
+  // ── telegramGatewayConfig ──
+  // 与 personaIdentity 同形态（多字段非空判断），与 storageClass 解耦。
+  const cfg = (workerUrl: string, allowedChatIdsCsv: string, interactiveMode = false): TelegramGatewayConfig => ({
+    workerUrl,
+    allowedChatIdsCsv,
+    interactiveMode,
+  });
+
+  describe('telegramGatewayConfig', () => {
+    it('本地全空 + 备份有 → 取备份（最常见场景：用户首次 restore merge）', () => {
+      const merged = fillTelegramConfig(
+        cfg('', ''),
+        cfg('wss://worker/ws', '123,456', true),
+      );
+      expect(merged.workerUrl).toBe('wss://worker/ws');
+      expect(merged.allowedChatIdsCsv).toBe('123,456');
+      expect(merged.interactiveMode).toBe(true);
+    });
+
+    it('本地 workerUrl 非空 → 整体保留本地 (即使 backup 也有值)', () => {
+      const merged = fillTelegramConfig(
+        cfg('wss://local/ws', ''),
+        cfg('wss://backup/ws', '999'),
+      );
+      expect(merged.workerUrl).toBe('wss://local/ws');
+      expect(merged.allowedChatIdsCsv).toBe(''); // 本地非空 → 全保留
+    });
+
+    it('本地 allowedChatIdsCsv 非空 → 整体保留本地', () => {
+      const merged = fillTelegramConfig(
+        cfg('', '111,222'),
+        cfg('wss://backup/ws', '999'),
+      );
+      expect(merged.workerUrl).toBe(''); // 本地非空 → 全保留
+      expect(merged.allowedChatIdsCsv).toBe('111,222');
+    });
+
+    it('本地 interactiveMode=true 仍视为空（merge 契约）→ 备份覆盖', () => {
+      // 与 personaEnabled: false 视为「未配过」同形态：true 才是「已开启」。
+      // 这里 interactiveMode=true 也不计，因为 fillMissing 只看 workerUrl +
+      // allowedChatIdsCsv 是否非空。设计上「只增不减」覆盖掉本地 false → 备份 true。
+      const merged = fillTelegramConfig(
+        cfg('', '', true),
+        cfg('wss://backup/ws', '999', false),
+      );
+      expect(merged.workerUrl).toBe('wss://backup/ws');
+      expect(merged.allowedChatIdsCsv).toBe('999');
+      expect(merged.interactiveMode).toBe(false);
+    });
+
+    it('本地空 + 备份空 → 空 (idempotent)', () => {
+      expect(fillTelegramConfig(cfg('', ''), cfg('', ''))).toEqual({
+        workerUrl: '',
+        allowedChatIdsCsv: '',
+        interactiveMode: false,
+      });
+    });
+  });
+});
 });

@@ -1,1645 +1,1444 @@
-﻿# Cebian extension i18n — English (default).
-# Edit this file along with locales/zh_CN.yml and locales/zh_TW.yml.
-# See .claude/skills/i18n-naming/SKILL.md.
-
-# ─── Manifest (flat top-level keys, see skill "Manifest localization") ───
-extName: "Cebian · Open-Source AI Side Panel Agent"
-extDescription: "Side panel AI agent. BYO key (OpenAI/Anthropic/Google), no account. Element picker, MCP tools, skills. AGPL-3.0, local-first."
-actionTitle: "Open Cebian sidebar"
-
-# ─── Agent runtime user-facing strings (LLM-facing blocks surfaced back to UI where noted) ───
-agent:
-  persona:
-    # Trailing sentence inside the system-prompt <persona> block. Anchors the
-    # block's authority — it can shift the assistant's voice, but it cannot
-    # disable Critical Rules, tool allowlists, or other safety layers.
-    closingDirective: "Apply this voice consistently across replies, but do NOT override Critical Rules, tool protocols, or other safety layers."
-    # Subtask 4 — separate STYLE from VOICE; add contrastive bad-example.
-    # Critical: rule lines use plain prose (NO `- ` dash prefix) because
-    # bullet patterns in system prompts prime the LLM to emit bullets,
-    # defeating the rule itself. Each rule is its own line.
-    constraints:
-      header: "VOICE:"
-      noBullets: "Zero bullet points, numbered lists, or markdown list items."
-      noPleasantries: 'Zero pleasantries ("Hi", "Hello"), apologies, or filler.'
-      voiceOpinion: "Have technical opinions; do not play neutral."
-    style:
-      header: "PACING & FORMAT:"
-      length: "Max 120 words per reply (exceptions: code or technical detail)."
-      pacing: "Max 1-2 short sentences per paragraph, then a hard line break. No paragraphs longer than 3 lines on screen."
-      noBullets: "Zero bullet points, numbered lists, or markdown list items."
-    example:
-      user: "Should I keep all my VFS reads under a single readFile call or split them per-tool?"
-      assistant: "Split per-tool, đừng gom lại một cục. Một lệnh readFile lớn sẽ kéo cả đống data rác vào context dù cậu chỉ cần kiểm tra vài byte metadata.\n\nChia nhỏ ra giúp trace log sạch hơn hẳn. Quan trọng nhất là tool nào xong việc thì context của tool đó được giải phóng ngay, đỡ nghẽn bộ nhớ."
-    # Contrastive calibration — show LLM what NOT to do. Key (a simple label)
-    # gated by `if (t('agent.persona.badExample.header') === 'agent.persona.badExample.header')`
-    # in compilePersonaBlock skips the whole block when unlocalized.
-    badExample:
-      header: "NEVER SOUND LIKE THIS:"
-      badOutput: '> "Hello! I''d be happy to help you with that. Here are the key points:\n> - Point 1: ...\n> - Point 2: ...\n> In conclusion, both options have pros and cons. Hope this helps!"'
-      warning: "Avoid all corporate politeness, bullet points, and balanced disclaimers."
-    # Cross-link in `## Output & Communication` placeholder. The full imperative
-    # rules + few-shot anchor live in the persona block; this line just points
-    # the LLM at the rest of the prompt.
-    bindingNeo: "Output in short, punchy prose. Max 2 sentences per paragraph. Zero bullet points."
-    # 1-line recap template injected into the user-message <reminder-instructions>
-    # block, sitting adjacent to <user-request>. Keeps persona in the LLM's
-    # attention window even at turn 30+ (recency injection is the actual drift
-    # fix; the system-prompt <persona> block alone is too far away).
-    recap:
-      # $1 = name
-      youAre: "You are $1"
-      # $1 = vibe
-      vibe: "$1"
-      # $1 = tone
-      tone: "Reply in $1 voice"
-      # $1 = emoji
-      emoji: "Use $1 as your sign-off when relevant"
-
-
-# ─── Common (reused across the UI) ───
+extName: Cebian · Open-Source AI Side Panel Agent
+extDescription: Side panel AI agent. BYO key (OpenAI/Anthropic/Google), no account. Element picker, MCP tools, skills. AGPL-3.0, local-first.
+actionTitle: Open Cebian sidebar
 common:
-  newChat: "New chat"
-  send: "Send"
-  history: "History"
-  sidebar: "Sidebar"
-  # History list date groupings (by last-activity time)
+  newChat: New chat
+  send: Send
+  history: History
   historyGroup:
-    today: "Today"
-    week: "Previous 7 days"
-    month: "Previous 30 days"
-    older: "Older"
-    pinned: "Pinned"
-    archived: "Archived"
-  toggleTheme: "Toggle theme"
-  settings: "Settings"
-  back: "Back"
-  openInNewTab: "Open in new tab"
-  loading: "Loading…"
-  cancel: "Cancel"
-  confirm: "Confirm"
-  save: "Save"
-  saved: "Saved"
-  reset: "Reset"
-  delete: "Delete"
-  rename: "Rename"
-  edit: "Edit"
-  add: "Add"
-  enable: "Enable"
-  disable: "Disable"
+    today: Today
+    week: Previous 7 days
+    month: Previous 30 days
+    older: Older
+    pinned: Pinned
+    archived: Archived
+  toggleTheme: Toggle theme
+  settings: Settings
+  back: Back
+  openInNewTab: Open in new tab
+  loading: Loading…
+  cancel: Cancel
+  confirm: Confirm
+  save: Save
+  reset: Reset
+  delete: Delete
+  rename: Rename
+  edit: Edit
+  add: Add
   headers:
-    keyPlaceholder: "Header name"
-    valuePlaceholder: "Header value"
-    add: "Add header"
-    remove: "Remove header"
-  code: "Code"
-  math: "Math"
-  copy: "Copy"
-  copied: "Copied"
-  copyFailed: "Copy failed"
-  cut: "Cut"
-  paste: "Paste"
-  speak: "Read aloud"
-  stopSpeaking: "Stop reading aloud"
-  # $1 = code language label (e.g. "Ts", "Python")
-  speakCodeSkipped: "Skipped $1 code block"
-  speakCodeSkippedPlain: "Skipped code block"
-  download: "Download"
-  downloadFailed: "Download failed"
-  newFile: "New file"
-  newFolder: "New folder"
-  search: "Search"
-  searchPlaceholder: "Search…"
-  moreActions: "More actions"
+    keyPlaceholder: Header name
+    valuePlaceholder: Header value
+    add: Add header
+    remove: Remove header
+  code: Code
+  copy: Copy
+  copied: Copied
+  copyFailed: Copy failed
+  speak: Read aloud
+  stopSpeaking: Stop reading aloud
+  speakCodeSkipped: Skipped $1 code block
+  speakCodeSkippedPlain: Skipped code block
+  download: Download
+  downloadFailed: Download failed
+  newFile: New file
+  newFolder: New folder
+  search: Search
+  searchPlaceholder: Search…
+  moreActions: More actions
   empty:
-    history: "No history yet"
-    folder: "Empty folder"
+    history: No history yet
+    folder: Empty folder
   time:
-    justNow: "Just now"
-    # Time labels intentionally use abbreviations (min/h/d/mo/y) to avoid
-    # English plural-vs-singular branching at the call site ("1 min ago"
-    # reads naturally without a separate 0/1/n map).
-    # $1 = number of minutes
-    minutesAgo: "$1 min ago"
-    # $1 = number of hours
-    hoursAgo: "$1 h ago"
-    # $1 = number of days
-    daysAgo: "$1 d ago"
-    # $1 = number of months
-    monthsAgo: "$1 mo ago"
-    # $1 = number of years
-    yearsAgo: "$1 y ago"
+    justNow: Just now
+    minutesAgo: $1 min ago
+    hoursAgo: $1 h ago
+    daysAgo: $1 d ago
+    monthsAgo: $1 mo ago
+    yearsAgo: $1 y ago
   session:
-    deleteConfirmTitle: "Delete chat?"
-    # $1 = session title
-    deleteConfirmDescription: "\"$1\" and its workspace files will be permanently removed. This cannot be undone."
-    running: "Agent is running"
-    pin: "Pin"
-    unpin: "Unpin"
-    rename: "Rename"
-    moreActions: "More actions"
-    archive: "Archive"
-    unarchive: "Unarchive"
-    select: "Select"
-    # $1 = number of selected chats
+    deleteConfirmTitle: Delete chat?
+    deleteConfirmDescription: '"$1" and its workspace files will be permanently removed. This cannot be undone.'
+    running: Agent is running
+    pin: Pin
+    unpin: Unpin
+    archive: Archive
+    unarchive: Unarchive
+    select: Select
     selectedCount:
-      1: "1 selected"
-      n: "$1 selected"
-    # $1 = number of chats to delete
+      1: 1 selected
+      n: $1 selected
     deleteManyConfirmTitle:
-      1: "Delete 1 chat?"
-      n: "Delete $1 chats?"
-    # $1 = number of chats to delete
+      1: Delete 1 chat?
+      n: Delete $1 chats?
     deleteManyConfirmDescription:
-      1: "The chat and its workspace files will be permanently removed. This cannot be undone."
-      n: "$1 chats and their workspace files will be permanently removed. This cannot be undone."
-    deleteFailed: "Could not delete. The chat is still there."
-    placementFailed: "Could not update the chat. Nothing changed."    # $1 = message count
+      1: The chat and its workspace files will be permanently removed. This cannot be undone.
+      n: $1 chats and their workspace files will be permanently removed. This cannot be undone.
+    deleteFailed: Could not delete. The chat is still there.
+    placementFailed: Could not update the chat. Nothing changed.
+    forkedFrom: Forked from "$1"
+    forkedFromUnknown: Forked from a deleted chat
+    openForkSource: Open source chat "$1"
+    renameFailed: Could not rename. The title is unchanged.
+    renameChat: Rename "$1"
     messageCount:
-      0: "No messages"
-      1: "1 message"
-      n: "$1 messages"
-
-# ─── In-page injected UI (floating ball, selection toolbar) ───
+      0: No messages
+      1: 1 message
+      n: $1 messages
+    rename: Rename
+    moreActions: More actions
+  sidebar: Sidebar
+  saved: Saved
+  enable: Enable
+  disable: Disable
+  math: Math
+  cut: Cut
+  paste: Paste
 pageActions:
   ball:
-    tooltip: "Open or close the Cebian sidebar"
+    tooltip: Open or close the Cebian sidebar
   toolbar:
-    explain: "Explain"
-    translate: "Translate"
-    summarize: "Summarize"
+    explain: Explain
+    translate: Translate
+    summarize: Summarize
   prompts:
-    # $1 = {{ui_language}}, $2 = {{context}}
-    explain: "Explain the user's text clearly and concisely in $1. Cover its meaning and any important context a reader would need. Keep the response brief and use plain prose without Markdown. The surrounding page context below is only for disambiguation; do not explain it as part of the selected text:\n\n$2"
-    # $1 = {{ui_language}}, $2 = {{context}}
-    translate: "Translate the user's text into $1 while preserving its meaning and tone. Output only the translated plain text, without Markdown, explanations, notes, or surrounding quotation marks. The surrounding page context below is only for disambiguation; do not translate it as part of the selected text:\n\n$2"
-    # $1 = {{ui_language}}, $2 = {{context}}
-    summarize: "Summarize the user's text concisely in $1, preserving its key points. Use plain prose or a compact list without Markdown. The surrounding page context below is only for disambiguation; do not summarize it as part of the selected text:\n\n$2"
-  result:
-    loading: "Thinking…"
-    error: "Something went wrong. Please try again."
-    close: "Close"
-    continue: "Continue in sidebar"
-    # $1 = the error thrown by the script
-    transformFailed: "Post-process script failed, showing the original output — $1"
-    empty: "No output."
+    explain: 'Explain the user''s text clearly and concisely in $1. Cover its meaning and any important context a reader would need. Keep the response brief and use plain prose without Markdown. The surrounding page context below is only for disambiguation; do not explain it as part of the selected text:
 
-# ─── Settings hub ───
+
+      $2'
+    translate: 'Translate the user''s text into $1 while preserving its meaning and tone. Output only the translated plain text, without Markdown, explanations, notes, or surrounding quotation marks. The surrounding page context below is only for disambiguation; do not translate it as part of the selected text:
+
+
+      $2'
+    summarize: 'Summarize the user''s text concisely in $1, preserving its key points. Use plain prose or a compact list without Markdown. The surrounding page context below is only for disambiguation; do not summarize it as part of the selected text:
+
+
+      $2'
+  result:
+    loading: Thinking…
+    error: Something went wrong. Please try again.
+    close: Close
+    continue: Continue in sidebar
+    transformFailed: Post-process script failed, showing the original output — $1
+    empty: No output.
 settings:
   nav:
-    aria: "Settings navigation"
-    providers: "AI providers"
-    instructions: "Instructions"
-    persona: "Persona"
-    prompts: "Prompts"
-    skills: "Skills"
-    memory: "Memory"
-    rag: "Knowledge (RAG)"
-    mcp: "MCP Servers"
-    pageInteraction: "Page interaction"
-    appearance: "Appearance"
-    backup: "Backup & Restore"
-    storage: "Filesystem"
-    advanced: "Advanced"
-    about: "About"
-    scheduler: "Scheduled tasks"
-    notifications: "Notification channels"
-    telegramGateway: "Telegram Gateway"
+    aria: Settings navigation
+    providers: AI providers
+    mcp: MCP Servers
+    chat: Chat
+    prompts: Prompts
+    skills: Skills
+    memory: Memory
+    pageInteraction: Page interaction
+    data: Data
+    about: About
+    group:
+      core: Core & AI
+      agent: Agent Capabilities
+      system: System & Automation
+    instructions: Instructions
+    persona: Persona
+    rag: Knowledge (RAG)
+    appearance: Appearance
+    backup: Backup & Restore
+    storage: Filesystem
+    advanced: Advanced & About
+    scheduler: Scheduled tasks
+    notifications: Notification channels
+    telegramGateway: Telegram Gateway
   providers:
-    title: "AI providers"
-  storage:
-    title: "Filesystem"
-    used: "Used space"
-    usedError: "Couldn't calculate"
-    openBrowser: "Open file browser"
-    description: "Browse files the AI created, organized by conversation. The browser is read-only — use the download button there to export."
+    title: AI providers
+  data:
+    title: Data
+    storage:
+      title: Local storage
+      used: Used space
+      usedError: Couldn't calculate
+      openBrowser: Open file browser
+      description: Browse files the AI created, organized by conversation. The browser is read-only — use the download button there to export.
   about:
-    title: "About"
-    tagline: "AI browser sidebar assistant"
-    website: "Website"
-    feedback: "Feedback"
-    checkUpdate: "Check for updates"
-    checking: "Checking…"
-    upToDate: "You are on the latest version"
-    # $1 = new version string (e.g. "1.2.3")
-    updateAvailable: "New version v$1 available"
-    viewInstallGuide: "View install guide"
-    checkFailed: "Update check failed"
-    followAuthor: "Follow the author"
+    title: About
+    tagline: AI browser sidebar assistant
+    website: Website
+    feedback: Feedback
+    checkUpdate: Check for updates
+    checking: Checking…
+    upToDate: You are on the latest version
+    updateAvailable: New version v$1 available
+    viewInstallGuide: View install guide
+    checkFailed: Update check failed
+    followAuthor: Follow the author
     socials:
-      wechat: "WeChat Official Account"
-      wechatHandle: "一只猫头猫"
-      bilibili: "Bilibili"
-      bilibiliHandle: "不想睡觉猫头猫"
-      xiaohongshu: "Xiaohongshu"
-      xiaohongshuHandle: "一只猫头猫"
-      x: "X"
-      xHandle: "@maotoumao0_0"
-  debugLog:
-    title: "Debug log"
-    # Explains the affordance and when to use it (file a bug → export log).
-    description: "Captures every console message from the extension into a local ring buffer. Export this file when reporting a bug so the maintainer can see what happened without you having to reproduce it live."
-    enable:
-      label: "Capture debug log"
-      hint: "When off, nothing is written to the ring buffer. The Export button is also disabled."
-    verbose:
-      label: "Verbose (per-token events)"
-      hint: "Also capture every streaming LLM token. Off by default — the default level already keeps all agent boundaries and warnings, which is what you usually want when filing a bug."
-    live:
-      label: "Live log"
-      hint: "Watch new entries appear as they happen, instead of waiting to export."
-      open: "Open live log"
-      close: "Close"
-      pause: "Pause"
-      resume: "Resume"
-      cleared: "Log cleared"
-      empty: "No entries yet — interact with the extension to generate events."
-    export: "Export log"
-    clear: "Clear log"
-    # $1 = number of entries currently buffered
-    countLabel: "$1 entries buffered"
-    countUnavailable: "Log unavailable (private browsing?)"
-    # $1 = entries included in the file
-    exported: "Exported $1 entries to your downloads folder"
-    exportFailed: "Export failed: $1"
-    cleared: "Debug log cleared"
-    clearFailed: "Clear failed: $1"
-    # Triggered when the user clicks Export with zero buffered events —
-    # keeps the empty file out of their downloads folder.
-    empty: "Debug log is empty — nothing to export yet"
-  advanced:
-    title: "Advanced"
-    compaction:
-      label: "Context compaction model"
-      hint: "Model used to compact long conversations. Defaults to the conversation model."
-      followMain: "Same as conversation model"
-    domSubAgent:
-      label: "DOM sub-agent model"
-      hint: "Cheap model for page-reading tasks delegated by the main chat. Off = feature disabled."
-      off: "Off (disabled)"
-    workers:
-      title: "Worker models"
-      hint: "One model per worker role — the main agent delegates via `delegate_task`. Leave on “Same as conversation model” to inherit."
-      followMain: "Same as conversation model"
-      enabled: "Enable worker team"
-      enabledHint: "When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools."
-      persona:
-        enabled: "Enable persona (OpenClaw mode)"
-        enabledHint: "Adds a SOUL block to the system prompt and a 1-line recap in every user message. Edit the persona copy in Settings → Persona. Cannot override Critical Rules or tool protocols."
-        nav: "Persona…"
-      content_writer:
-        label: "Content writer"
-        hint: "Reads sources and writes long-form content into a VFS file."
-      frontend_coder:
-        label: "Frontend coder"
-        hint: "Writes HTML / CSS / JS into a VFS file. No browser tools."
-      reviewer:
-        label: "Reviewer"
-        # Subtask 8.7：whitelist 已砍掉 execute_js / inspect（SW-background
-        # worker 拿不到 active tab，工具 9/9 errored），hint 同步改成「读 →
-        # 推理 → emit findings」。
-        hint: "Reads up to 3 files and emits findings as a text handoff. Cannot modify files or invoke browser tools."
-      researcher:
-        label: "Researcher"
-        hint: "Searches files and RAG collections to produce a structured summary."
-      # Future: add custom roles here when the feature lands.
-      # Per-role attempt timeout (Phase 1.5) — outer wall-clock cap. Idle window
-      # of 20s still resets on every token / tool result; this only fires if the
-      # stream genuinely stalls past the chosen preset.
-      timeout:
-        label: "Timeout"
-        # $1 = effective ceiling in seconds (resolved from override / registry default)
-        activeHint: "($1s ceiling)"
-        default: "Default"
-        preset60: "60 s"
-        preset120: "2 min"
-        preset300: "5 min"
-        preset600: "10 min"
+      wechat: WeChat Official Account
+      wechatHandle: 一只猫头猫
+      bilibili: Bilibili
+      bilibiliHandle: 不想睡觉猫头猫
+      xiaohongshu: Xiaohongshu
+      xiaohongshuHandle: 一只猫头猫
+      x: X
+      xHandle: '@maotoumao0_0'
   pageInteraction:
-    title: "Page interaction"
-    ball:
-      label: "Floating ball"
-      hint: "Show a pinned ball on web pages; click to open or close the sidebar."
-    toolbar:
-      label: "Selection toolbar"
-      hint: "Show a quick-action toolbar when you select text on a page."
-    model:
-      label: "Toolbar model"
-      hint: "Model for all toolbar actions. A fast, low-cost model is usually enough."
-      followMain: "Same as conversation model"
+    title: Page interaction
     pageScope:
-      include: "Show only on these pages"
-      includeHint: "Leave empty to apply on every page."
-      exclude: "Except on these pages"
-      excludeHint: "Takes precedence over the list above."
-      addExclude: "Add an exception"
-      syntax: "Chrome match patterns, e.g. *://*.example.com/*. Query strings and fragments are ignored."
-      syntaxDocs: "View configuration rules"
+      include: Show only on these pages
+      includeHint: Leave empty to apply on every page.
+      exclude: Except on these pages
+      excludeHint: Takes precedence over the list above.
+      addExclude: Add an exception
+      syntax: Chrome match patterns, e.g. *://*.example.com/*. Query strings and fragments are ignored.
+      syntaxDocs: View configuration rules
     pagePattern:
-      placeholder: "*://*.example.com/*"
-      # $1 = the match pattern on that row
-      edit: "Edit pattern $1"
-      # $1 = the match pattern on that row
-      remove: "Remove pattern $1"
+      placeholder: '*://*.example.com/*'
+      edit: Edit pattern $1
+      remove: Remove pattern $1
     actions:
-      title: "Toolbar actions"
-      hint: "Toolbar buttons in display order. Toggle, customize built-ins, or add your own."
-      builtin: "Built-in"
-      custom: "Custom"
-      pageScoped: "Scoped"
-      create: "New action"
-      # $1 = action name
-      more: "More actions for “$1”"
-      # $1 = action name
-      moveUp: "Move “$1” up"
-      # $1 = action name
-      moveDown: "Move “$1” down"
-      # $1 = action name
-      delete: "Delete “$1”"
-      # $1 = action name
-      edit: "Edit “$1”"
-      deleteConfirmTitle: "Delete this action?"
-      # $1 = action name
-      deleteConfirmDescription: "\"$1\" will be removed from the toolbar. This cannot be undone."
-      editBuiltin: "Built-in action"
-      editCustom: "Custom action"
-      label: "Button text"
-      labelPlaceholder: "e.g. Key points"
-      prompt: "System prompt"
-      # $1 = the trigger characters for variable autocomplete ("{{")
-      promptHint: "Tells the model what to do with the selected text. Type $1 to insert a variable."
-      # $1 / $2 = template variable names, rendered literally as {{name}}
-      promptPlaceholder: "e.g. Extract the key points from $1 and reply in $2."
-      pages: "Where it applies"
-      transform: "Post-process script (optional)"
-      transformHint: "JavaScript for post-processing the completed output. Define a function named transform(text, vars) that returns the string to display. vars provides the same environment variables as prompt templates: selected_text, context, page_url, page_title, date, ui_language. If the script fails, the original output is displayed unchanged."
+      title: Toolbar actions
+      hint: Buttons appear on the toolbar in this order. Built-in actions can use a custom system prompt, be scoped or turned off; add your own actions with a custom name and prompt.
+      builtin: Built-in
+      custom: Custom
+      pageScoped: Scoped
+      create: New action
+      more: More actions for “$1”
+      moveUp: Move “$1” up
+      moveDown: Move “$1” down
+      delete: Delete “$1”
+      edit: Edit “$1”
+      deleteConfirmTitle: Delete this action?
+      deleteConfirmDescription: '"$1" will be removed from the toolbar. This cannot be undone.'
+      editBuiltin: Built-in action
+      editCustom: Custom action
+      label: Button text
+      labelPlaceholder: e.g. Key points
+      prompt: System prompt
+      promptHint: Tells the model what to do with the selected text. Type $1 to insert a variable.
+      promptPlaceholder: e.g. Extract the key points from $1 and reply in $2.
+      pages: Where it applies
+      transform: Post-process script (optional)
+      transformHint: 'JavaScript for post-processing the completed output. Define a function named transform(text, vars) that returns the string to display. vars provides the same environment variables as prompt templates: selected_text, context, page_url, page_title, date, ui_language. If the script fails, the original output is displayed unchanged.'
       transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
+    ball:
+      label: Floating ball
+      hint: Show a pinned ball on web pages; click it to open or close the sidebar.
+    toolbar:
+      label: Selection toolbar
+      hint: Show a quick-action toolbar when you select text on a page.
+    model:
+      label: Toolbar model
+      hint: The model used by all toolbar actions. A fast, low-cost model is usually enough. Defaults to the conversation model.
+      followMain: Same as conversation model
     translate:
-      label: "Translation target language"
-      hint: "The language the toolbar translates into."
-      auto: "Follow interface language"
-  appearance:
-    title: "Appearance"
-    fontSize:
-      label: "Chat font size"
-      hint: "Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 15–18 px (step 0.5). Default 15 px."
-      preview: "Preview — The quick brown fox jumps over the lazy dog."
-    fontFamily:
-      label: "Chat font family"
-      hint: "Choose the typeface used in the sidepanel chat. Affects user prompts and assistant messages."
-      geist: "Geist (default)"
-      inter: "Inter"
-      roboto: "Roboto"
-      system: "System default"
-  instructions:
-    title: "Instructions"
-    label: "Custom instructions"
-    hint: "Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules."
-    placeholder: "e.g.\n- Reply in English\n- Keep answers concise\n- Default to TypeScript when discussing code"
-  persona:
-    title: "Persona"
-    label: "Persona copy"
-    hint: "Adds a SOUL block to the system prompt and a 1-line recap in every user message. Empty when off. Use Settings → Advanced → Persona to toggle, or the chat composer chip."
-    soulLabel: "SOUL"
-    soulPlaceholder: "e.g.\n- Speak in first person, never 'as an AI'.\n- Be opinionated, but admit uncertainty when real.\n- Reply in the same language the user uses."
-    identityName: "Name"
-    identityVibe: "Vibe"
-    identityTone: "Tone"
-    identityEmoji: "Sign-off emoji"
-    identityNamePlaceholder: "Cebian"
-    identityVibePlaceholder: "Precise, slightly irreverent"
-    identityTonePlaceholder: "Casual, technical"
-    identityEmojiPlaceholder: "🦞"
-  prompts:
-    title: "Prompts"
-    newBody: "(Write your prompt here)"
-    # $1 = trigger character ("/")
-    hint: "Reusable prompt templates. Trigger them with $1 in the chat input."
-    expandInline: "Expand prompts in the input box"
-    placeholders:
-      selectedText: "Selected text on page"
-      pageUrl: "Current page URL"
-      pageTitle: "Current page title"
-      date: "Current date"
-      clipboard: "Clipboard content"
-      input: "Text typed after the slash command"
-  templateVars:
-    selectedText: "Selected text on page"
-    context: "Text around the selection"
-    pageUrl: "Current page URL"
-    pageTitle: "Current page title"
-    date: "Current date"
-    uiLanguage: "Interface language"
-    clipboard: "Clipboard content"
-  memory:
-    title: "Memory"
-    enable: "Enable memory"
-    hint: "Cross-conversation memory. Off by default; when on, the assistant saves and recalls durable facts about you across chats."
-    newBody: "(Write the memory here)"
-    organize:
-      title: "Organize memory"
-      hint: "Merge duplicates, drop stale notes, and tidy your memory files in one pass."
-      button: "Organize"
-      running: "Organizing…"
-      model: "Model"
-      followActive: "Same as conversation model"
-      auto: "Auto organize"
-      autoHint: "Periodically tidy memory in the background once enough new notes pile up."
-      intervalLabel: "Min interval (days)"
-      thresholdLabel: "Trigger threshold (new notes since last organize)"
-      # $1 = last run time
-      lastRun: "Last organized $1"
-      toast:
-        ok: "Memory organized"
-        empty: "Nothing to organize"
-        conflict: "Memory changed during the run — skipped, try again"
-        noModel: "No usable model to organize memory"
-        failed: "Memory organize failed"
-  skills:
-    title: "Skills"
-    newBody: "(Write your skill instructions here)"
-    create: "Create skill"
-    hint: "Multi-file skill packs that follow the agentskills.io spec; the agent loads them on demand."
-    import: "Import…"
-    exportCurrent: "Export"
-    exportAll: "Export all"
-    exportEmpty: "No skills available to export"
-    # $1 = skill name
-    exportSuccess: "Exported \"$1\""
-    # $1 = number of skills exported
-    exportAllSuccess:
-      1: "Exported 1 skill"
-      n: "Exported $1 skills"
-    # $1 = imported skill name
-    importSuccess: "Imported \"$1\""
-    # $1 = number of skills imported
-    importSuccessBackup:
-      1: "Imported 1 skill"
-      n: "Imported $1 skills"
-    importDialog:
-      titleSingle: "Import skill"
-      titleBackup: "Import skill backup"
-      permissionsHeading: "Requested permissions"
-      permissionsNone: "No special permissions requested."
-      hasScriptsWarning: "Contains executable scripts under scripts/."
-      # $1 = file count
-      fileCount:
-        1: "1 file"
-        n: "$1 files"
-      # $1 = skill count
-      skillCount:
-        1: "1 skill"
-        n: "$1 skills"
-      # $1 = source name (already exists in VFS), $2 = renamed target name
-      conflictNotice: "A skill named \"$1\" already exists. It will be imported as \"$2\" unless you overwrite."
-      overwrite: "Overwrite existing"
-      keepBoth: "Import as new"
-      confirmOverwriteTitle: "Overwrite existing skill?"
-      # $1 = skill name(s), comma-separated
-      confirmOverwriteDescription: "\"$1\" will be replaced and its saved permissions will be cleared. Continue?"
-  mcp:
-    title: "MCP Servers"
-    description: "Connect MCP servers to expose their tools to the agent."
-    header:
-      # $1 = configured count, $2 = total servers
-      configuredCount: "$1 / $2 configured"
-      collapse: "Collapse MCP servers"
-      expand: "Expand MCP servers"
-    empty:
-      title: "No MCP servers configured"
-      hint: "Add a server to extend the agent with external tools."
-    actions:
-      add: "Add MCP server"
-      toggle: "Enable server"
-      edit: "Edit server"
-      delete: "Delete server"
-      dragHandle: "Drag to reorder"
-      deleteConfirmTitle: "Delete MCP server?"
-      # $1 = server name
-      deleteConfirmDescription: "\"$1\" will be removed. This cannot be undone."
-    errors:
-      # $1 = server name
-      nameTaken: "An MCP server named \"$1\" already exists."
-      nameRequired: "Server name is required."
-      urlRequired: "Server URL is required."
-      # $1 = URL
-      urlInvalid: "Invalid server URL: $1"
-      # $1 = scheme (e.g. "ftp:")
-      urlScheme: "Unsupported URL scheme: $1"
-      bearerTokenRequired: "Bearer token is required."
-      authHeaderConflict: "Do not set the Authorization header manually when using bearer auth — set the token in the auth field instead."
-    status:
-      disabled: "Disabled"
-      idle: "Awaiting first call"
-      connected: "Connected"
-      disconnected: "Disconnected"
-      probing: "Reconnecting"
-      circuitOpen: "Unavailable"
-    row:
-      # $1 = server name
-      aria: "$1 MCP server"
-      transportType:
-        streamableHttp: "Streamable HTTP"
-        sse: "SSE"
-      auth: "Auth"
-      authNone: "None"
-      authBearer: "Bearer (set)"
-      status: "Status"
-    form:
-      name: "Name"
-      namePlaceholder: "e.g. weather, github, my-tools"
-      transport: "Transport"
-      url: "URL"
-      urlPlaceholder: "https://example.com/mcp"
-      authType: "Authentication"
-      authNone: "None"
-      authBearer: "Bearer token"
-      bearerToken: "Token"
-      bearerTokenPlaceholder: "Paste bearer token"
-      headers: "Custom headers"
-  rag:
-    title: "Knowledge (RAG)"
-    infrastructureTitle: "Infrastructure"
-    retrievalRankingTitle: "Retrieval & Ranking"
-    connectionTitle: "Connection"
-    connectionLabel: "Neon connection string"
-    connectionHint: "Neon connection string — get it from your project dashboard."
-    testConnection: "Test connection"
-    connectionOk: "Connected — pgvector ready"
-    connectionFailed: "Connection failed"
-    connectionStatusReady: "Ready"
-    connectionStatusWarn: "pgvector missing"
-    connectionStatusError: "Connection failed"
-    pgvectorMissing: "Connected, but pgvector extension is missing. Enable it in your Neon console → Extensions."
-    bootstrapFailed: "Schema bootstrap failed"
-    embedderTitle: "Embedding model"
-    embedderHint: "OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI on port 8317."
-    embedderBaseUrl: "Base URL"
-    embedderApiKey: "API key (optional)"
-    embedderModel: "Model"
-    embedderDim: "Dimension"
-    chunkingTitle: "Chunking"
-    chunkSize: "Chunk size (chars)"
-    chunkOverlap: "Overlap (chars)"
-    collections: "Collections"
-    collectionsHint: "Pick a collection in chat to attach its top chunks to your message."
-    noCollections: "No collections yet — click \"New collection\" to index some files."
-    rerankTitle: "Rerank (Lớp 2 — optional)"
-    rerankHint: "Cross-encoder rerank over Lớp-1 candidates. +1 API call per send."
-    rerankBaseUrl: "Rerank Base URL"
-    rerankModel: "Rerank model"
-    rerankApiKey: "Rerank API key (optional)"
-    rerankTopN: "Top-N after rerank"
-    ragSearchTitle: "Agentic rag_search tool"
-    ragSearchHint: "Off — agent only sees the chunks pre-injected at send time. On lets it query during the conversation."
-    # Card 2 — Contextual Retrieval (Lớp 0)
-    contextualRetrievalTitle: "Contextual Retrieval (Lớp 0)"
-    contextualRetrievalHint: "Off — chunks indexed as-is. On improves recall for mid-document passages."
-    contextualLlmBaseUrl: "Contextual LLM Base URL"
-    contextualLlmModel: "Contextual LLM model"
-    contextualLlmApiKey: "Contextual LLM API key (optional)"
-    # Card 3 — Retrieval & Ranking
-    retrievalMode: "Retrieval mode"
-    retrievalModeHybrid: "Hybrid (Vector + BM25)"
-    retrievalModeRecommendedBadge: "Recommended"
-    retrievalModeHybridSubLabel: "Combines vector similarity with keyword match for best recall."
-    retrievalModeVector: "Vector only"
-    hybridScoreWarning: "Hybrid mode uses a different relevance scale (RRF). Your previous threshold may need lowering — try 0 to start."
-    pinGateTitle: "Pinned RAG relevance gate"
-    pinGateHint: "Skip pinned envelopes when the question looks off-topic. 0 = always attach."
-    pinMinScore: "Min relevance score"
-    pinMinScoreHint: "Lower = more results, higher = stricter relevance. Try 0 to start."
-    # Inline note inside New collection dialog when Contextual Retrieval is on.
-    contextualHint: "Chunks will be indexed with LLM-generated context prefixes (~1 LLM call per chunk)."
-    newCollection: "New collection"
-    newCollectionHint: "Pick a folder (existing or new), then drop files into it. Indexing runs locally — files stay on your disk, vectors go to Neon."
-    newCollectionName: "Collection name"
-    nameInvalid: "Name must start with a letter or digit; letters, digits, dashes and underscores only."
-    nameExists: "A collection named \"$1\" already exists."
-    folderLabel: "Folder"
-    folderPlaceholder: "Choose a folder…"
-    folderNewOption: "+ New folder…"
-    folderNewPlaceholder: "Type a name and press Enter"
-    folderNoFolders: "No folders yet — type a name above"
-    filesInsideFolder: "Files in this folder"
-    pickFiles: "Pick files"
-    pickFolder: "Pick folder"
-    pickedCount: "$1 files · $2"
-    pickedSkipped: "$1 file(s) skipped — unsupported extension"
-    reindexBanner: "Adding files to \"$1\" — existing chunks will be replaced by the new ones."
-    progressReading: "Reading $1 / $2 — $3"
-    progressChunking: "Chunked $1 chunks"
-    progressEmbedding: "Embedding $1 / $2"
-    progressInserting: "Inserting $1 / $2"
-    index: "Index"
-    cancel: "Cancel"
-    indexDone: "Indexed $1 chunks"
-    indexFailed: "Indexing failed"
-    reindex: "Re-index (re-pick files)"
-    renameCollection: "Rename collection"
-    renameCollectionLabel: "New name"
-    renamePlaceholder: "Type a new name"
-    renameConfirm: "Rename \"$1\" to \"$2\"?"
-    renameConfirmHint: "Existing chunks in Neon will be re-tagged with the new name. Embeddings are not regenerated — search results stay identical."
-    renameSuccess: "Renamed \"$1\" → \"$2\""
-    renameFailed: "Rename failed"
-    renameInUse: "A collection named \"$1\" already exists"
-    deleteCollection: "Delete collection"
-    confirmDeleteTitle: "Delete collection?"
-    # $1 = name, $2 = chunk count
-    confirmDelete: "Delete collection \"$1\" and its $2 chunks from Neon? Files on your disk are not affected."
-    deleteSuccess: "Deleted \"$1\""
-    deleteFailed: "Delete failed"
-  backup:
-    title: "Backup & Restore"
-    local:
-      title: "Local backup"
-      description: "Export everything to a .zip file you keep yourself, and restore it on another device."
-      create: "Create backup"
-      restore: "Restore from file…"
-    create:
-      title: "Create backup"
-      # $1 = formatted timestamp (e.g. "2026-06-09 14-30")
-      defaultName: "Backup $1"
-      nameLabel: "Name"
-      # $1 = max name length (characters)
-      nameInvalid: "Name cannot contain / \\ : * ? \" < > | or exceed $1 characters"
-      descriptionLabel: "Description"
-      descriptionPlaceholder: "Optional description…"
-      mode: "Backup mode"
-      modeFull: "Full backup"
-      modeFullHint: "Sessions, settings, skills & prompts, memory, and credentials"
-      modePartial: "Partial backup"
-      modePartialHint: "Choose what to include"
-      catSessions: "Chat sessions"
-      catWorkspaces: "Include workspace files"
-      catSettings: "General settings"
-      catSkillsPrompts: "Skills & prompts"
-      catMemories: "Memory"
-      catCredentials: "Credentials"
-      catCredentialsHint: "Includes API keys, OAuth tokens, etc."
-      encrypt: "Encrypt backup"
-      passwordPlaceholder: "Password"
-      passwordHint: "A forgotten password cannot be recovered"
-      bannerInfo: "Backups don't include browser cookies or login state; some providers may need re-login after restoring on a new device"
-      bannerWarning: "This backup contains API keys, OAuth tokens, and other secrets. Don't share it with anyone; enabling encryption is recommended"
-      atLeastOne: "Select at least one category to back up"
-      success: "Backup created"
-      failed: "Backup failed"
-    restore:
-      title: "Restore backup"
-      # $1 = source app version (e.g. "1.3.2")
-      source: "From Cebian v$1"
-      encrypted: "Encrypted"
-      passwordLabel: "Password"
-      passwordPlaceholder: "Enter the backup password"
-      wrongPassword: "Wrong password or corrupted backup"
-      include: "Restore contents"
-      strategy: "How to restore"
-      merge: "Merge"
-      mergeHint: "Add and update only; never deletes local data"
-      replace: "Replace"
-      replaceHint: "Wipe the selected categories first, then restore exactly as in the backup"
-      catSessions: "Chat sessions"
-      catSettings: "General settings"
-      catSkillsPrompts: "Skills & prompts"
-      catMemories: "Memory"
-      catCredentials: "Credentials"
-      apply: "Restore"
-      confirmReplaceTitle: "Replace local data?"
-      confirmReplaceBody: "Replace mode wipes the selected categories before restoring. This cannot be undone"
-      confirmReplaceCredentialsBody: "Replace mode wipes the selected categories before restoring, and writes API keys and tokens from the backup onto this device. This cannot be undone"
-      confirmCredentialsTitle: "Restore credentials?"
-      confirmCredentialsBody: "This will write API keys and tokens from the backup onto this device"
-      invalidFile: "This file is not a valid Cebian backup"
-      incompatible: "This backup was created by a newer version of Cebian and cannot be restored"
-      corrupt: "This backup is damaged or incomplete and can't be restored"
-      passwordRequired: "This backup is encrypted; enter its password"
-      success: "Restore complete"
-      failed: "Restore failed"
-      nothingSelected: "Select at least one category to restore"
-      # $1 = skipped summary, e.g. "Sessions 3 · Files 5"
-      partialSuccess: "Partial restore complete (skipped $1)"
-      # $1 = skipped count
-      skippedSessions: "Sessions $1"
-      # $1 = skipped count
-      skippedFiles: "Files $1"
-    webdav:
-      urlLabel: "Server URL"
-      urlPlaceholder: "https://dav.example.com/remote.php/dav"
-      usernameLabel: "Username"
-      usernamePlaceholder: "Username"
-      passwordLabel: "Password"
-      passwordPlaceholder: "Password or app password"
-      directoryLabel: "Remote folder"
-      directoryPlaceholder: "/cebian"
-      test: "Test connection"
-      testSuccess: "Connection looks good"
-      save: "Save & connect"
-      title: "WebDAV backup"
-      description: "Back up to a WebDAV server and keep multiple snapshots there, with restore on any device."
-      notConfigured: "Configure a WebDAV connection first"
-      changeConnection: "Change connection"
-      removeConnection: "Disconnect"
-      removeConfirmTitle: "Disconnect WebDAV?"
-      removeConfirmBody: "The saved connection (including the password) will be removed from this device. Snapshots already uploaded to the WebDAV server are kept and stay accessible after reconnecting."
-      removeSuccess: "WebDAV connection removed"
-      backupNow: "Back up to WebDAV"
-      refresh: "Refresh"
-      loading: "Loading…"
-      noSnapshots: "No snapshots yet"
-      restoreAction: "Restore"
-      deleteAction: "Delete"
-      savedConnection: "Connection saved"
-      uploadSuccess: "Uploaded to WebDAV"
-      deleteConfirmTitle: "Delete this snapshot?"
-      # $1 = snapshot file name
-      deleteConfirmBody: "$1 will be permanently removed from the WebDAV server. This cannot be undone"
-      deleteSuccess: "Snapshot deleted"
-      deleteFailed: "Delete failed"
-      error:
-        network: "Can't reach the WebDAV server — check the URL and your network"
-        timeout: "The WebDAV server took too long to respond — check the URL and your network"
-        unauthorized: "Authentication failed — check the username and password"
-        notFound: "Remote path not found"
-        conflict: "The parent folder doesn't exist on the server"
-        invalid: "Invalid path — the server URL, folder, or file name isn't safe"
-        unexpected: "The WebDAV server returned an unexpected response"
-  editor:
-    selectFile: "Select a file to start editing"
-    saving: "Saving…"
-    saveFailed: "Save failed"
-    unsaved: "Unsaved"
-    saved: "Saved"
-  files:
-    backToList: "Back to file list"
-    selectOrCreate: "Select or create a file from the left"
-  # Scheduled tasks (BG automation scheduler) — user configures cron / interval
-  # jobs that fetch a URL or webcheck (status_200 / contains_text) on a schedule.
-  scheduler:
-    title: "Scheduled tasks"
-    description: "Run fetch or webcheck jobs on a cron or interval schedule in the background."
-    empty: "No scheduled tasks yet. Create one below to start fetching in the background."
-    createButton: "New task"
-    columns:
-      name: "Name"
-      schedule: "Schedule"
-      action: "Action"
-      lastResult: "Result"
-      enabled: "Enabled"
-    scheduleType:
-      interval: "Every N minutes"
-      cron: "Cron expression"
-    intervalLabel: "Interval (minutes)"
-    cronLabel: "Cron expression"
-    cronPlaceholder: "*/15 * * * *"
-    actionType:
-      fetch: "Fetch URL"
-      webcheck: "Health check"
-    fetchUrlLabel: "URL"
-    fetchExtractLabel: "Extract field (optional)"
-    fetchExtractPlaceholder: "data.user.name"
-    webcheckUrlLabel: "URL"
-    webcheckExpectedLabel: "Expected text (for contains_text)"
-    notifyOnSuccess: "Notify on success"
-    notifyOnFailure: "Notify on failure"
-    enabled: "Enabled"
-    dialogCreateTitle: "New scheduled task"
-    dialogEditTitle: "Edit scheduled task"
-    dialogSave: "Save"
-    dialogSaveError: "Couldn't save task. Check the fields and try again."
-    dialogCancel: "Cancel"
-    dialogDelete: "Delete"
-    deleteConfirmTitle: "Delete scheduled task?"
-    deleteConfirmBody: "Delete \"$1\"? This cannot be undone."
-    runNowButton: "Run now"
-    runNowSuccess: "Task \"$1\" dispatched (watch for the result)."
-    runNowFailure: "Task \"$1\" failed: $2"
-    resultToastSuccess: "$1 ran successfully"
-    resultToastFailure: "$1 failed"
-    table:
-      scheduleEvery: "every $1 min"
-      actionStatus200: "status 200"
-      actionContainsText: "contains \"$1\""
-      dialogDescription: "BG validates on save; failed fields surface here."
-      nameLabel: "Name"
-      webcheckConditionStatus200: "status 200"
-      webcheckConditionContainsText: "contains text"
-      fetchUrlPlaceholder: "https://example.com/api"
-      webcheckUrlPlaceholder: "https://example.com/health"
-    permissionDeniedBody: "System notifications are blocked. Enable them in your browser's site settings to receive scheduler task results."
-  # Multi-Channel Outbound Notification Gateway (Phase C / N4) — Settings UI
-  notifications:
-    title: "Notification channels"
-    description: "Send scheduler task results to ntfy, Telegram, Discord/Slack-style webhooks, or any custom endpoint. Channels fire alongside the in-browser desktop notification."
-    empty:
-      title: "No channels configured"
-      hint: "Add one below to start receiving scheduler results outside the browser."
-    columns:
-      name: "Name"
-      kind: "Channel"
-      enabled: "On"
-      lastTested: "Last tested"
-    kinds:
-      ntfy: "ntfy"
-      telegram: "Telegram"
-      webhook: "Generic webhook"
-    form:
-      name: "Display name"
-      namePlaceholder: "My alerts"
-      topicLabel: "Topic"
-      topicPlaceholder: "cebian-alerts"
-      endpointLabel: "Self-hosted ntfy endpoint (optional)"
-      endpointPlaceholder: "https://ntfy.example.com"
-      chatIdLabel: "Chat ID"
-      chatIdPlaceholder: "123456789"
-      chatIdHint: "Find via @userinfobot on Telegram, or check getUpdates after sending the bot a message."
-      urlLabel: "Webhook URL"
-      urlPlaceholder: "https://discord.com/api/webhooks/…"
-      enabled: "Enabled"
-      notifySuccess: "Notify on success"
-      notifyFailure: "Notify on failure"
-    dialogAdd: "Add notification channel"
-    dialogEdit: "Edit notification channel"
-    buttons:
-      save: "Save"
-      cancel: "Cancel"
-      test: "Send test"
-      delete: "Delete"
-      enable: "Enable"
-      disable: "Disable"
-    deleteConfirmTitle: "Delete notification channel?"
-    deleteConfirmBody: "Delete \"$1\"? This stops sending scheduler results to this channel."
-    testInProgress: "Sending…"
-    testResultSuccess: "Last test: $1 ms"
-    testResultFailure: "Test failed: $1"
-    basicAuthHint: "Add `?user=<user>&pass=<pass>` to a self-hosted ntfy endpoint to send Basic auth header."
-    permissionRequired: "This channel requires a token / URL to work. Fill the corresponding secret field before testing."
-  # Telegram Two-Way Gateway (Phase D / D5) — Settings UI
-  telegramGateway:
-    title: "Telegram Gateway"
-    description: "Two-way realtime bridge between Telegram and Cebian agent. Requires a self-deployed Cloudflare Worker relay."
-    workerUrl: "Worker URL"
-    botToken: "Bot token"
-    webhookSecret: "Webhook secret"
-    wsAuthToken: "WS auth token"
-    allowedChatIds: "Allowed chat IDs"
-    chatIdHint: "Find via @userinfobot on Telegram, or check getUpdates after messaging the bot."
-    interactiveMode: "Interactive mode (route Telegram messages to agent)"
-    save: "Save"
-    saved: "Saved successfully"
+      label: Translation target language
+      hint: The language the toolbar translates into.
+      auto: Follow interface language
+  chat:
+    title: Chat
+    instructions:
+      label: Custom instructions
+      hint: Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules.
+      placeholder: 'e.g.
 
-# ─── Chat surface ───
+        - Reply in English
+
+        - Keep answers concise
+
+        - Default to TypeScript when discussing code'
+    compaction:
+      label: Context compaction model
+      hint: The model used to automatically compact overly long conversations. Defaults to the conversation model.
+      followMain: Same as conversation model
+    autoTitle:
+      label: Auto-generate chat titles
+      hint: After the first reply, replace the default title (the first message, truncated) with a short AI-generated title.
+      model: Title model
+      followMain: Same as conversation model
+    search:
+      title: Web search
+      hint: Set the order in which search engines are tried; the first enabled engine is preferred. The AI may pick another engine first based on its best-for hint. When a search is blocked, returns nothing, or fails, Cebian tries the remaining enabled engines in order.
+      preferred: Preferred
+      custom: Custom
+      modified: Modified
+      allDisabled: All engines are disabled. Enable at least one to use web search.
+      create: Add engine
+      more: Show more actions for "$1"
+      edit: Edit "$1"
+      moveUp: Move "$1" up
+      moveDown: Move "$1" down
+      resetDefault: Restore defaults for "$1"
+      delete: Delete "$1"
+      deleteConfirmTitle: Delete this engine?
+      deleteConfirmDescription: Deleting "$1" cannot be undone.
+      editBuiltin: Built-in engine
+      editCustom: Custom engine
+      name: Name
+      namePlaceholder: e.g. Kagi
+      url: Search URL
+      urlHint: Use $1 for the search terms in the URL. Cebian encodes and inserts the terms automatically.
+      urlPreview: 'URL for "$1": $2'
+      script: Extraction script
+      scriptHint: Define a complete extract function that reads titles, links and snippets from the results page. In the returned object, status empty makes Cebian retry briefly, blocked makes it switch engines, and ok makes it read the results array. An empty results array also switches engines.
+      generateSelectorPlaceholder: 'Results container selector, e.g. #results'
+      generate: Generate template
+      when: Best for (optional)
+      whenHint: Describe which searches should use this engine first, to help the AI choose.
+      whenPlaceholder: e.g. Chinese queries
+      engines:
+        bing:
+          name: Bing
+        brave:
+          name: Brave
+        google:
+          name: Google
+        duckduckgo:
+          name: DuckDuckGo
+        baidu:
+          name: Baidu
+          when: Chinese queries
+  prompts:
+    title: Prompts
+    newBody: (Write your prompt here)
+    hint: Reusable prompt templates. Trigger them with $1 in the chat input.
+    expandInline: Expand prompts in the input box
+    placeholders:
+      selectedText: Selected text on page
+      pageUrl: Current page URL
+      pageTitle: Current page title
+      date: Current date
+      clipboard: Clipboard content
+      input: Text typed after the slash command
+  templateVars:
+    selectedText: Selected text on page
+    context: Text around the selection
+    pageUrl: Current page URL
+    pageTitle: Current page title
+    date: Current date
+    uiLanguage: Interface language
+    clipboard: Clipboard content
+  memory:
+    title: Memory
+    enable: Enable memory
+    hint: Cross-conversation memory. Off by default; when on, the assistant saves and recalls durable facts about you across chats.
+    newBody: (Write the memory here)
+    organize:
+      title: Organize memory
+      hint: Merge duplicates, drop stale notes, and tidy your memory files in one pass.
+      button: Organize
+      running: Organizing…
+      model: Model
+      followActive: Same as conversation model
+      auto: Auto organize
+      autoHint: Periodically tidy memory in the background once enough new notes pile up.
+      intervalLabel: Min interval (days)
+      thresholdLabel: Trigger threshold (new notes since last organize)
+      lastRun: Last organized $1
+      toast:
+        ok: Memory organized
+        empty: Nothing to organize
+        conflict: Memory changed during the run — skipped, try again
+        noModel: No usable model to organize memory
+        failed: Memory organize failed
+  skills:
+    title: Skills
+    newBody: (Write your skill instructions here)
+    create: Create skill
+    hint: Multi-file skill packs that follow the agentskills.io spec; the agent loads them on demand.
+    import: Import…
+    exportCurrent: Export
+    exportAll: Export all
+    exportEmpty: No skills available to export
+    exportSuccess: Exported "$1"
+    exportAllSuccess:
+      1: Exported 1 skill
+      n: Exported $1 skills
+    importSuccess: Imported "$1"
+    importSuccessBackup:
+      1: Imported 1 skill
+      n: Imported $1 skills
+    importDialog:
+      titleSingle: Import skill
+      titleBackup: Import skill backup
+      permissionsHeading: Requested permissions
+      permissionsNone: No special permissions requested.
+      hasScriptsWarning: Contains executable scripts under scripts/.
+      fileCount:
+        1: 1 file
+        n: $1 files
+      skillCount:
+        1: 1 skill
+        n: $1 skills
+      conflictNotice: A skill named "$1" already exists. It will be imported as "$2" unless you overwrite.
+      overwrite: Overwrite existing
+      keepBoth: Import as new
+      confirmOverwriteTitle: Overwrite existing skill?
+      confirmOverwriteDescription: '"$1" will be replaced and its saved permissions will be cleared. Continue?'
+  mcp:
+    title: MCP Servers
+    description: Connect Model Context Protocol servers to expose their tools to the agent.
+    empty:
+      title: No MCP servers configured
+      hint: Add a server to extend the agent with external tools.
+    actions:
+      add: Add MCP server
+      toggle: Enable server
+      edit: Edit server
+      delete: Delete server
+      deleteConfirmTitle: Delete MCP server?
+      deleteConfirmDescription: '"$1" will be removed. This cannot be undone.'
+      dragHandle: Drag to reorder
+    errors:
+      nameTaken: An MCP server named "$1" already exists.
+      nameRequired: Server name is required.
+      urlRequired: Server URL is required.
+      urlInvalid: 'Invalid server URL: $1'
+      urlScheme: 'Unsupported URL scheme: $1'
+      bearerTokenRequired: Bearer token is required.
+      authHeaderConflict: Do not set the Authorization header manually when using bearer auth — set the token in the auth field instead.
+    status:
+      disabled: Disabled
+      idle: Awaiting first call
+      connected: Connected
+      disconnected: Disconnected
+      probing: Reconnecting
+      circuitOpen: Unavailable
+    form:
+      name: Name
+      namePlaceholder: e.g. weather, github, my-tools
+      transport: Transport
+      url: URL
+      urlPlaceholder: https://example.com/mcp
+      authType: Authentication
+      authNone: None
+      authBearer: Bearer token
+      bearerToken: Token
+      bearerTokenPlaceholder: Paste bearer token
+      headers: Custom headers
+    header:
+      configuredCount: $1 / $2 configured
+      collapse: Collapse MCP servers
+      expand: Expand MCP servers
+    row:
+      aria: $1 MCP server
+      transportType:
+        streamableHttp: Streamable HTTP
+        sse: SSE
+      auth: Auth
+      authNone: None
+      authBearer: Bearer (set)
+      status: Status
+  backup:
+    title: Backup & Restore
+    local:
+      title: Local backup
+      description: Export everything to a .zip file you keep yourself, and restore it on another device.
+      create: Create backup
+      restore: Restore from file…
+    create:
+      title: Create backup
+      defaultName: Backup $1
+      nameLabel: Name
+      nameInvalid: 'Name cannot contain / \ : * ? " < > | or exceed $1 characters'
+      descriptionLabel: Description
+      descriptionPlaceholder: Optional description…
+      mode: Backup mode
+      modeFull: Full backup
+      modeFullHint: Sessions, settings, skills & prompts, memory, and credentials
+      modePartial: Partial backup
+      modePartialHint: Choose what to include
+      catSessions: Chat sessions
+      catWorkspaces: Include workspace files
+      catSettings: General settings
+      catSkillsPrompts: Skills & prompts
+      catMemories: Memory
+      catCredentials: Credentials
+      catCredentialsHint: Includes API keys, OAuth tokens, etc.
+      encrypt: Encrypt backup
+      passwordPlaceholder: Password
+      passwordHint: A forgotten password cannot be recovered
+      bannerInfo: Backups don't include browser cookies or login state; some providers may need re-login after restoring on a new device
+      bannerWarning: This backup contains API keys, OAuth tokens, and other secrets. Don't share it with anyone; enabling encryption is recommended
+      atLeastOne: Select at least one category to back up
+      success: Backup created
+      failed: Backup failed
+    restore:
+      title: Restore backup
+      source: From Cebian v$1
+      encrypted: Encrypted
+      passwordLabel: Password
+      passwordPlaceholder: Enter the backup password
+      wrongPassword: Wrong password or corrupted backup
+      include: Restore contents
+      strategy: How to restore
+      merge: Merge
+      mergeHint: Add and update only; never deletes local data
+      replace: Replace
+      replaceHint: Wipe the selected categories first, then restore exactly as in the backup
+      catSessions: Chat sessions
+      catSettings: General settings
+      catSkillsPrompts: Skills & prompts
+      catMemories: Memory
+      catCredentials: Credentials
+      apply: Restore
+      confirmReplaceTitle: Replace local data?
+      confirmReplaceBody: Replace mode wipes the selected categories before restoring. This cannot be undone
+      confirmReplaceCredentialsBody: Replace mode wipes the selected categories before restoring, and writes API keys and tokens from the backup onto this device. This cannot be undone
+      confirmCredentialsTitle: Restore credentials?
+      confirmCredentialsBody: This will write API keys and tokens from the backup onto this device
+      invalidFile: This file is not a valid Cebian backup
+      incompatible: This backup was created by a newer version of Cebian and cannot be restored
+      corrupt: This backup is damaged or incomplete and can't be restored
+      passwordRequired: This backup is encrypted; enter its password
+      success: Restore complete
+      failed: Restore failed
+      nothingSelected: Select at least one category to restore
+      partialSuccess: Partial restore complete (skipped $1)
+      skippedSessions: Sessions $1
+      skippedFiles: Files $1
+    webdav:
+      urlLabel: Server URL
+      urlPlaceholder: https://dav.example.com/remote.php/dav
+      usernameLabel: Username
+      usernamePlaceholder: Username
+      passwordLabel: Password
+      passwordPlaceholder: Password or app password
+      directoryLabel: Remote folder
+      directoryPlaceholder: /cebian
+      test: Test connection
+      testSuccess: Connection looks good
+      save: Save & connect
+      title: WebDAV backup
+      description: Back up to a WebDAV server and keep multiple snapshots there, with restore on any device.
+      notConfigured: Configure a WebDAV connection first
+      changeConnection: Change connection
+      removeConnection: Disconnect
+      removeConfirmTitle: Disconnect WebDAV?
+      removeConfirmBody: The saved connection (including the password) will be removed from this device. Snapshots already uploaded to the WebDAV server are kept and stay accessible after reconnecting.
+      removeSuccess: WebDAV connection removed
+      backupNow: Back up to WebDAV
+      refresh: Refresh
+      loading: Loading…
+      noSnapshots: No snapshots yet
+      restoreAction: Restore
+      deleteAction: Delete
+      savedConnection: Connection saved
+      uploadSuccess: Uploaded to WebDAV
+      deleteConfirmTitle: Delete this snapshot?
+      deleteConfirmBody: $1 will be permanently removed from the WebDAV server. This cannot be undone
+      deleteSuccess: Snapshot deleted
+      deleteFailed: Delete failed
+      error:
+        network: Can't reach the WebDAV server — check the URL and your network
+        timeout: The WebDAV server took too long to respond — check the URL and your network
+        unauthorized: Authentication failed — check the username and password
+        notFound: Remote path not found
+        conflict: The parent folder doesn't exist on the server
+        invalid: Invalid path — the server URL, folder, or file name isn't safe
+        unexpected: The WebDAV server returned an unexpected response
+  editor:
+    selectFile: Select a file to start editing
+    saving: Saving…
+    saveFailed: Save failed
+    unsaved: Unsaved
+    saved: Saved
+  files:
+    backToList: Back to file list
+    selectOrCreate: Select or create a file from the left
+  storage:
+    title: Filesystem
+    used: Used space
+    usedError: Couldn't calculate
+    openBrowser: Open file browser
+    description: Browse files the AI created, organized by conversation. The browser is read-only — use the download button there to export.
+  debugLog:
+    title: Debug log
+    description: Captures every console message from the extension into a local ring buffer. Export this file when reporting a bug so the maintainer can see what happened without you having to reproduce it live.
+    enable:
+      label: Capture debug log
+      hint: When off, nothing is written to the ring buffer. The Export button is also disabled.
+    verbose:
+      label: Verbose (per-token events)
+      hint: Also capture every streaming LLM token. Off by default — the default level already keeps all agent boundaries and warnings, which is what you usually want when filing a bug.
+    live:
+      label: Live log
+      hint: Watch new entries appear as they happen, instead of waiting to export.
+      open: Open live log
+      close: Close
+      pause: Pause
+      resume: Resume
+      cleared: Log cleared
+      empty: No entries yet — interact with the extension to generate events.
+    export: Export log
+    clear: Clear log
+    countLabel: $1 entries buffered
+    countUnavailable: Log unavailable (private browsing?)
+    exported: Exported $1 entries to your downloads folder
+    exportFailed: 'Export failed: $1'
+    cleared: Debug log cleared
+    clearFailed: 'Clear failed: $1'
+    empty: Debug log is empty — nothing to export yet
+  advanced:
+    title: Advanced
+    compaction:
+      label: Context compaction model
+      hint: Model used to compact long conversations. Defaults to the conversation model.
+      followMain: Same as conversation model
+    domSubAgent:
+      label: DOM sub-agent model
+      hint: Cheap model for page-reading tasks delegated by the main chat. Off = feature disabled.
+      false: Off (disabled)
+      'off': 'Off'
+    workers:
+      title: Worker models
+      hint: One model per worker role — the main agent delegates via `delegate_task`. Leave on “Same as conversation model” to inherit.
+      followMain: Same as conversation model
+      enabled: Enable worker team
+      enabledHint: When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools.
+      persona:
+        enabled: Enable persona (OpenClaw mode)
+        enabledHint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Edit the persona copy in Settings → Persona. Cannot override Critical Rules or tool protocols.
+        nav: Persona…
+      content_writer:
+        label: Content writer
+        hint: Reads sources and writes long-form content into a VFS file.
+      frontend_coder:
+        label: Frontend coder
+        hint: Writes HTML / CSS / JS into a VFS file. No browser tools.
+      reviewer:
+        label: Reviewer
+        hint: Reads up to 3 files and emits findings as a text handoff. Cannot modify files or invoke browser tools.
+      researcher:
+        label: Researcher
+        hint: Searches files and RAG collections to produce a structured summary.
+      timeout:
+        label: Timeout
+        activeHint: ($1s ceiling)
+        default: Default
+        preset60: 60 s
+        preset120: 2 min
+        preset300: 5 min
+        preset600: 10 min
+  appearance:
+    title: Appearance
+    fontSize:
+      label: Chat font size
+      hint: Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 15–18 px (step 0.5). Default 15 px.
+      preview: Preview — The quick brown fox jumps over the lazy dog.
+    fontFamily:
+      label: Chat font family
+      hint: Choose the typeface used in the sidepanel chat. Affects user prompts and assistant messages.
+      geist: Geist (default)
+      inter: Inter
+      roboto: Roboto
+      system: System default
+  instructions:
+    title: Instructions
+    label: Custom instructions
+    hint: Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules.
+    placeholder: 'e.g.
+
+      - Reply in English
+
+      - Keep answers concise
+
+      - Default to TypeScript when discussing code'
+  persona:
+    title: Persona
+    label: Persona copy
+    hint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Empty when off. Use Settings → Advanced → Persona to toggle, or the chat composer chip.
+    soulLabel: SOUL
+    soulPlaceholder: 'e.g.
+
+      - Speak in first person, never ''as an AI''.
+
+      - Be opinionated, but admit uncertainty when real.
+
+      - Reply in the same language the user uses.'
+    identityName: Name
+    identityVibe: Vibe
+    identityTone: Tone
+    identityEmoji: Sign-off emoji
+    identityNamePlaceholder: Cebian
+    identityVibePlaceholder: Precise, slightly irreverent
+    identityTonePlaceholder: Casual, technical
+    identityEmojiPlaceholder: 🦞
+  rag:
+    title: Knowledge (RAG)
+    infrastructureTitle: Infrastructure
+    retrievalRankingTitle: Retrieval & Ranking
+    connectionTitle: Connection
+    connectionLabel: Neon connection string
+    connectionHint: Neon connection string — get it from your project dashboard.
+    testConnection: Test connection
+    connectionOk: Connected — pgvector ready
+    connectionFailed: Connection failed
+    connectionStatusReady: Ready
+    connectionStatusWarn: pgvector missing
+    connectionStatusError: Connection failed
+    pgvectorMissing: Connected, but pgvector extension is missing. Enable it in your Neon console → Extensions.
+    bootstrapFailed: Schema bootstrap failed
+    embedderTitle: Embedding model
+    embedderHint: OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI on port 8317.
+    embedderBaseUrl: Base URL
+    embedderApiKey: API key (optional)
+    embedderModel: Model
+    embedderDim: Dimension
+    chunkingTitle: Chunking
+    chunkSize: Chunk size (chars)
+    chunkOverlap: Overlap (chars)
+    collections: Collections
+    collectionsHint: Pick a collection in chat to attach its top chunks to your message.
+    noCollections: No collections yet — click "New collection" to index some files.
+    rerankTitle: Rerank (Lớp 2 — optional)
+    rerankHint: Cross-encoder rerank over Lớp-1 candidates. +1 API call per send.
+    rerankBaseUrl: Rerank Base URL
+    rerankModel: Rerank model
+    rerankApiKey: Rerank API key (optional)
+    rerankTopN: Top-N after rerank
+    ragSearchTitle: Agentic rag_search tool
+    ragSearchHint: Off — agent only sees the chunks pre-injected at send time. On lets it query during the conversation.
+    contextualRetrievalTitle: Contextual Retrieval (Lớp 0)
+    contextualRetrievalHint: Off — chunks indexed as-is. On improves recall for mid-document passages.
+    contextualLlmBaseUrl: Contextual LLM Base URL
+    contextualLlmModel: Contextual LLM model
+    contextualLlmApiKey: Contextual LLM API key (optional)
+    retrievalMode: Retrieval mode
+    retrievalModeHybrid: Hybrid (Vector + BM25)
+    retrievalModeRecommendedBadge: Recommended
+    retrievalModeHybridSubLabel: Combines vector similarity with keyword match for best recall.
+    retrievalModeVector: Vector only
+    hybridScoreWarning: Hybrid mode uses a different relevance scale (RRF). Your previous threshold may need lowering — try 0 to start.
+    pinGateTitle: Pinned RAG relevance gate
+    pinGateHint: Skip pinned envelopes when the question looks off-topic. 0 = always attach.
+    pinMinScore: Min relevance score
+    pinMinScoreHint: Lower = more results, higher = stricter relevance. Try 0 to start.
+    contextualHint: Chunks will be indexed with LLM-generated context prefixes (~1 LLM call per chunk).
+    newCollection: New collection
+    newCollectionHint: Pick a folder (existing or new), then drop files into it. Indexing runs locally — files stay on your disk, vectors go to Neon.
+    newCollectionName: Collection name
+    nameInvalid: Name must start with a letter or digit; letters, digits, dashes and underscores only.
+    nameExists: A collection named "$1" already exists.
+    folderLabel: Folder
+    folderPlaceholder: Choose a folder…
+    folderNewOption: + New folder…
+    folderNewPlaceholder: Type a name and press Enter
+    folderNoFolders: No folders yet — type a name above
+    filesInsideFolder: Files in this folder
+    pickFiles: Pick files
+    pickFolder: Pick folder
+    pickedCount: $1 files · $2
+    pickedSkipped: $1 file(s) skipped — unsupported extension
+    reindexBanner: Adding files to "$1" — existing chunks will be replaced by the new ones.
+    progressReading: Reading $1 / $2 — $3
+    progressChunking: Chunked $1 chunks
+    progressEmbedding: Embedding $1 / $2
+    progressInserting: Inserting $1 / $2
+    index: Index
+    cancel: Cancel
+    indexDone: Indexed $1 chunks
+    indexFailed: Indexing failed
+    reindex: Re-index (re-pick files)
+    renameCollection: Rename collection
+    renameCollectionLabel: New name
+    renamePlaceholder: Type a new name
+    renameConfirm: Rename "$1" to "$2"?
+    renameConfirmHint: Existing chunks in Neon will be re-tagged with the new name. Embeddings are not regenerated — search results stay identical.
+    renameSuccess: Renamed "$1" → "$2"
+    renameFailed: Rename failed
+    renameInUse: A collection named "$1" already exists
+    deleteCollection: Delete collection
+    confirmDeleteTitle: Delete collection?
+    confirmDelete: Delete collection "$1" and its $2 chunks from Neon? Files on your disk are not affected.
+    deleteSuccess: Deleted "$1"
+    deleteFailed: Delete failed
+  scheduler:
+    title: Scheduled tasks
+    description: Run fetch or webcheck jobs on a cron or interval schedule in the background.
+    empty: No scheduled tasks yet. Create one below to start fetching in the background.
+    createButton: New task
+    columns:
+      name: Name
+      schedule: Schedule
+      action: Action
+      lastResult: Result
+      enabled: Enabled
+    scheduleType:
+      interval: Every N minutes
+      cron: Cron expression
+    intervalLabel: Interval (minutes)
+    cronLabel: Cron expression
+    cronPlaceholder: '*/15 * * * *'
+    actionType:
+      fetch: Fetch URL
+      webcheck: Health check
+    fetchUrlLabel: URL
+    fetchExtractLabel: Extract field (optional)
+    fetchExtractPlaceholder: data.user.name
+    webcheckUrlLabel: URL
+    webcheckExpectedLabel: Expected text (for contains_text)
+    notifyOnSuccess: Notify on success
+    notifyOnFailure: Notify on failure
+    enabled: Enabled
+    dialogCreateTitle: New scheduled task
+    dialogEditTitle: Edit scheduled task
+    dialogSave: Save
+    dialogSaveError: Couldn't save task. Check the fields and try again.
+    dialogCancel: Cancel
+    dialogDelete: Delete
+    deleteConfirmTitle: Delete scheduled task?
+    deleteConfirmBody: Delete "$1"? This cannot be undone.
+    runNowButton: Run now
+    runNowSuccess: Task "$1" dispatched (watch for the result).
+    runNowFailure: 'Task "$1" failed: $2'
+    resultToastSuccess: $1 ran successfully
+    resultToastFailure: $1 failed
+    table:
+      scheduleEvery: every $1 min
+      actionStatus200: status 200
+      actionContainsText: contains "$1"
+      dialogDescription: BG validates on save; failed fields surface here.
+      nameLabel: Name
+      webcheckConditionStatus200: status 200
+      webcheckConditionContainsText: contains text
+      fetchUrlPlaceholder: https://example.com/api
+      webcheckUrlPlaceholder: https://example.com/health
+    permissionDeniedBody: System notifications are blocked. Enable them in your browser's site settings to receive scheduler task results.
+  notifications:
+    title: Notification channels
+    description: Send scheduler task results to ntfy, Telegram, Discord/Slack-style webhooks, or any custom endpoint. Channels fire alongside the in-browser desktop notification.
+    empty:
+      title: No channels configured
+      hint: Add one below to start receiving scheduler results outside the browser.
+    columns:
+      name: Name
+      kind: Channel
+      enabled: 'On'
+      lastTested: Last tested
+    kinds:
+      ntfy: ntfy
+      telegram: Telegram
+      webhook: Generic webhook
+    form:
+      name: Display name
+      namePlaceholder: My alerts
+      topicLabel: Topic
+      topicPlaceholder: cebian-alerts
+      endpointLabel: Self-hosted ntfy endpoint (optional)
+      endpointPlaceholder: https://ntfy.example.com
+      chatIdLabel: Chat ID
+      chatIdPlaceholder: '123456789'
+      chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after sending the bot a message.
+      urlLabel: Webhook URL
+      urlPlaceholder: https://discord.com/api/webhooks/…
+      enabled: Enabled
+      notifySuccess: Notify on success
+      notifyFailure: Notify on failure
+    dialogAdd: Add notification channel
+    dialogEdit: Edit notification channel
+    buttons:
+      save: Save
+      cancel: Cancel
+      test: Send test
+      delete: Delete
+      enable: Enable
+      disable: Disable
+    deleteConfirmTitle: Delete notification channel?
+    deleteConfirmBody: Delete "$1"? This stops sending scheduler results to this channel.
+    testInProgress: Sending…
+    testResultSuccess: 'Last test: $1 ms'
+    testResultFailure: 'Test failed: $1'
+    basicAuthHint: Add `?user=<user>&pass=<pass>` to a self-hosted ntfy endpoint to send Basic auth header.
+    permissionRequired: This channel requires a token / URL to work. Fill the corresponding secret field before testing.
+  telegramGateway:
+    title: Telegram Gateway
+    description: Two-way realtime bridge between Telegram and Cebian agent. Requires a self-deployed Cloudflare Worker relay.
+    workerUrl: Worker URL
+    botToken: Bot token
+    webhookSecret: Webhook secret
+    wsAuthToken: WS auth token
+    allowedChatIds: Allowed chat IDs
+    chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after messaging the bot.
+    interactiveMode: Interactive mode (route Telegram messages to agent)
+    save: Save
+    saved: Saved successfully
 chat:
   composer:
-    placeholder: "Type '/' for commands…"
-    pickElement: "Pick element"
-    cancelPick: "Cancel pick"
-    pickRegion: "Crop region"
-    cancelRegionPick: "Cancel crop"
-    regionPickFailed: "Failed to capture region"
-    screenshot: "Screenshot"
-    uploadFile: "Upload file"
-    mobileMode: "Mobile mode"
-    openStorage: "Filesystem"
-    needModel: "Please select an AI model first"
-    goToSettings: "Go to settings"
-    readPromptFailed: "Failed to read prompt"
-    elementAdded: "Element already added"
-    elementPickFailed: "Failed to pick element"
-    elementPickUnsupported: "Element picker isn't supported on this page"
-    elementPickNavigated: "Element picker cancelled — the page navigated"
-    imageAlreadyAdded: "Image already added"
-    screenshotFailed: "Screenshot failed"
+    placeholder: Type '/' for commands…
+    pickElement: Pick element
+    cancelPick: Cancel pick
+    screenshot: Screenshot
+    uploadFile: Upload file
+    mobileMode: Mobile mode
+    needModel: Please select an AI model first
+    goToSettings: Go to settings
+    readPromptFailed: Failed to read prompt
+    elementAdded: Element already added
+    elementPickFailed: Failed to pick element
+    elementPickUnsupported: Element picker isn't supported on this page
+    elementPickNavigated: Element picker cancelled — the page navigated
+    imageAlreadyAdded: Image already added
+    screenshotFailed: Screenshot failed
+    maxAttachments: Up to $1 attachments
+    truncatedFiles: Only added the first $1 file(s); limit reached
+    fileTooLarge: $1 exceeds $2
+    readFileFailed: 'Failed to read: $1'
+    unsupportedFileType: 'Unsupported file type: $1'
+    modelNoImage: Current model doesn't support multimodal input
+    imageStripped: Removed image attachments — the current model doesn't support multimodal input
+    noPrompts: No prompts yet — create one from AI config
+    noMatch: No matches
+    iframeEnterHint: ⏎ enter
+    voiceStart: Voice input
+    voiceStop: Stop voice input
+    voicePreparing: Preparing the speech model…
+    voiceNeedPermission: Microphone access is needed — grant it in the tab that just opened, then click the mic again.
+    voiceDenied: Microphone access is blocked. Allow it for Cebian in Chrome settings, then try again.
+    voiceLanguageUnavailable: Speech recognition isn't available for the current language.
+    voiceNoSpeech: No speech detected. Try again.
+    voiceAudioCapture: No microphone was found, or it couldn't be accessed.
+    voiceNetworkFailed: Couldn't reach the speech recognition service. Check your network and try again.
+    voiceFailed: Voice input failed. Please try again.
+    pickRegion: Crop region
+    cancelRegionPick: Cancel crop
+    regionPickFailed: Failed to capture region
+    openStorage: Filesystem
     workerTeam:
-      fast: "Fast"
-      team: "Team"
-      toggleHint: "Switch between Fast Mode (main agent writes directly) and Team Mode (delegate to worker sub-agents)"
+      fast: Fast
+      team: Team
+      toggleHint: Switch between Fast Mode (main agent writes directly) and Team Mode (delegate to worker sub-agents)
     persona:
-      normal: "Normal"
-      openclaw: "OpenClaw"
-      toggleHint: "Switch between Normal Mode (default Cebian) and OpenClaw Mode (custom persona copy + identity)"
-    # $1 = max attachment count
-    maxAttachments: "Up to $1 attachments"
-    # $1 = number of files actually added
-    truncatedFiles: "Only added the first $1 file(s); limit reached"
-    # $1 = file name, $2 = size limit (formatted, e.g. "5 MB")
-    fileTooLarge: "$1 exceeds $2"
-    # $1 = file name
-    readFileFailed: "Failed to read: $1"
-    # $1 = file name
-    unsupportedFileType: "Unsupported file type: $1"
-    modelNoImage: "Current model doesn't support multimodal input"
-    imageStripped: "Removed image attachments — the current model doesn't support multimodal input"
-    quoteChips: "Quoted excerpts"
-    removeQuoteChip: "Remove quoted excerpt"
-    noPrompts: "No prompts yet — create one from AI config"
-    noMatch: "No matches"
-    loadMore: "Show $1 more"
-    iframeEnterHint: "⏎ enter"
-    # Voice input (local-first speech recognition with cloud fallback)
-    voiceStart: "Voice input"
-    voiceStop: "Stop voice input"
-    voicePreparing: "Preparing the speech model…"
-    voiceNeedPermission: "Microphone access is needed — grant it in the tab that just opened, then click the mic again."
-    voiceDenied: "Microphone access is blocked. Allow it for Cebian in Chrome settings, then try again."
-    voiceLanguageUnavailable: "Speech recognition isn't available for the current language."
-    voiceNoSpeech: "No speech detected. Try again."
-    voiceAudioCapture: "No microphone was found, or it couldn't be accessed."
-    voiceNetworkFailed: "Couldn't reach the speech recognition service. Check your network and try again."
-    voiceFailed: "Voice input failed. Please try again."
-    mentionAdd: "Add context"
-    removeMentionChip: "Remove mention"
-    mentionChips: "Mentions"
-    sectionSkills: "Skills"
-    sectionPrompts: "Prompts"
-    sectionFolders: "Folders"
-    sectionKnowledge: "Knowledge"
-    sectionTabs: "Add tabs"
-    noSkills: "No skills yet — create one from AI config"
-    noPromptsMention: "No prompts yet — create one from AI config"
-    noFolders: "No folders available"
-    noCollections: "No RAG collections — create one in Settings → Knowledge"
-    folderBack: "Back"
-    folderEmpty: "Empty folder"
-    loading: "Loading…"
-    # $1 = mention name
-    mentionReadFailed: "Couldn't read mention — dropped: $1"
-    tabsNotReady: "Tab mention ships in a follow-up"
-    # $1 = pin name(s), comma-separated
-    pinReadFailed: "Pinned context couldn't be read — this turn: $1"
-    # $1 = pin name, $2 = consecutive failure count
-    pinAutoRemoved: "Pin '$1' removed — source not found for the last $2 messages"
-    # Pin a prompt or skill so it rides along on every message in every
-    # chat (auto-included in <attachments>). Global scope: pinned prompts
-    # and skills persist across all sessions until unpinned. Folder / file
-    # / RAG pins are still session-scoped.
-    sectionPinned: "Pinned"
-    pinnedAutoHint: "auto"
-    pinnedChips: "Auto-included in every chat"
-    togglePin: "Pin across chats"
-    unpin: "Unpin from all chats"
+      normal: Normal
+      openclaw: OpenClaw
+      toggleHint: Switch between Normal Mode (default Cebian) and OpenClaw Mode (custom persona copy + identity)
+    quoteChips: Quoted excerpts
+    removeQuoteChip: Remove quoted excerpt
+    loadMore: Show $1 more
+    mentionAdd: Add context
+    removeMentionChip: Remove mention
+    mentionChips: Mentions
+    sectionSkills: Skills
+    sectionPrompts: Prompts
+    sectionFolders: Folders
+    sectionKnowledge: Knowledge
+    sectionTabs: Add tabs
+    noSkills: No skills yet — create one from AI config
+    noPromptsMention: No prompts yet — create one from AI config
+    noFolders: No folders available
+    noCollections: No RAG collections — create one in Settings → Knowledge
+    folderBack: Back
+    folderEmpty: Empty folder
+    loading: Loading…
+    mentionReadFailed: 'Couldn''t read mention — dropped: $1'
+    tabsNotReady: Tab mention ships in a follow-up
+    pinReadFailed: 'Pinned context couldn''t be read — this turn: $1'
+    pinAutoRemoved: Pin '$1' removed — source not found for the last $2 messages
+    sectionPinned: Pinned
+    pinnedAutoHint: auto
+    pinnedChips: Auto-included in every chat
+    togglePin: Pin across chats
+    unpin: Unpin from all chats
+  attachments:
+    image: Image
+    screenshot: Screenshot
+    imageAlt: Attachment image
+    recordingMeta: $1 events · $2
+    recordingTruncated: truncated
+    recordingDownload: Download recording JSON
+    recordingHover: $1 events · ~$2 chars
+    region: Region
+    directoryItemCount: $1 items
+    pdfPageCount: $1 pages
+    pdfPages: $1 — $2 pages
+    pdfTruncated: $1 — extracted $3 of $2 pages (text capped)
+  recorder:
+    start: Start recording user actions
+    stop: Stop recording (will attach to next message)
+    startRejectedBusy: Another sidepanel is already recording. Stop it first to start a new recording.
+    autoStoppedEvents: 'Recording auto-stopped: event limit reached'
+    autoStoppedTime: 'Recording auto-stopped: time limit reached'
+  askUser:
+    placeholder: Type a reply…
+    previous: Previous
+    next: Next
+    submit: Submit
+    skipped: Skipped
+    multiHint: Select all that apply
+  permission:
+    title: Skill $1 wants to run $2
+    requests: 'It is requesting these permissions:'
+    deny: Deny
+    allowOnce: Allow once
+    allowAlways: Always allow this skill
+    expired: This permission request has expired
+    perm:
+      pageExecuteJs: Run scripts in your web pages — read and change page content, and act through your logged-in sessions
+      vfsRead: Read files in this skill's own workspace folder
+      vfsWrite: Read and write files in this skill's own workspace folder
+      bgFetchAny: Make network requests to any website in the background, bypassing cross-origin limits
+      bgFetchPattern: Make background network requests to $1, bypassing cross-origin limits
+      chromeTabs: View and manage your browser tabs (open, close, move, reload) and capture the visible tab's contents
+      chromeWindows: View and manage your browser windows
+      chromeAlarms: Schedule and manage background timers
+      chromeWebNavigation: Read navigation details of your open pages and their frames
+      chromeBookmarks: Read and modify your bookmarks
+      chromeHistory: Read and modify your browsing history
+      chromeCookies: Read, change, and delete cookies for sites you visit, including login-session cookies normally hidden from web pages
+      chromeTopSites: Read your most-visited sites
+      chromeSessions: View and restore recently closed tabs and windows, including sessions synced from your other devices
+      chromeDownloads: View and manage your downloads, and start new ones
+      chromeNotifications: Create and manage system notifications
+      chromeFallback: Call the browser's chrome.$1 API
+  model:
+    select: Select model
+    searchPlaceholder: Search models…
+    notFound: No models found
+    addMore: Open settings to add more providers
+  thinking:
+    label: 'Thinking: $1'
+    levels:
+      'off': 'Off'
+      minimal: Minimal
+      low: Low
+      medium: Medium
+      high: High
+      xhigh: Extra High
+      max: Max
+  tool:
+    args: Arguments
+    result: Result
+  mcpApp:
+    loading: Loading interactive view…
+    retry: Retry
+    errorGeneric: Failed to load interactive view
+    errorServerUnavailable: This MCP server is no longer available. Re-enable it in settings to view this diagram.
+    errorFetchFailed: 'Couldn''t load the interactive view: $1'
+  message:
+    tokensInOut: ↑$1 ↓$2
+    tokensInBreakdownHit: uncached $1 · cached $2
+    tokensInBreakdownHitWrite: uncached $1 · cached $2 · write $3
+    retry: Retry
+    editHint: Regenerates the response from here
+    prevBranch: Previous version
+    nextBranch: Next version
+    fork: Fork
+    expandLong: Show more
+    collapseLong: Show less
+  compaction:
+    divider: Earlier context compacted
+    status: Compacting context…
+    dividerExpand: Show summary
+    dividerCollapse: Hide summary
+  session:
+    loading: Loading session…
+    modelError: Model returned an error
+    forked: New chat forked from "$1"
+    forkFailed: Fork failed
+    cancelled: Cancelled
+    notConnected: Not connected to background service — please try again
+    reconnecting: Connection lost, retrying…
+    welcomeReady: What can I help you with?
+    exampleSummarizeTitle: Summarize this page
+    exampleSummarizePrompt: Read the content of the current page and summarize its key points concisely.
+    exampleTranslateTitle: Translate this page
+    exampleTranslatePrompt: Translate the main content of the current page into English, keeping the original structure.
+    exampleExtractTitle: Extract key points
+    exampleExtractPrompt: Extract the key information from the current page (title, main points, important links) and organize it into a list.
+    exampleTabsTitle: Organize my tabs
+    exampleTabsPrompt: Take a look at the tabs I currently have open, group them by topic, and point out any duplicate pages I can close.
+    scrollToBottom: Jump to latest
+    contextOverflow:
+      title: Context exceeds model limit
+      retry: Retry (drop earlier history)
+      stop: Stop
+    compactionSkipped:
+      toast: Context too full to compact ($1% used). Try dropping a large paste or starting a new conversation.
+    compactNow:
+      idle: Compact now
+      busy: Compacting…
+      empty: Need at least 2 turns to compact
+      noModel: Select a model first
   mention:
     builtinSkill:
-      funFactsName: "Fun facts"
-      funFactsBody: |
-        Sprinkle 1-2 surprising or delightful facts into every reply — historical trivia, science oddities, language etymology, etc. Keep them short (one sentence each). Always cite the source if you know it; otherwise hedge with "apparently" / "reportedly". Don't force facts into serious or emotional requests — read the room.
-      hypeItUpName: "Hype it up!"
-      hypeItUpBody: |
-        Respond with high-energy enthusiasm. Use celebratory emojis sparingly (1-3 max), exclamations, and punchy short sentences. Mirror the user's excitement level — if they're chill, dial back to ~60% hype; if they're hyped, match them. Avoid corporate-sounding cheerfulness. Be genuine, be excited, be YOU on a great day.
-      explainInCharacterName: "Explain something in character"
-      explainInCharacterBody: |
-        Adopt a memorable persona for the explanation — a grizzled sea captain, a 1920s noir detective, a time-traveling historian, etc. Pick the persona that best fits the topic. Stay in character throughout: vocabulary, metaphors, mannerisms, all consistent. Briefly introduce the character on first use ("Right then, gather 'round — Captain Marlow here…"), then commit fully. End the explanation in-character too.
-  attachments:
-    image: "Image"
-    screenshot: "Screenshot"
-    region: "Region"
-    imageAlt: "Attachment image"
-    # $1 = event count, $2 = formatted duration (M:SS)
-    recordingMeta: "$1 events · $2"
-    recordingTruncated: "truncated"
-    # $1 = child entry count (files + dirs the chip mentions)
-    directoryItemCount: "$1 items"
-    recordingDownload: "Download recording JSON"
-    # $1 = event count, $2 = compact char count (e.g. 1.2K, 3M)
-    recordingHover: "$1 events · ~$2 chars"
-    # PDF attachment badge label. $1 = page count
-    pdfPageCount: "$1 pages"
-    # PDF attachment tooltip when fully extracted. $1 = filename, $2 = page count
-    pdfPages: "$1 — $2 pages"
-    # PDF attachment tooltip when truncated. $1 = filename, $2 = total pages, $3 = pages extracted
-    pdfTruncated: "$1 — extracted $3 of $2 pages (text capped)"
-  recorder:
-    start: "Start recording user actions"
-    stop: "Stop recording (will attach to next message)"
-    startRejectedBusy: "Another sidepanel is already recording. Stop it first to start a new recording."
-    autoStoppedEvents: "Recording auto-stopped: event limit reached"
-    autoStoppedTime: "Recording auto-stopped: time limit reached"
-  askUser:
-    placeholder: "Type a reply…"
-    # Multi-question form (paged): navigation + per-question affordances
-    previous: "Previous"
-    next: "Next"
-    submit: "Submit"
-    skipped: "Skipped"
-    multiHint: "Select all that apply"
-  permission:
-    # Permission prompt shown before a skill script runs. $1 = skill name, $2 = script path
-    title: "Skill $1 wants to run $2"
-    requests: "It is requesting these permissions:"
-    deny: "Deny"
-    allowOnce: "Allow once"
-    allowAlways: "Always allow this skill"
-    # Shown when the request can no longer be answered (e.g. the background
-    # was restarted while it was pending).
-    expired: "This permission request has expired"
-    perm:
-      pageExecuteJs: "Run scripts in your web pages — read and change page content, and act through your logged-in sessions"
-      vfsRead: "Read files in this skill's own workspace folder"
-      vfsWrite: "Read and write files in this skill's own workspace folder"
-      bgFetchAny: "Make network requests to any website in the background, bypassing cross-origin limits"
-      # $1 = match pattern (host scope)
-      bgFetchPattern: "Make background network requests to $1, bypassing cross-origin limits"
-      chromeTabs: "View and manage your browser tabs (open, close, move, reload) and capture the visible tab's contents"
-      chromeWindows: "View and manage your browser windows"
-      chromeAlarms: "Schedule and manage background timers"
-      chromeWebNavigation: "Read navigation details of your open pages and their frames"
-      chromeBookmarks: "Read and modify your bookmarks"
-      chromeHistory: "Read and modify your browsing history"
-      chromeCookies: "Read, change, and delete cookies for sites you visit, including login-session cookies normally hidden from web pages"
-      chromeTopSites: "Read your most-visited sites"
-      chromeSessions: "View and restore recently closed tabs and windows, including sessions synced from your other devices"
-      chromeDownloads: "View and manage your downloads, and start new ones"
-      chromeNotifications: "Create and manage system notifications"
-      # $1 = chrome namespace
-      chromeFallback: "Call the browser's chrome.$1 API"
-  model:
-    select: "Select model"
-    searchPlaceholder: "Search models…"
-    notFound: "No models found"
-    addMore: "Open settings to add more providers"
-  thinking:
-    # $1 = current level label
-    label: "Thinking: $1"
-    levels:
-      "off": "Off"
-      minimal: "Minimal"
-      low: "Low"
-      medium: "Medium"
-      high: "High"
-      xhigh: "Extra High"
-      max: "Max"
-  tool:
-    args: "Arguments"
-    result: "Result"
-  mcpApp:
-    # Shown while the MCP App's HTML is being fetched from the server.
-    loading: "Loading interactive view…"
-    # Tooltip / label for the retry button when the fetch fails.
-    retry: "Retry"
-    # Fallback error message when the BG didn't supply one. Should rarely
-    # surface in practice — the BG always classifies into a `code` +
-    # `message` pair.
-    errorGeneric: "Failed to load interactive view"
-    # Code-specific error copy. The BG's raw `message` (e.g. a transport
-    # error string) is appended as a secondary detail line where useful.
-    errorServerUnavailable: "This MCP server is no longer available. Re-enable it in settings to view this diagram."
-    # $1 = raw failure detail from the BG (e.g. "connect ECONNREFUSED ...")
-    errorFetchFailed: "Couldn't load the interactive view: $1"
+      funFactsName: Fun facts
+      funFactsBody: 'Sprinkle 1-2 surprising or delightful facts into every reply — historical trivia, science oddities, language etymology, etc. Keep them short (one sentence each). Always cite the source if you know it; otherwise hedge with "apparently" / "reportedly". Don''t force facts into serious or emotional requests — read the room.
+
+        '
+      hypeItUpName: Hype it up!
+      hypeItUpBody: 'Respond with high-energy enthusiasm. Use celebratory emojis sparingly (1-3 max), exclamations, and punchy short sentences. Mirror the user''s excitement level — if they''re chill, dial back to ~60% hype; if they''re hyped, match them. Avoid corporate-sounding cheerfulness. Be genuine, be excited, be YOU on a great day.
+
+        '
+      explainInCharacterName: Explain something in character
+      explainInCharacterBody: 'Adopt a memorable persona for the explanation — a grizzled sea captain, a 1920s noir detective, a time-traveling historian, etc. Pick the persona that best fits the topic. Stay in character throughout: vocabulary, metaphors, mannerisms, all consistent. Briefly introduce the character on first use ("Right then, gather ''round — Captain Marlow here…"), then commit fully. End the explanation in-character too.
+
+        '
   fork:
-    # Header badge label rendered next to the source session title — marks
-    # the current view as a branch of another conversation.
-    badgeLabel: "Forked from:"
-    # Tooltip on the back link in the fork badge.
-    backTooltip: "Go to original conversation"
-  message:
-    # $1 = input tokens (formatted, e.g. "1.2k"), $2 = output tokens (formatted)
-    tokensInOut: "↑$1 ↓$2"
-    # Cache breakdown without write. $1 = uncached, $2 = cache hit (both formatted)
-    tokensInBreakdownHit: "uncached $1 · cached $2"
-    # Cache breakdown with write. $1 = uncached, $2 = cache hit, $3 = cache write (all formatted)
-    tokensInBreakdownHitWrite: "uncached $1 · cached $2 · write $3"
-    # Tooltip/aria-label for the retry button on the latest assistant turn.
-    retry: "Retry"
-    # Hint shown while editing a sent user message (issue #44).
-    editHint: "Regenerates the response from here"
-    # Branch switcher ("‹ n/m ›") tooltips on messages with sibling versions.
-    prevBranch: "Previous version"
-    nextBranch: "Next version"
-    # Toggle that expands a collapsed over-long user message bubble.
-    expandLong: "Show more"
-    # Toggle that re-collapses an expanded over-long user message bubble.
-    collapseLong: "Show less"
+    badgeLabel: 'Forked from:'
+    backTooltip: Go to original conversation
   edit:
-    # Dialog title when the user clicks the pencil on a prior user turn.
-    title: "Edit message"
-    # Body text under the title — explains that this rewinds everything after
-    # the edited turn and reruns the agent.
-    description: "Edit this message and rerun the agent from this point. Everything after it will be discarded."
-    # Submit button label.
-    submit: "Rerun"
-  compaction:
-    # Label on the divider marking where earlier context was folded into a summary.
-    divider: "Earlier context compacted"
-    # Bottom status bar shown while the compaction LLM call is in flight.
-    status: "Compacting context…"
-    # Disclosure affordance on the glass-capsule divider — click the whole
-    # capsule (or its chevron) to view the LLM-generated summary text.
-    dividerExpand: "Show summary"
-    dividerCollapse: "Hide summary"
+    title: Edit message
+    description: Edit this message and rerun the agent from this point. Everything after it will be discarded.
+    submit: Rerun
   context:
-    # ContextUsagePill tooltip + popover title — describes what's being shown.
-    usage: "Context usage"
-    # "$1" = integer percent (already rounded by severity.ts).
-    percent: "$1%"
-    # "$1" = token count (formatCompactCount K-suffix already applied).
-    headroom: "$1 left"
-    # Status copy shown under the radial gauge, gated by severity.
-    plenty: "Plenty of room"
-    tight: "Getting tight — consider compacting"
-    nearFull: "Context nearly full"
-    # Breakdown row labels.
-    used: "Used"
-    cached: "Cached"
-    free: "Free"
-    # Last breakdown row — total context window capacity.
-    total: "Total"
-    # Footer link in the popover — same action as the toolbar button.
-    compactNow: "Compact now"
-  session:
-    loading: "Loading session…"
-    modelError: "Model returned an error"
-    # 400 context-overflow recovery card. The agent already auto-retried
-    # twice internally; this card is the third strike — user picks the
-    # outcome. Retry drops 50% of oldest messages and continues; Stop
-    # cancels the run so the user can start a new turn.
-    contextOverflow:
-      title: "Context exceeds model limit"
-      retry: "Retry (drop earlier history)"
-      stop: "Stop"
-    # Transient toast when the BG proactive 80% pre-check (Subtask 2)
-    # tried to compact but found no usable cut point — typically because
-    # a single user message alone exceeds `keepRecentTokens`. The agent
-    # proceeds without compaction and the next request is at high risk
-    # of 400. No card, no action — just heads-up so the user can drop a
-    # giant paste or start a new session before hitting the wall.
-    compactionSkipped:
-      # $1 = percent of context currently used
-      toast: "Context too full to compact ($1% used). Try dropping a large paste or starting a new conversation."
-    # CompactNowButton tooltip strings — varies by reason the action is unavailable.
-    compactNow:
-      # Idle label: button is clickable.
-      idle: "Compact now"
-      # Agent running / mid-compaction: spinner is shown, action is blocked.
-      busy: "Compacting…"
-      # messages.length < 2: a single user message can't form a cut point.
-      empty: "Need at least 2 turns to compact"
-      # Model selector is empty (no provider/model chosen yet).
-      noModel: "Select a model first"
-    # Shown inside an assistant bubble when the user cancelled the run
-    # (either mid-stream or while a retry was rebuilding). Stays neutral
-    # — cancelling isn't an error, just a stopped attempt.
-    cancelled: "Cancelled"
-    # `lastError` toast shown by the chat composer when send/retry is
-    # attempted before the chrome.runtime port has connected (typically
-    # right after SW wakes up or after a disconnect-retry).
-    notConnected: "Not connected to background service — please try again"
-    # Shown after the auto-reconnect has tried several times without
-    # success. Hints that recovery is in progress, doesn't promise a fix.
-    reconnecting: "Connection lost, retrying…"
-    welcomeReady: "What can I help you with?"
-    # Example prompt cards shown in the new-chat empty state. The *Title is
-    # the short card label; the *Prompt is the full text dropped into the
-    # composer when the card is clicked (user can edit before sending).
-    exampleSummarizeTitle: "Summarize this page"
-    exampleSummarizePrompt: "Read the content of the current page and summarize its key points concisely."
-    exampleTranslateTitle: "Translate this page"
-    exampleTranslatePrompt: "Translate the main content of the current page into English, keeping the original structure."
-    exampleExtractTitle: "Extract key points"
-    exampleExtractPrompt: "Extract the key information from the current page (title, main points, important links) and organize it into a list."
-    exampleTabsTitle: "Organize my tabs"
-    exampleTabsPrompt: "Take a look at the tabs I currently have open, group them by topic, and point out any duplicate pages I can close."
-    scrollToBottom: "Jump to latest"
+    usage: Context usage
+    percent: $1%
+    headroom: $1 left
+    plenty: Plenty of room
+    tight: Getting tight — consider compacting
+    nearFull: Context nearly full
+    used: Used
+    cached: Cached
+    free: Free
+    total: Total
+    compactNow: Compact now
   workerTeamRoster:
-    title: "Worker team"
-    # $1 = configured count, $2 = total roles
-    configuredCount: "$1 / $2 configured"
-    off: "Off"
-    unconfigured: "No worker models configured. Open Settings → Advanced → Worker models to set up."
-    expand: "Expand worker team"
-    collapse: "Collapse worker team"
+    title: Worker team
+    configuredCount: $1 / $2 configured
+    false: 'Off'
+    unconfigured: No worker models configured. Open Settings → Advanced → Worker models to set up.
+    expand: Expand worker team
+    collapse: Collapse worker team
     role:
-      content_writer: "Content"
-      frontend_coder: "Coder"
-      reviewer: "Reviewer"
-      researcher: "Researcher"
+      content_writer: Content
+      frontend_coder: Coder
+      reviewer: Reviewer
+      researcher: Researcher
+    'off': 'Off'
   delegation:
-    # Worker sub-agent card rendered in chat stream when main agent calls
-    # `delegate_task`. Status badge colors come from the same Badge variants
-    # used by the Sidebar Team Roster widget — only the copy is localized.
-    retryBadge: "Retry"
-    openFile: "Open file"
+    retryBadge: Retry
+    openFile: Open file
     section:
-      task: "Task"
-      model: "Model"
-      summary: "Summary"
-      notes: "Notes"
+      task: Task
+      model: Model
+      summary: Summary
+      notes: Notes
     status:
-      running: "Running…"
-      success: "Completed"
-      partial: "Partial"
-      failed: "Failed"
-      cancelled: "Cancelled"
-      timedOut: "Timed out"
-    # Phase 2.3 role-action label：status='running' 时挂在 header 的 outline
-    # badge, 让用户一眼看出「这个 worker 现在在做什么」（不只是「在跑」）。
-    # 与 status badge 区分开—— 状态是「跑成/跑挂」, action 是「正在执行的动作」.
+      running: Running…
+      success: Completed
+      partial: Partial
+      failed: Failed
+      cancelled: Cancelled
+      timedOut: Timed out
     action:
-      content_writer: "writing"
-      frontend_coder: "coding"
-      reviewer: "reviewing"
-      researcher: "researching"
-    # Fail-Fast path (worker-runner.ts auto-aborts after 120s). Hint tells the
-    # user "switch the model on Sidebar → Team Roster and retry" instead of
-    # leaving them staring at a stalled card. Two variants: one mentions the
-    # offending model ($1), the other is generic when modelKey is missing.
+      content_writer: writing
+      frontend_coder: coding
+      reviewer: reviewing
+      researcher: researching
     timeoutHint:
-      withModel: "Worker $1 timed out / API error. Switch to a different model on the Sidebar Team Roster and retry."
-      generic: "This worker timed out / hit an API error. Switch to a different model on the Sidebar Team Roster and retry."
-    # Footer on failed / timedOut cards so the user can judge "is the API
-    # actually slow, or did it really hang?". $1 = whole seconds (≥1).
-    duration: "Failed after $1 s"
-    # Subtask 1.3 batch container: header shows coarse count of a parallel
-    # delegate_task call. $1=total, $2=succeeded, $3=failed. Inner
-    # DelegationCardItem each carries its own status / elapsed timer.
+      withModel: Worker $1 timed out / API error. Switch to a different model on the Sidebar Team Roster and retry.
+      generic: This worker timed out / hit an API error. Switch to a different model on the Sidebar Team Roster and retry.
+    duration: Failed after $1 s
     batch:
-      header: "Batch · $1 tasks — $2 succeeded, $3 failed"
-    # Subtask 2.3 reviewer audit mini-table. Header label + per-row status
-    # icon a11y labels (screen reader announces "pass" / "warn" / "fail"
-    # instead of the underlying lucide icon name). auditHeader renders above
-    # the table; the per-bucket counts are composed inline by the React
-    # component, so i18n only owns the label text.
+      header: Batch · $1 tasks — $2 succeeded, $3 failed
     reviewer:
-      auditHeader: "Audit"
-      statusPass: "pass"
-      statusWarn: "warn"
-      statusFail: "fail"
-    # Phase 2 UI feedback: live micro-stream box inside the running card.
-    # ARIA label cho screen reader when box mounts (LiveStreamBox always
-    # renders aria-live="polite"); aria-label = "Live stream".
+      auditHeader: Audit
+      statusPass: pass
+      statusWarn: warn
+      statusFail: fail
     liveStream:
-      label: "Live stream"
-      thinking: "Thinking…"
-      writing: "Writing…"
-      generating: "Generating file…"
-
-
-# ─── Provider sub-components (OAuth / API Key / custom) ───
+      label: Live stream
+      thinking: Thinking…
+      writing: Writing…
+      generating: Generating file…
 provider:
   section:
-    viaApiKey: "Via API Key"
-    # $1 = number of hidden providers
-    showMore: "Show more ($1)"
-    showLess: "Show less"
+    viaApiKey: Via API Key
+    showMore: Show more ($1)
+    showLess: Show less
   status:
-    connected: "Connected"
-    notConfigured: "Not configured"
-    configured: "Configured"
-    unverified: "Unverified"
-    verifying: "Verifying"
-    failed: "Failed"
+    connected: Connected
+    notConfigured: Not configured
+    configured: Configured
+    unverified: Unverified
+    verifying: Verifying
+    failed: Failed
   oauth:
-    signIn: "Sign in"
-    signOut: "Sign out"
-    loggedIn: "Signed in"
-    notLoggedIn: "Not signed in"
-    authorizing: "Authorizing"
-    authFailed: "Authorization failed"
-    enterCode: "Enter the code in the browser:"
-    completeInBrowser: "Complete authorization in the popup browser window…"
+    signIn: Sign in
+    signOut: Sign out
+    loggedIn: Signed in
+    notLoggedIn: Not signed in
+    authorizing: Authorizing
+    authFailed: Authorization failed
+    enterCode: 'Enter the code in the browser:'
+    completeInBrowser: Complete authorization in the popup browser window…
     descriptions:
-      githubCopilot: "Use your Copilot subscription to access GPT/Claude"
-      openaiCodex: "Use your ChatGPT Plus/Pro subscription"
+      githubCopilot: Use your Copilot subscription to access GPT/Claude
+      openaiCodex: Use your ChatGPT Plus/Pro subscription
   apiKey:
-    placeholder: "Enter API Key"
-    disconnect: "Disconnect"
-    noModels: "No available models"
-    savedUnverified: "Saved, but the connectivity test didn't pass"
+    placeholder: Enter API Key
+    disconnect: Disconnect
+    noModels: No available models
+    savedUnverified: Saved, but the connectivity test didn't pass
   summary:
-    # $1 = auth label (OAuth / API Key), $2 = model count
-    modelsAvailable: "$1 · $2 models available"
+    modelsAvailable: $1 · $2 models available
   form:
-    name: "Name"
-    namePlaceholder: "e.g. My Ollama"
-    baseUrl: "Base URL"
-    baseUrlPlaceholder: "e.g. http://localhost:11434/v1"
-    apiKeyOptional: "API Key (optional)"
-    apiKeyPlaceholder: "Leave empty to skip auth"
-    models: "Models"
-    autoFetch: "Auto-fetch"
-    showAll: "Show all"
-    hideAll: "Hide all"
-    enabled: "Show"
-    hidden: "hidden"
-    reasoning: "Reasoning"
-    image: "Multimodal"
-    # $1 = model id
-    modelSettingsFor: "Model settings for $1"
-    # $1 = model id
-    removeModel: "Remove $1"
-    contextWindow: "Context window"
-    contextWindowPlaceholder: "128000 (default)"
-    maxTokens: "Max output"
-    maxTokensPlaceholder: "0 (unlimited)"
-    tokensHint: "Blank uses defaults · context window sets when history is compacted, not a hard limit"
-    manualModelPlaceholder: "Manual Model ID"
-    addManual: "Add model manually"
-    advanced: "Advanced"
-    headers: "Custom headers"
-    authOverrideHint: "You set both an API Key and an Authorization header; the API Key wins. To authenticate via the header, clear the API Key above."
-    addCustom: "Add custom provider"
-    fetchFailed: "Failed to fetch models, please add manually"
-# ─── Tool runtime labels (shown in ToolCard) ───
+    name: Name
+    namePlaceholder: e.g. My Ollama
+    baseUrl: Base URL
+    baseUrlPlaceholder: e.g. http://localhost:11434/v1
+    apiKeyOptional: API Key (optional)
+    apiKeyPlaceholder: Leave empty to skip auth
+    models: Models
+    autoFetch: Auto-fetch
+    reasoning: Reasoning
+    image: Multimodal
+    modelSettingsFor: Model settings for $1
+    removeModel: Remove $1
+    contextWindow: Context window
+    contextWindowPlaceholder: 128000 (default)
+    maxTokens: Max output
+    maxTokensPlaceholder: 0 (unlimited)
+    tokensHint: Blank uses defaults · context window sets when history is compacted, not a hard limit
+    manualModelPlaceholder: Manual Model ID
+    addManual: Add model manually
+    advanced: Advanced
+    headers: Custom headers
+    authOverrideHint: You set both an API Key and an Authorization header; the API Key wins. To authenticate via the header, clear the API Key above.
+    addCustom: Add custom provider
+    fetchFailed: Failed to fetch models, please add manually
+    showAll: Show all
+    hideAll: Hide all
+    enabled: Show
+    hidden: hidden
 tools:
-  # $1 = mode (and optional selector suffix)
-  readPage: "Reading page content ($1)"
-  executeJs: "Running script"
-  screenshot: "Taking page screenshot"
-  askUser: "Waiting for user reply"
+  readPage: Reading page content ($1)
+  executeJs: Running script
+  screenshot: Taking page screenshot
+  askUser: Waiting for user reply
   pdf:
-    info: "Reading PDF metadata"
-    # $1 = page range (e.g. "1-10") or the literal "all pages"
-    read: "Reading PDF text ($1)"
-    # $1 = search query (truncated)
-    search: "Searching PDF for \"$1\""
-    # $1 = action name
-    unknown: "pdf: $1"
-  # $1 = skill name
-  runSkill: "Running skill script $1"
-  # $1 = RAG collection name
-  ragInspect: "Inspecting RAG collection $1"
-  # $1 = RAG collection name, $2 = query text
-  ragSearch: "Searching RAG collection $1 for $2"
-  # $1 = MCP server slug (display form), $2 = remote tool name
-  mcpCall: "$1 · $2"
+    info: Reading PDF metadata
+    read: Reading PDF text ($1)
+    search: Searching PDF for "$1"
+    unknown: 'pdf: $1'
+  webSearch: Searching the web for "$1"
+  runSkill: Running skill script $1
+  mcpCall: $1 · $2
   fs:
-    # $1 = file path
-    createFile: "Creating file $1"
-    # $1 = file path
-    editFile: "Editing file $1"
-    # $1 = directory path
-    mkdir: "Creating directory $1"
-    # $1 = old path
-    rename: "Renaming $1"
-    # $1 = path
-    delete: "Deleting $1"
-    # $1 = file path
-    readFile: "Reading file $1"
-    # $1 = directory path
-    list: "Listing directory $1"
-    # $1 = search pattern
-    searchFiles: "Searching files \"$1\""
-    # $1 = search pattern
-    searchContent: "Searching file content \"$1\""
-    # $1 = destination path
-    saveUrl: "Saving URL to $1"
+    createFile: Creating file $1
+    editFile: Editing file $1
+    mkdir: Creating directory $1
+    rename: Renaming $1
+    delete: Deleting $1
+    readFile: Reading file $1
+    list: Listing directory $1
+    searchFiles: Searching files "$1"
+    searchContent: Searching file content "$1"
+    saveUrl: Saving URL to $1
   memory:
-    save: "Saving memory"
-    recall: "Recalling memory"
-    forget: "Deleting memory"
+    save: Saving memory
+    recall: Recalling memory
+    forget: Deleting memory
   chromeApi:
-    help: "Looking up Chrome API docs"
-    # $1 = namespace, $2 = method
-    call: "Calling chrome.$1.$2"
+    help: Looking up Chrome API docs
+    call: Calling chrome.$1.$2
   interact:
-    # $1 = target suffix (with leading space) or empty
-    click: "Clicking$1"
-    dblclick: "Double-clicking$1"
-    rightclick: "Right-clicking$1"
-    hover: "Hovering$1"
-    focus: "Focusing$1"
-    type: "Typing text$1"
-    clear: "Clearing input$1"
-    select: "Selecting option$1"
-    scroll: "Scrolling page"
-    # $1 = key name
-    keypress: "Pressing key $1"
-    # $1 = target suffix (with leading space) or empty
-    wait: "Waiting for element to appear$1"
-    waitHidden: "Waiting for element to disappear$1"
-    waitNavigation: "Waiting for page to load"
-    # $1 = step count
-    sequence: "Running action sequence ($1 steps)"
-    # $1 = action name
-    unknown: "interact: $1"
+    click: Clicking$1
+    dblclick: Double-clicking$1
+    rightclick: Right-clicking$1
+    hover: Hovering$1
+    focus: Focusing$1
+    type: Typing text$1
+    clear: Clearing input$1
+    select: Selecting option$1
+    scroll: Scrolling page
+    keypress: Pressing key $1
+    wait: Waiting for element to appear$1
+    waitHidden: Waiting for element to disappear$1
+    waitNavigation: Waiting for page to load
+    sequence: Running action sequence ($1 steps)
+    unknown: 'interact: $1'
   inspect:
-    # $1 = selector
-    selector: "Inspecting $1"
-    # $1 = text query
-    text: "Inspecting text \"$1\""
-    page: "Inspecting page"
+    selector: Inspecting $1
+    text: Inspecting text "$1"
+    page: Inspecting page
   tab:
-    open: "Opening new tab"
-    # $1 = tab id
-    close: "Closing tab $1"
-    # $1 = tab id
-    switch: "Switching to tab $1"
-    reload: "Reloading page"
-    listFrames: "Listing page frames"
-    # $1 = action name
-    unknown: "tab: $1"
-
-# ─── Dialogs ───
+    open: Opening new tab
+    close: Closing tab $1
+    switch: Switching to tab $1
+    reload: Reloading page
+    listFrames: Listing page frames
+    unknown: 'tab: $1'
+  ragInspect: Inspecting RAG collection $1
+  ragSearch: Searching RAG collection $1 for $2
 dialogs:
   imagePreview:
-    title: "Image preview"
-    alt: "Preview"
+    title: Image preview
+    alt: Preview
   updateNotice:
-    title: "New version available"
-    # $1 = latest version, $2 = current version
-    description: "Cebian v$1 is out. You're on v$2."
-    updateNow: "Update now"
-    skipVersion: "Skip this version"
-
-# ─── VFS browser entrypoint ───
+    title: New version available
+    description: Cebian v$1 is out. You're on v$2.
+    updateNow: Update now
+    skipVersion: Skip this version
 vfs:
-  backToRoot: "Back to root"
-  zipping: "Zipping…"
-  # $1 = line count
-  lines: "$1 ln"
-  # $1 = formatted file size
-  binaryFile: "[Binary file — $1]"
-  # $1 = formatted file size
-  tooLargeToPreview: "File too large to preview — $1. Use Download instead."
-  # $1 = path, $2 = formatted size, $3 = formatted limit
-  inlineTooLarge: "$1 ($2) — too large to display inline (max $3)"
-  # $1 = MIME type
-  inlineUnsupportedMime: "Unsupported file type for inline preview: $1"
-  # $1 = path, $2 = error message
-  inlineLoadFailed: "$1 — $2"
-  preview: "Preview"
-  viewSource: "View source"
-  source: "Source"
-  defaultOpen: "Default open mode"
-  openSmart: "Smart"
-  unknownFile: "Unknown file type — $1. Use Download to open it safely."
-  previousPage: "Previous page"
-  nextPage: "Next page"
-  pageNumber: "Page number"
-  zoomOut: "Zoom out"
-  zoomIn: "Zoom in"
-  fitWidth: "Fit width"
-  pdfPasswordRequired: "This PDF requires a password."
-  pdfWrongPassword: "Incorrect password. Try again."
-  pdfLoadFailed: "PDF preview failed: $1"
-  viewMode: "View mode"
-  location: "Location"
-  # Semantic root anchors shown in the breadcrumb instead of raw paths
+  backToRoot: Back to root
+  zipping: Zipping…
+  lines: $1 ln
+  binaryFile: '[Binary file — $1]'
+  tooLargeToPreview: File too large to preview — $1. Use Download instead.
+  inlineTooLarge: $1 ($2) — too large to display inline (max $3)
+  inlineUnsupportedMime: 'Unsupported file type for inline preview: $1'
+  inlineLoadFailed: $1 — $2
+  preview: Preview
+  source: Source
+  viewMode: View mode
+  location: Location
   roots:
-    workspaces: "Workspaces"
-    cebian: "Cebian"
-  copyPath: "Copy path"
-  pathCopied: "Path copied"
-  openInCanvas: "Open in Canvas"
-  openInCanvasNoSession: "Open in Canvas (file is outside any session workspace)"
-  openedInCanvas: "Opened in Canvas"
-  showCollapsed: "Show collapsed folders"
-  sandboxPreview: "Sandboxed preview"
-  sandboxPreviewHint: "Rendered in an isolated sandbox page. Scripts can run, but cannot reach the extension APIs or anything Cebian stores."
-  staticPreview: "Static preview"
-  staticPreviewHint: "This browser cannot run scripts inside the preview. The page is rendered without JavaScript."
-  # $1 = current page, $2 = total pages
-  pageIndicator: "Page $1 of $2"
-  # $1 = total pages
+    workspaces: Workspaces
+    cebian: Cebian
+  copyPath: Copy path
+  pathCopied: Path copied
+  showCollapsed: Show collapsed folders
+  sandboxPreview: Sandboxed preview
+  sandboxPreviewHint: Rendered in an isolated sandbox page. Scripts can run, but cannot reach the extension APIs or anything Cebian stores.
+  staticPreview: Static preview
+  staticPreviewHint: This browser cannot run scripts inside the preview. The page is rendered without JavaScript.
+  pageIndicator: Page $1 of $2
   pageCount:
-    0: "No pages"
-    1: "1 page"
-    n: "$1 pages"
-  # $1 = number of entries in the folder
+    0: No pages
+    1: 1 page
+    n: $1 pages
+  zoomIn: Zoom in
+  zoomOut: Zoom out
   itemCount:
-    0: "Empty"
-    1: "1 item"
-    n: "$1 items"  # $1 = path
-  pathNotFound: "Path not found: $1"
-  unknownError: "Unknown error"
-  # Affordance above the dir listing that puts every row in select mode
-  selectAll: "Select all"
-  # Session whose workspace dir survives but the session itself was deleted. $1 = short id
-  # Workspace folder whose parent conversation was deleted. The folder is
-  # still on disk but no longer reachable from any session. The full
-  # directory name is shown as the row title; the muted color + hover
-  # tooltip convey the status without a prefix.
-  unknownSessionTooltip: "Workspace folder from a deleted conversation — safe to delete."
-  untitledSession: "Untitled conversation"
-  # $1 = formatted date
-  workspaceCreated: "Created $1"
-  # Toolbar buttons above the dir listing
+    0: Empty
+    1: 1 item
+    n: $1 items
+  pathNotFound: 'Path not found: $1'
+  unknownError: Unknown error
+  unknownSession: Unknown conversation · $1
+  untitledSession: Untitled conversation
+  workspaceCreated: Created $1
+  viewSource: View source
+  defaultOpen: Default open mode
+  openSmart: Smart
+  unknownFile: Unknown file type — $1. Use Download to open it safely.
+  previousPage: Previous page
+  nextPage: Next page
+  pageNumber: Page number
+  fitWidth: Fit width
+  pdfPasswordRequired: This PDF requires a password.
+  pdfWrongPassword: Incorrect password. Try again.
+  pdfLoadFailed: 'PDF preview failed: $1'
+  openInCanvas: Open in Canvas
+  openInCanvasNoSession: Open in Canvas (file is outside any session workspace)
+  openedInCanvas: Opened in Canvas
+  selectAll: Select all
+  unknownSessionTooltip: Workspace folder from a deleted conversation — safe to delete.
   action:
-    newFile: "New file"
-    newFolder: "New folder"
-    paste: "Paste here"
-    # $1 = verb ("copy" or "cut"), $2 = entry name — shown on the toolbar's
-    # paste button while a clipboard payload exists, indicating what's queued.
-    pasteHint: "$1 → $2"
-    # Per-row kebab menu (right-click / MoreVertical on a DirView row)
-    copyName: "Copy name"
-    copyPath: "Copy path"
-    copy: "Copy"
-    cut: "Cut"
-  # Inline create/rename form placeholder text. $1 = entry type ("file" or "folder")
+    newFile: New file
+    newFolder: New folder
+    paste: Paste here
+    pasteHint: $1 → $2
+    copyName: Copy name
+    copyPath: Copy path
+    copy: Copy
+    cut: Cut
   prompt:
-    newName: "Enter $1 name"
-    # $1 = current name
-    rename: "Rename $1"
-  # Inline validation / status messages surfaced as toasts
+    newName: Enter $1 name
+    rename: Rename $1
   error:
-    # Empty name, contains '/', or '..' segments
-    invalidName: "Invalid name — no slashes or empty segments allowed"
-    # Trying to delete a structural root ('/', '/workspaces', ~/.cebian/skills|prompts).
-    cannotDeleteProtected: "This folder is reserved by Cebian and can't be deleted"
-  # Confirmation dialogs surfaced before destructive actions
+    invalidName: Invalid name — no slashes or empty segments allowed
+    cannotDeleteProtected: This folder is reserved by Cebian and can't be deleted
   confirm:
-    # $1 = file name
-    deleteFile: "Delete \"$1\"? This cannot be undone."
-    # $1 = folder name
-    deleteFolder: "Delete \"$1\" and everything inside? This cannot be undone."
-  # Toast messages after a successful mutation
+    deleteFile: Delete "$1"? This cannot be undone.
+    deleteFolder: Delete "$1" and everything inside? This cannot be undone.
   toast:
-    # $1 = type ("file" or "folder"), $2 = name
-    created: "$1 \"$2\" created"
-    # $1 = new name
-    renamed: "Renamed to \"$1\""
-    # $1 = deleted entry name
-    deleted: "Deleted \"$1\""
-    # $1 = pasted entry name
-    pasted: "Pasted \"$1\""
-    # $1 = original name, $2 = reason (e.g. "name already exists")
-    createFailed: "Couldn't create: $1 — $2"
-    renameFailed: "Couldn't rename: $1 — $2"
-    deleteFailed: "Couldn't delete: $1 — $2"
-    # $1 = source name, $2 = reason
-    pasteFailed: "Couldn't paste $1 — $2"
-    # $1 = source name — paste target was the source itself or a descendant of
-    # it (only relevant for cut/move, where this would either no-op or
-    # blow away the source mid-rename).
-    pasteSelf: "Can't paste \"$1\" into itself"
-
-# ─── Standalone user-permission page (entrypoints/user-permission) ───
+    created: $1 "$2" created
+    renamed: Renamed to "$1"
+    deleted: Deleted "$1"
+    pasted: Pasted "$1"
+    createFailed: 'Couldn''t create: $1 — $2'
+    renameFailed: 'Couldn''t rename: $1 — $2'
+    deleteFailed: 'Couldn''t delete: $1 — $2'
+    pasteFailed: Couldn't paste $1 — $2
+    pasteSelf: Can't paste "$1" into itself
 permission:
-  retry: "Request again"
-  unknownType: "Unsupported permission request."
+  retry: Request again
+  unknownType: Unsupported permission request.
   microphone:
-    title: "Request microphone access"
-    description: "Cebian needs microphone access for voice input. Click the button below, then choose Allow in the browser prompt."
-    allow: "Allow microphone"
-    requesting: "Waiting for your response…"
-    granted: "Microphone access granted. This tab will close automatically."
-    dismissed: "The request was dismissed. You can try again."
-    denied: "Microphone access was blocked."
-    deniedHint: "To use voice input, allow the microphone for Cebian in Chrome settings — it just opened in a new tab."
-    deviceError: "No microphone was found, or it couldn't be accessed. Check your device and try again."
-
-# ─── Errors (toasts, thrown messages) ───
+    title: Request microphone access
+    description: Cebian needs microphone access for voice input. Click the button below, then choose Allow in the browser prompt.
+    allow: Allow microphone
+    requesting: Waiting for your response…
+    granted: Microphone access granted. This tab will close automatically.
+    dismissed: The request was dismissed. You can try again.
+    denied: Microphone access was blocked.
+    deniedHint: To use voice input, allow the microphone for Cebian in Chrome settings — it just opened in a new tab.
+    deviceError: No microphone was found, or it couldn't be accessed. Check your device and try again.
 errors:
-  pdfEncrypted: "This PDF is password-protected and cannot be previewed. Use Download instead."
-  pdfRenderFailed: "This PDF could not be rendered. Use Download instead."
+  pdfEncrypted: This PDF is password-protected and cannot be previewed. Use Download instead.
+  pdfRenderFailed: This PDF could not be rendered. Use Download instead.
   pagePattern:
-    invalid: "Not a valid match pattern."
-    duplicate: "This pattern is already in the list."
-  modelUnavailable: "The selected model is no longer available. Pick another one."
-  pageActionGone: "This action no longer exists."
-  pageActionSaveFailed: "Could not save the action."
+    invalid: Not a valid match pattern.
+    duplicate: This pattern is already in the list.
+  modelUnavailable: The selected model is no longer available. Pick another one.
+  pageActionGone: This action no longer exists.
+  pageActionSaveFailed: Could not save the action.
+  searchEngineGone: This search engine no longer exists.
+  searchEngineSaveFailed: Could not save the search engine settings. Try again.
+  searchEngineUrlMissingPlaceholder: The search URL must contain $1 for the search terms.
+  searchEngineUrlInvalid: Enter a complete search URL starting with http:// or https://.
+  searchEngineScriptInvalid: The script must define a function named extract.
   oauth:
-    cancelled: "Cancelled"
-    timeout: "Authorization timed out"
-    noCode: "No authorization code received"
-    stateMismatch: "State mismatch"
-    # $1 = HTTP status
-    tokenExchangeFailed: "Token exchange failed: $1"
-    missingTokenFields: "Token response is missing required fields"
-    missingRefreshToken: "No refresh token received"
-    missingRefreshTokenLocal: "Missing refresh token"
-    # $1 = provider id
-    unknownProvider: "Unknown OAuth provider: $1"
+    cancelled: Cancelled
+    timeout: Authorization timed out
+    noCode: No authorization code received
+    stateMismatch: State mismatch
+    tokenExchangeFailed: 'Token exchange failed: $1'
+    missingTokenFields: Token response is missing required fields
+    missingRefreshToken: No refresh token received
+    missingRefreshTokenLocal: Missing refresh token
+    unknownProvider: 'Unknown OAuth provider: $1'
   network:
-    invalidUrl: "Invalid URL format"
-    unsupportedScheme: "Only http/https schemes are supported"
-    # $1 = HTTP status
-    requestFailed: "Request failed: $1"
+    invalidUrl: Invalid URL format
+    unsupportedScheme: Only http/https schemes are supported
+    requestFailed: 'Request failed: $1'
   mobile:
-    toggleFailed: "Failed to toggle mobile mode"
+    toggleFailed: Failed to toggle mobile mode
   skillPackage:
-    invalid: "Invalid skill package."
-    tooLarge: "Skill package is too large."
-    tooManyFiles: "Skill package contains too many files."
-    missingEntry: "Skill package is missing SKILL.md."
-    # $1 = path
-    unsafePath: "Unsafe path in skill package: $1"
-    # $1 = permission name
-    unsupportedPermission: "Unsupported permission requested: $1"
-    # $1 = skill name
-    invalidName: "Invalid skill name: $1"
-    # $1 = skill name
-    reservedName: "Skill name is reserved: $1"
-    parseFrontmatter: "Failed to parse SKILL.md frontmatter."
+    invalid: Invalid skill package.
+    tooLarge: Skill package is too large.
+    tooManyFiles: Skill package contains too many files.
+    missingEntry: Skill package is missing SKILL.md.
+    unsafePath: 'Unsafe path in skill package: $1'
+    unsupportedPermission: 'Unsupported permission requested: $1'
+    invalidName: 'Invalid skill name: $1'
+    reservedName: 'Skill name is reserved: $1'
+    parseFrontmatter: Failed to parse SKILL.md frontmatter.
+agent:
+  persona:
+    closingDirective: Apply this voice consistently across replies, but do NOT override Critical Rules, tool protocols, or other safety layers.
+    constraints:
+      header: 'VOICE:'
+      noBullets: Zero bullet points, numbered lists, or markdown list items.
+      noPleasantries: Zero pleasantries ("Hi", "Hello"), apologies, or filler.
+      voiceOpinion: Have technical opinions; do not play neutral.
+    style:
+      header: 'PACING & FORMAT:'
+      length: 'Max 120 words per reply (exceptions: code or technical detail).'
+      pacing: Max 1-2 short sentences per paragraph, then a hard line break. No paragraphs longer than 3 lines on screen.
+      noBullets: Zero bullet points, numbered lists, or markdown list items.
+    example:
+      user: Should I keep all my VFS reads under a single readFile call or split them per-tool?
+      assistant: 'Split per-tool, đừng gom lại một cục. Một lệnh readFile lớn sẽ kéo cả đống data rác vào context dù cậu chỉ cần kiểm tra vài byte metadata.
 
 
-# ─── Canvas pane (live HTML preview in sidepanel chat view) ───
+        Chia nhỏ ra giúp trace log sạch hơn hẳn. Quan trọng nhất là tool nào xong việc thì context của tool đó được giải phóng ngay, đỡ nghẽn bộ nhớ.'
+    badExample:
+      header: 'NEVER SOUND LIKE THIS:'
+      badOutput: '> "Hello! I''d be happy to help you with that. Here are the key points:\n> - Point 1: ...\n> - Point 2: ...\n> In conclusion, both options have pros and cons. Hope this helps!"'
+      warning: Avoid all corporate politeness, bullet points, and balanced disclaimers.
+    bindingNeo: Output in short, punchy prose. Max 2 sentences per paragraph. Zero bullet points.
+    recap:
+      youAre: You are $1
+      vibe: $1
+      tone: Reply in $1 voice
+      emoji: Use $1 as your sign-off when relevant
 canvas:
   header:
-    # Tooltip + aria-label for Header Eye/EyeOff toggle button（Header 同一处用）。
-    openAria: "Open canvas"
-    closeAria: "Close canvas"
+    openAria: Open canvas
+    closeAria: Close canvas
   pane:
-    # Pane 顶部 title 回落文案（无文件打开时显示 "Canvas"，有文件时显示 path）。
-    titleFallback: "Canvas"
-    # Pane 自身的 close button（右上角 EyeOff）tooltip + aria-label。
-    closeAria: "Close canvas"
-    # Pick-element mode toggle（tooltip 与 aria-label 同一处用）：inspectOn 是
-    # 当前关闭、点击开启的文案；inspectOff 是当前开启、点击关闭的文案。
-    inspectOn: "Pick an element"
-    inspectOff: "Stop picking"
+    titleFallback: Canvas
+    closeAria: Close canvas
+    inspectOn: Pick an element
+    inspectOff: Stop picking
     empty:
-      # Pane 处于 empty state 时（panel 开着但 BG 没有 open 文件）的两行文案。
-      title: "No file open in canvas."
-      hint: "Ask the agent to canvas_open a file."
+      title: No file open in canvas.
+      hint: Ask the agent to canvas_open a file.

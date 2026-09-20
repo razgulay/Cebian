@@ -203,29 +203,6 @@ describe('sanitizeAgentMessages', () => {
     expect(Object.hasOwn(sanitizedBlock, 'metadata')).toBe(false);
     expect(Object.hasOwn(toolResultBlock, 'isError')).toBe(true);
   });
-
-  it('移除 details 对象内值为 undefined 的属性', () => {
-    const msg = {
-      role: 'toolResult',
-      toolCallId: 't',
-      toolName: 'demo',
-      content: [{ type: 'text', text: 'ok' }],
-      details: {
-        server: { id: '1', name: 'srv' },
-        structured: undefined, // this caused the crash
-      },
-      isError: false,
-      timestamp: 1,
-    };
-    const out = sanitizeAgentMessages(asMessages([msg]));
-
-    expect(() => assertJsonSerializable(out)).not.toThrow();
-    const details = (out[0] as any).details;
-    expect(Object.hasOwn(details, 'structured')).toBe(false);
-    expect(Object.hasOwn(details, 'server')).toBe(true);
-    // original is unmutated
-    expect(Object.hasOwn(msg.details, 'structured')).toBe(true);
-  });
 });
 
 describe('extractInlineDirectives', () => {
@@ -736,5 +713,16 @@ describe('replaceUserText — 块数组形态定位末尾请求块', () => {
     const blocks = out.content as unknown as { text: string }[];
     expect(blocks[0].text).toBe('<slash-prompt name="d">\n正文\n</slash-prompt>');
     expect(blocks[1].text).toBe('<user-request>\n新请求\n</user-request>');
+  });
+});
+
+describe('sanitizeAgentMessages · 深度', () => {
+  it('保持浅层：嵌套在 details 里的 undefined 不在热路径上处理（落树边界另行 omitUndefinedDeep）', () => {
+    const toolResult = {
+      role: 'toolResult', toolCallId: 't', toolName: 'demo', content: [],
+      details: { structured: undefined }, isError: false, timestamp: 1,
+    };
+    const [out] = sanitizeAgentMessages(asMessages([toolResult]));
+    expect(Object.hasOwn((out as any).details, 'structured')).toBe(true);
   });
 });

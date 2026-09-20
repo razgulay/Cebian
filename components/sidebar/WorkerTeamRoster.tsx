@@ -114,7 +114,7 @@ export function WorkerTeamRoster() {
                         setRoleModel(key, { provider, modelId })
                       }
                       inheritOption={{
-                        label: t('chat.workerTeamRoster.off'),
+                        label: t('chat.workerTeamRoster.false'),
                         onSelect: () => setRoleModel(key, null),
                       }}
                     />

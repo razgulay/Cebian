@@ -8,16 +8,15 @@ import { lastSettingsSection } from '@/lib/persistence/storage';
 import { useContainerWidth } from '@/hooks/useContainerWidth';
 import { t } from '@/lib/i18n';
 
-/** Breakpoints for the Settings hub layout. */
-const COMPACT_MAX = 800;   // below: compact (pills + master-detail)
-const MEDIUM_MAX = 1200;   // below: medium (top icon+text tabs, two-column body)
+/** Breakpoints for the Settings hub layout (vertical master-detail). */
+const COMPACT_MAX = 500;   // below: icon-only sidebar (56px), labels on hover
+/** Above COMPACT_MAX we always use the vertical labels sidebar (≥500px). */
 
-export type SettingsBreakpoint = 'compact' | 'medium' | 'wide';
+export type SettingsBreakpoint = 'compact' | 'wide';
 
 function resolveBreakpoint(width: number | null): SettingsBreakpoint {
-  if (width === null || width >= MEDIUM_MAX) return 'wide';
-  if (width < COMPACT_MAX) return 'compact';
-  return 'medium';
+  if (width === null || width >= COMPACT_MAX) return 'wide';
+  return 'compact';
 }
 
 interface SettingsLayoutProps {
@@ -25,19 +24,22 @@ interface SettingsLayoutProps {
   basePath: string;
   /** Show the back button in the top bar (sidepanel only). */
   showBackButton?: boolean;
-  /** Show the "open in new tab" button in the top bar (sidepanel only). */
+  /** Show the "open in new tab" button. True in sidepanel only. */
   showOpenInTab?: boolean;
   /** 返回回调；传入时由它决定退出设置后去哪（回到进设置前的聊天）。缺省退回 /chat/new。 */
   onBack?: () => void;
 }
 
 /**
- * SettingsLayout - shell for the Settings hub.
+ * SettingsLayout - shell for the Settings hub (vertical master-detail).
  *
- * Three responsive tiers:
- * - compact (<800px): top icon-only pills -> full-width Outlet (master-detail).
- * - medium (800-1200): top icon+text tabs -> full-width Outlet (two-column still).
- * - wide   (>=1200px): left labeled sidebar -> Outlet on the right.
+ * - wide (≥500px): left labeled sidebar (180px wide, 3 grouped sections with
+ *   colored icons + text labels) + Outlet on the right with its own
+ *   overflow-y-auto.
+ * - compact (<500px): left icon-only sidebar (56px wide, no group labels,
+ *   tooltips on hover) + Outlet on the right. Same horizontal split, just
+ *   narrower — avoids the horizontal-pills row entirely so the user never
+ *   has to scroll the nav on a phone-portrait viewport.
  */
 export function SettingsLayout({ basePath, showBackButton = false, showOpenInTab = false, onBack }: SettingsLayoutProps) {
   const navigate = useNavigate();
@@ -45,6 +47,7 @@ export function SettingsLayout({ basePath, showBackButton = false, showOpenInTab
   const containerRef = useRef<HTMLDivElement>(null);
   const width = useContainerWidth(containerRef);
   const breakpoint = resolveBreakpoint(width);
+  const forceIconsOnly = breakpoint === 'compact';
 
   // Persist current section (path segment after basePath) so reopening lands here.
   const relative = location.pathname.startsWith(basePath)
@@ -75,9 +78,6 @@ export function SettingsLayout({ basePath, showBackButton = false, showOpenInTab
 
   const outletCtx: SettingsOutletContext = { basePath, breakpoint };
 
-  const topNav = breakpoint !== 'wide';
-  const navVariant = breakpoint === 'compact' ? 'pills' : breakpoint === 'medium' ? 'tabs' : 'labels';
-
   return (
     <div ref={containerRef} className="flex flex-col flex-1 min-h-0">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0">
@@ -106,21 +106,12 @@ export function SettingsLayout({ basePath, showBackButton = false, showOpenInTab
         )}
       </div>
 
-      {topNav ? (
-        <div className="flex flex-col flex-1 min-h-0">
-          <SectionNav basePath={basePath} variant={navVariant} />
-          <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-            <Outlet context={outletCtx} />
-          </div>
+      <div className="flex flex-1 min-h-0">
+        <SectionNav basePath={basePath} variant="labels" forceIconsOnly={forceIconsOnly} />
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-y-auto">
+          <Outlet context={outletCtx} />
         </div>
-      ) : (
-        <div className="flex flex-1 min-h-0">
-          <SectionNav basePath={basePath} variant="labels" />
-          <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-            <Outlet context={outletCtx} />
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

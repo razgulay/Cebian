@@ -394,15 +394,9 @@ function sanitizeMessage(msg: AgentMessage): AgentMessage {
   const baseClean = omitUndefinedFields(msg);
   let clean = baseClean;
 
-  // Custom tools (e.g. MCP) often inject arbitrary metadata into 'details'.
-  // If 'details' is an object, scrub it too so nested undefined properties
-  // don't crash pi-agent-core's recursive json-serializable check.
-  if (clean.role === 'toolResult' && clean.details && typeof clean.details === 'object') {
-    const cleanDetails = omitUndefinedFields(clean.details as object);
-    if (cleanDetails !== clean.details) {
-      clean = { ...clean, details: cleanDetails } as any;
-    }
-  }
+  // 注：嵌套字段（如 `details: { structured: undefined }`）不在 sanitize 热路径
+  // 上处理 —— 落树边界另有 `omitUndefinedDeep` 兜底。沙箱这条热路径只清理顶层
+  // undefined，让顶层 optional 字段消失但保留嵌套形状。
 
   const content: unknown = (clean as Message).content;
   // 顶层 content 缺失 → 空数组（对齐 pi transformMessages 的规整）

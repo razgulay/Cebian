@@ -138,6 +138,11 @@ export type ClientMessage =
   /** Pin / unpin a session in the sidebar (legacy single-id form, kept for
    *  older clients). New code should use session_set_placement above. */
   | { type: 'session_pin'; sessionId: string }
+  /** 从某条 assistant 消息处分叉出一个独立的新会话（issue #60）：新会话复制根→该
+   *  entry（含）的整条路径，标题 / 模型 / 思考档沿用源会话，工作区文件一并复制；源会话
+   *  不受影响。`entryId` 取自 BroadcastMessage（未落树的消息没有，UI 不给入口）。
+   *  成功回 `session_forked`、失败回 `session_fork_failed`，均只回发起端口。 */
+  | { type: 'session_fork'; sessionId: string; entryId: string }
   /** Rename a session (sidebar "Rename" action). Bg updates the row and
    *  broadcasts `session_changed`. */
   | { type: 'session_rename'; sessionId: string; title: string }
@@ -224,6 +229,8 @@ export const CLIENT_MESSAGE_TYPES = [
   'session_list',
   'session_delete',
   'session_set_placement',
+  'session_fork',
+  'session_rename',
   'recorder_start',
   'recorder_stop',
   'hello',
@@ -233,7 +240,6 @@ export const CLIENT_MESSAGE_TYPES = [
   'debug_log_subscribe',
   'debug_log_unsubscribe',
   'session_pin',
-  'session_rename',
   'scheduler_list',
   'scheduler_create',
   'scheduler_update',
@@ -301,6 +307,10 @@ export type SessionSnapshot = Omit<SessionRecord, 'messages'> & {
   messages: BroadcastMessage[];
   branchInfo?: Record<string, BranchEntryInfo>;
 };
+
+/** 会话写操作的种类（`session_write_failed.op`）：删除 / 改位置 / 改名。UI 侧 channel 与
+ *  hook 的失败分发按它查表。 */
+export type SessionWriteOp = 'delete' | 'placement' | 'rename';
 
 /** Session metadata without messages, for listing. */
 export type SessionMeta = Omit<SessionRecord, 'messages'> & {
@@ -422,20 +432,40 @@ export type ServerMessage =
   | { type: 'session_list_error'; error: string }
   /** 这批会话已被删除。与 `session_delete` 同为批量形态；只列真正删成功的。 */
   | { type: 'session_deleted'; sessionIds: string[] }
-  /** 一次会话写操作失败了（删除 / 改位置）。只回发起端口——客户端是乐观更新的：它已经
+  /** 一次会话写操作失败了（删除 / 改位置 / 改名）。只回发起端口——客户端是乐观更新的：它已经
    *  把这些会话摘掉或改了位置，收到这条必须把权威列表拉回来，否则界面会永久停在一个
    *  库里并不存在的状态上。刻意不复用通用 `error`：那条会被聊天视图当成本轮对话出错。 */
-  | { type: 'session_write_failed'; op: 'delete' | 'placement'; sessionIds: string[]; error: string }
+  | { type: 'session_write_failed'; op: SessionWriteOp; sessionIds: string[]; error: string }
   /** 会话的列表位置变了。广播给所有端口，让其它窗口已打开的历史面板同步，
    *  与 `session_deleted` 同款。 */
   | { type: 'session_placement_changed'; sessionIds: string[]; placement: SessionPlacement }
+  /** 会话标题变了（用户改名或自动生成）。广播给所有端口：页头与各窗口的历史面板同步。 */
+  | { type: 'session_renamed'; sessionId: string; title: string }
   | { type: 'session_created'; sessionId: string; title: string }
   /** Broadcast when a session's metadata (pin / rename / title) changes.
    *  Carries the full updated `SessionMeta` so any open sidepanel can
    *  reconcile the affected row in its local list without re-fetching. */
   | { type: 'session_changed'; session: SessionMeta }
-  | { type: 'recorder_status'; isRecording: boolean; startedAt: number | null; eventCount: number; truncated?: 'event_limit' | 'time_limit'; initiatorInstanceId: string | null; activeWindowId: number | null }
+  /** `session_fork` 成功：`sessionId` 是**新**会话（UI 据此跳转）；`title` 是新会话标题，
+   *  分叉沿用源标题、故与源会话同名（UI 的「已从「…」分叉」提示依赖这一点）。只回发起
+   *  端口——其它窗口的历史面板在下次打开时自会重拉列表；来源标记也走列表里的
+   *  `parentSessionId`，这里不重复携带。 */
+  | { type: 'session_forked'; sessionId: string; title: string }
+  /** `session_fork` 失败。字段名用 `sourceSessionId` 而非 `sessionId`，避免与 `session_forked`
+   *  里「新会话」的含义混淆。刻意不复用通用 `error`（会被聊天视图当成本轮对话出错），也不
+   *  复用 `session_write_failed`（那条的语义是「撤销乐观更新并重拉列表」，分叉没有乐观更新）。 */
+  | { type: 'session_fork_failed'; sourceSessionId: string; error: string }
   | { type: 'recorder_session'; session: RecordedSession }
+  /** 把 recorder 当前状态拍成 `recorder_status` 消息（广播与连接首帧共用）。 */
+  | {
+      type: 'recorder_status';
+      isRecording: boolean;
+      startedAt: number | null;
+      eventCount: number;
+      truncated?: 'event_limit' | 'time_limit';
+      initiatorInstanceId: string | null;
+      activeWindowId: number | null;
+    }
   /** Sent in reply to `recorder_start` when the BG refuses to start a
    *  recording. `busy` = another sidepanel instance currently owns the
    *  recorder; `before_hello` = the requesting port never sent its

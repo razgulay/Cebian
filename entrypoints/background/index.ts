@@ -54,8 +54,12 @@ export default defineBackground(() => {
   );
   // 自动整理调度：注册周期 alarm（检查廉价，满足够久/够多/空闲才真跑）。
   setupOrganizeSchedule();
-  // 订阅 MCP 服务端变更，把刷新后的工具集推给所有活跃会话。
-  sessionManager.watchMCPTools();
+
+  // 订阅 MCP 服务端 / 搜索引擎配置变更，把刷新后的工具集推给所有活跃会话。
+  // (`watchToolConfig` 是上游 v1.7.1 新增的统一 watcher：合并本地原 `watchMCPTools` +
+  // 新增的 searchEngines 订阅，省去双重 storage watcher 的 race；保留 `watchWorkerTeam`
+  // 因为它监的是 `workerTeamEnabled` flag，与 tool 配置正交。)
+  sessionManager.watchToolConfig();
   // 订阅 Worker Team 总开关（Fast/Team）翻转，让活会话的 tool list 与
   // system-prompt 侧同步撤下/挂上 `delegate_task`（见 watchWorkerTeam）。
   sessionManager.watchWorkerTeam();

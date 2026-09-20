@@ -30,7 +30,9 @@ import {
   TOOL_DELEGATE_TASK,
   TOOL_RAG_INSPECT,
   TOOL_RAG_SEARCH,
+  TOOL_WEB_SEARCH,
 } from '@/lib/tools/names';
+import { truncate } from '@/lib/utils';
 
 /** 记忆根目录的归一形式（/home/user/.cebian/memories），供工具卡标签判定记忆操作。 */
 const MEMORY_ROOT = normalizePath(CEBIAN_MEMORIES_DIR);
@@ -65,6 +67,8 @@ export function getToolLabel(name: string, args: Record<string, any> = {}): stri
       return getTabLabel(args);
     case TOOL_SCREENSHOT:
       return t('tools.screenshot');
+    case TOOL_WEB_SEARCH:
+      return t('tools.webSearch', [truncate(String(args.query ?? ''), 40)]);
     case TOOL_PDF:
       return getPdfLabel(args);
     case TOOL_ASK_USER:

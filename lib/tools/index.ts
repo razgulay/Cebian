@@ -20,6 +20,7 @@ import { ragInspectTool } from './rag-inspect';
 import { ragSearchTool } from './rag-search';
 import { createSessionRunSkillTool } from './run-skill';
 import { chromeApiTool } from './chrome-api-tool';
+import { createWebSearchTool } from './web-search';
 import { SessionToolContext } from './session-context';
 import { TOOL_ASK_USER } from '@/lib/tools/names';
 import { getMCPManager } from '@/lib/mcp/manager';
@@ -29,6 +30,8 @@ import { schedulerTools } from '@/lib/scheduler/tool-scheduler';
 import { debugLog, withSession } from '@/lib/debug/log';
 import type { ServerMessage } from '@/lib/ipc/protocol';
 import { workerTeamEnabled, type ModelIdentity } from '@/lib/persistence/storage';
+import { resolveSearchEnginesConfig, searchEnginesConfig } from '@/lib/persistence/storage';
+import { enabledSearchEngines } from '@/lib/search/engines';
 
 interface SessionToolOptions {
   /** 会话维度的广播通道，仅由 background 提供（见 `createSessionTools`）。 */
@@ -103,9 +106,10 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
 }
 
 /**
- * Build the full tool array for a session = interactive tools + shared + MCP +
- * the per-session `run_skill` instance (sessionId-bound so its vfs writes land
- * in the session's workspace).
+ * Build the full tool array for a session = interactive tools + shared + the
+ * per-session `run_skill` instance (sessionId-bound so its vfs writes land in
+ * the session's workspace) + `web_search`（按当前引擎配置构造，描述里列出启用的
+ * 引擎）+ MCP.
  *
  * Used at session creation, when MCP config changes mid-session
  * (`watchMCPTools`), and when the Worker Team master switch flips
@@ -131,6 +135,9 @@ export async function discoverMCPTools(): Promise<AgentTool<any>[]> {
  * the LLM hallucinates calls (tool missing) or never picks the tool (prompt
  * missing). The per-role model config (`workerModels` storage) is checked
  * at execute time by the worker runner — independent of this on/off gate.
+ *
+ * Used both at session creation and when MCP / search-engine config changes
+ * mid-session (the upstream `watchToolConfig` covers both at once).
  */
 export async function buildSessionToolArray(
   ctx: SessionToolContext,
@@ -204,6 +211,20 @@ export async function buildSessionToolArray(
   if (currentRagSettings.ragSearchEnabled) {
     base.push(ragSearchTool);
   }
+  // `web_search` — 按当前引擎配置构造，描述里列出启用的引擎；同 MCP /
+  // RAG 一样每次 rebuild 重新读取，watchToolConfig 在引擎增删/启停时
+  // 触发整条路径。
+  const webSearchStart = Date.now();
+  const searchConfig = await searchEnginesConfig.getValue();
+  const webSearch = createWebSearchTool(enabledSearchEngines(resolveSearchEnginesConfig(searchConfig)));
+  debugLog.info('tool', 'tool:init:web-search',
+    withSession({
+      durationMs: Date.now() - webSearchStart,
+      engineCount: enabledSearchEngines(resolveSearchEnginesConfig(searchConfig)).length,
+    }, ctx.sessionId));
+  base.push(webSearch);
+  // `schedulerTools`（list / create / delete / run_now）—— LLM 调度定时任务。
+  base.push(...schedulerTools);
   return base;
 }
 

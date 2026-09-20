@@ -151,7 +151,7 @@ export function AdvancedSection() {
               customProviders={customProviderList}
               onSelect={(provider, modelId) => setDomSub({ provider, modelId })}
               inheritOption={{
-                label: t('settings.advanced.domSubAgent.off'),
+                label: t('settings.advanced.domSubAgent.false'),
                 onSelect: () => setDomSub(null),
               }}
             />

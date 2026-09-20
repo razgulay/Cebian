@@ -1,5 +1,5 @@
 // chat 域的客户端消息 handler：会话订阅 / 发送 / 取消 / 重试 / 工具与授权裁决 /
-// 历史列表与删除，以及「最后一个 viewer 断连后延迟取消 agent」的 grace-cancel 策略。
+// 历史列表、删除、分叉与改名，以及「最后一个 viewer 断连后延迟取消 agent」的 grace-cancel 策略。
 //
 // grace-cancel 住在这里而不是 `viewers.ts`：viewers 只放路由状态与投递，若它自己调
 // `sessionManager.cancel()` 会与 session-manager 成运行时环（session-manager 广播要经
@@ -7,15 +7,16 @@
 
 import { sessionManager } from './session-manager';
 import { sessionStore, type LoadedSession } from './session-store';
-import type { SessionSnapshot, SessionMeta } from '@/lib/ipc/protocol';
+import type { SessionSnapshot } from '@/lib/ipc/protocol';
 import { setViewing, stopViewing, hasViewer, sendSessionStateToPort } from './viewers';
 import { flushStreamOps } from './stream-broadcast';
 import { registerClientHandlers, type ClientHandlerMap } from '../ipc/client-router';
 import { onPortDisconnect, post, broadcastAll } from '../ipc/port-registry';
 import { vfs } from '@/lib/persistence/vfs';
+import { workspaceRootForSession } from '@/lib/persistence/vfs-paths';
+import { normalizeSessionTitle } from '@/lib/agent/session-title';
 import { isValidSessionId } from '@/lib/utils';
-import { renameSession, setSessionPinned } from '@/lib/persistence/db';
-import { startTrace } from '@/lib/debug/trace';
+import { setSessionPinned } from '@/lib/persistence/db';
 
 // ─── Grace cancel ───
 
@@ -97,18 +98,9 @@ const chatClientHandlers: ClientHandlerMap = {
       // 快照必须在**所有 await 之后**同步取样、取样与 post 之间不再悬挂：
       // 上面 setViewing 后本 port 已在收流式广播，任何夹在取样与 post 之间
       // 的 await 都可能让先送达的新帧被这份旧快照回退。
-      // 取样前先把待发的增量帧 flush 出去：快照已包含这些增量，若留在
-      // 缓冲里，快照之后到期的 trailing 帧会把同一段增量对着快照重复应用。
-      // 但 flush 自身救不了 microtask 竞态：agent 的 emit 路径会**先同步**
-      // 把 partial.content 写进 messages 再 await emit 把 BG handler 排成
-      // microtask；若该 microtask 在本函数返回之后才被调度，对应事件就只
-      // 进了 snapshot、还没进缓冲——它的 trailing 帧照样会把已存在于快照
-      // 的 delta 重发一遍。
-      //
-      // 解法：消费者层（viewers.ts）按每个端口的 cursor 端去重——只要在
-      // post session_state 之前 seed 一下 port 的 cursor，后续任何
-      // tail_append 的 endOffset ≤ cursor 都会被丢弃，无论它在什么时刻
-      // 到达。这样就不再依赖固定时长的豁免窗，新 viewer 也不会感知延迟。
+      // 取样前先把待发的增量帧 flush 出去（见 flushStreamOps 注释）：快照
+      // 已包含这些增量，若留在缓冲里，快照之后到期的 trailing 帧会把同一
+      // 段增量对着快照重复应用。flush → 取样全程同步，中间不会混入新事件
       flushStreamOps(msg.sessionId);
       const fresh = sessionManager.getSessionState(msg.sessionId);
       if (fresh) {
@@ -159,13 +151,10 @@ const chatClientHandlers: ClientHandlerMap = {
     // navigate to /chat/<id> immediately.
     // model / thinkingLevel 是本轮携带的「该会话所用模型 / 思考档」，透传给
     // prompt() 作 override（B1：会话行是真相，全局仅作新对话种子）。
-    // 临时诊断：`msg.t0` 由渲染端 ship 过来的锚点；透传给 prompt() 让
-    // session-manager 沿用同一锚点（renderer 与 SW 的 `performance.now()` 起
-    // 点不同，不能各自起锚）。缺省时 BG 自己起锚。
     sessionManager.prompt(sessionId, msg.text, msg.attachments, {
       model: msg.model,
       thinkingLevel: msg.thinkingLevel,
-    }, msg.t0, msg.slashPrompt).catch((err) => {
+    }, undefined, msg.slashPrompt).catch((err) => {
       post(port, {
         type: 'error',
         sessionId,
@@ -228,59 +217,6 @@ const chatClientHandlers: ClientHandlerMap = {
 
   resolve_permission(_port, msg) {
     sessionManager.resolvePermission(msg.sessionId, msg.toolCallId, msg.decision);
-  },
-
-  /**
-   * User response to the 400 context-overflow recovery card. Retry = drop
-   * the oldest 50% of messages and continue (deeper than the 25% auto
-   * tries); Stop = reset the strike counter and broadcast a fresh idle
-   * state so the user can start a new turn (NOT cancel() — that would
-   * destroy the live AgentSession and the next prompt would cold-load
-   * a brand-new agent, see review finding).
-   *
-   * The hook already cleared `contextOverflow` locally before sending;
-   * the BG just needs to confirm phase=idle and clear the counter so a
-   * subsequent prompt doesn't get an immediate 400-card re-broadcast.
-   */
-  context_overflow_response(_port, msg) {
-    if (msg.action === 'retry') {
-      void sessionManager.recoverFromUserTriggeredRetry(msg.sessionId, 0.5).catch(err =>
-        console.warn(`[context_overflow_response] retry failed for ${msg.sessionId}:`, err),
-      );
-    } else {
-      // Stop: clear the strike counter and re-broadcast idle state.
-      // Does NOT call sessionManager.cancel() — that would destroy the
-      // live AgentSession via sessions.delete(), and the next prompt
-      // would cold-reload from DB (a subtle behavior the user didn't
-      // ask for). The agent is already idle (agent_end set it), so we
-      // just need to make sure the counter resets and the UI sees a
-      // clean session_state.
-      void sessionManager.resetOverflowState(msg.sessionId).catch(err =>
-        console.warn(`[context_overflow_response] stop failed for ${msg.sessionId}:`, err),
-      );
-    }
-  },
-
-  /**
-   * Sidepanel-initiated manual context compaction. The BG runs the same
-   * `findCompactionCutPoint` → `runCompactionWith` pipeline as the
-   * proactive 80 % pre-check, but skips the threshold gate — the user
-   * asked. Progress is observed via `session_state.isCompacting` + the
-   * inserted `compactionSummary`; nothing else needs to be returned.
-   *
-   * Errors (e.g. session busy) are surfaced as an `error` ServerMessage
-   * so the sidepanel's compact-now button can flip out of loading
-   * state — same wire shape `switch_branch` / `edit_message` use.
-   */
-  compact_now(port, msg) {
-    sessionManager.compactNow(msg.sessionId).catch((err) => {
-      console.warn(`[compact_now] failed for ${msg.sessionId}:`, err);
-      post(port, {
-        type: 'error',
-        sessionId: msg.sessionId,
-        error: err.message ?? String(err),
-      });
-    });
   },
 
   switch_branch(port, msg) {
@@ -353,7 +289,7 @@ const chatClientHandlers: ClientHandlerMap = {
         // other VFS error and continue with DB deletion — a leaked workspace
         // is recoverable via the VFS browser; an orphan session row would
         // be more confusing.
-        const workspacePath = `/workspaces/${sessionId}`;
+        const workspacePath = workspaceRootForSession(sessionId);
         try {
           await vfs.rm(workspacePath, { recursive: true, force: true });
         } catch (err) {
@@ -434,6 +370,98 @@ const chatClientHandlers: ClientHandlerMap = {
     }
   },
 
+  /**
+   * 从一条 assistant 消息处分叉出新会话（issue #60）。顺序：建新会话（树路径复制）→
+   * best-effort 复制工作区 → 回 `session_forked`。
+   *
+   * 工作区复制失败不让分叉失败：会话行与树已落库，此时报错会让用户以为没分叉成功、
+   * 再点一次得到两个副本；缺文件是可恢复的（VFS 浏览器可见），与 session_delete 对
+   * 工作区清理的 best-effort 口径一致。不动源会话的活 agent：fork 不改源树，源会话
+   * 运行中也可分叉。
+   */
+  async session_fork(port, msg) {
+    const { sessionId, entryId } = msg;
+    const fail = (error: string) =>
+      post(port, { type: 'session_fork_failed', sourceSessionId: sessionId, error });
+
+    // entryId 也要校验：`createForkMutations` 对缺省的 entryId 会退到「分叉整条当前分支」，
+    // 畸形载荷不能悄悄变成另一种语义。
+    if (!isValidSessionId(sessionId) || typeof entryId !== 'string' || entryId === '') {
+      console.warn('[session_fork] rejecting malformed request:', sessionId, entryId);
+      fail('invalid session or entry id');
+      return;
+    }
+    let forked: { id: string; title: string };
+    try {
+      forked = await sessionStore.fork(sessionId, entryId);
+    } catch (err) {
+      console.warn('[session_fork] failed:', err);
+      fail(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    const srcWorkspace = workspaceRootForSession(sessionId);
+    const dstWorkspace = workspaceRootForSession(forked.id);
+    try {
+      await vfs.copyDir(srcWorkspace, dstWorkspace);
+    } catch (err) {
+      console.warn(`[session_fork] failed to copy workspace ${srcWorkspace} → ${dstWorkspace}:`, err);
+    }
+    post(port, { type: 'session_forked', sessionId: forked.id, title: forked.title });
+  },
+
+  /**
+   * 改会话标题（页头 / 历史面板共用）。归一化在后台做：空标题视为非法而不是回退默认
+   * 标题——UI 已把「清空」当取消，这里是纵深防御。失败只回发起端口 `session_write_failed`
+   * 让它撤销乐观更新；成功广播 `session_renamed`，别的窗口跟着改。不动 updatedAt。
+   */
+  async session_rename(port, msg) {
+    const { sessionId } = msg;
+    const fail = (error: string) =>
+      post(port, { type: 'session_write_failed', op: 'rename', sessionIds: [sessionId], error });
+
+    if (!isValidSessionId(sessionId)) {
+      console.warn('[session_rename] rejecting non-UUID sessionId:', sessionId);
+      fail('invalid session id');
+      return;
+    }
+    const title = typeof msg.title === 'string' ? normalizeSessionTitle(msg.title) : null;
+    if (!title) {
+      fail('invalid title');
+      return;
+    }
+    try {
+      if (!(await sessionStore.rename(sessionId, title))) {
+        fail('session not found');
+        return;
+      }
+    } catch (err) {
+      console.warn('[session_rename] failed:', err);
+      fail(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    broadcastAll({ type: 'session_renamed', sessionId, title });
+    // 兼容老 listener（HistoryPanel / SidebarPanel 等）：老组件订阅 `session_changed`
+    // 整张 metadata 来刷新列表项，新 caller 走 `session_renamed` 即可。多发一条
+    // BroadcastMessage 的成本 = 一次 Dexie get + 序列化，跟 worker-routing
+    // 防回归的冗余广播同等级别，把「UI 同步」的契约对老路径也保留。
+    const current = await sessionStore.open(sessionId);
+    if (current) {
+      broadcastAll({
+        type: 'session_changed',
+        session: toSessionSnapshot(current),
+      });
+    }
+  },
+
+  /**
+   * Pin / unpin a session in the sidebar (legacy single-id form, kept for
+   * older clients that still send `session_pin`). New code should use
+   * `session_set_placement` which is the multi-id, mutually-exclusive form.
+   * 会把变更重写成 `isPinned` boolean 并广播 `session_changed`，老 listener
+   * （HistoryPanel）据此刷新；不与 `session_set_placement` 写 `pinnedAt` 互
+   * 联——并存两个机制意味着用户能 pin 两次，行为差异，但本 handler 只服务
+   * 旧 caller，新 caller 已切到 placement。
+   */
   async session_pin(_port, msg) {
     if (!isValidSessionId(msg.sessionId)) {
       console.warn('[session_pin] rejecting non-UUID sessionId:', msg.sessionId);
@@ -446,31 +474,52 @@ const chatClientHandlers: ClientHandlerMap = {
     // new value which could lie to other listeners in flight.
     const next = !(current.isPinned === true);
     await setSessionPinned(msg.sessionId, next);
-    const { messages: _drop, ...meta } = current;
-    const updated: SessionMeta = {
-      ...meta,
-      isPinned: next,
-      isRunning: sessionManager.getSessionState(current.id)?.isRunning === true,
-    };
-    broadcastAll({ type: 'session_changed', session: updated });
+    const refreshed = await sessionStore.open(msg.sessionId);
+    if (!refreshed) return;
+    broadcastAll({
+      type: 'session_changed',
+      session: toSessionSnapshot(refreshed),
+    });
   },
 
-  async session_rename(_port, msg) {
-    if (!isValidSessionId(msg.sessionId)) {
-      console.warn('[session_rename] rejecting non-UUID sessionId:', msg.sessionId);
-      return;
+  /**
+   * UI 对 `context_overflow` 卡片按钮的回复（issue 3-strikes recovery）。
+   * `retry` → BG 走更深 50% 截断 + `agent.continue()`（同 `autoRecoverFromOverflow`
+   * 但比例更深，并清掉 strike 计数）；`stop` → 不取消会话（agent 已经 idle），
+   * 只清计数 + 重发 idle session_state，让侧边栏的 edit/composer 立即可用。
+   */
+  context_overflow_response(_port, msg) {
+    if (msg.action === 'retry') {
+      void sessionManager.recoverFromUserTriggeredRetry(msg.sessionId, 0.5).catch(err =>
+        console.warn(`[context_overflow_response] retry failed for ${msg.sessionId}:`, err),
+      );
+    } else {
+      void sessionManager.resetOverflowState(msg.sessionId).catch(err =>
+        console.warn(`[context_overflow_response] stop failed for ${msg.sessionId}:`, err),
+      );
     }
-    const current = await sessionStore.load(msg.sessionId);
-    if (!current) return;
-    const ok = await renameSession(msg.sessionId, msg.title);
-    if (!ok) return;
-    const { messages: _drop, ...meta } = current;
-    const updated: SessionMeta = {
-      ...meta,
-      title: msg.title.trim(),
-      isRunning: sessionManager.getSessionState(current.id)?.isRunning === true,
-    };
-    broadcastAll({ type: 'session_changed', session: updated });
+  },
+
+  /**
+   * Sidepanel-initiated manual context compaction. The BG runs the same
+   * `findCompactionCutPoint` → `runCompaction` pipeline as the proactive
+   * 80% pre-check, but skips the threshold gate — the user asked.
+   * Progress is observed via `session_state.isCompacting` + the inserted
+   * `compactionSummary`; nothing else needs to be returned.
+   *
+   * Errors (e.g. session busy) are surfaced as an `error` ServerMessage
+   * so the sidepanel's compact-now button can flip out of loading
+   * state — same wire shape `switch_branch` / `edit_message` use.
+   */
+  compact_now(port, msg) {
+    sessionManager.compactNow(msg.sessionId).catch((err) => {
+      console.warn(`[compact_now] failed for ${msg.sessionId}:`, err);
+      post(port, {
+        type: 'error',
+        sessionId: msg.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   },
 };
 

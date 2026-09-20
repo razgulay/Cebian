@@ -185,3 +185,61 @@ export function oneLine(text: string): string {
 export function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
+
+/** 值是否为需要深入遍历的普通对象（字面量 / Object.create(null)）。Date、Map 等非普通对象
+ *  原样保留，由调用方决定如何处理 */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** omitUndefinedDeep 的递归体。`active` 是当前路径上的对象集合，用于识别环 */
+function omitUndefinedDeepWalk<T>(value: T, active: WeakSet<object>): T {
+  if (Array.isArray(value)) {
+    if (active.has(value)) return value;
+    active.add(value);
+    let out: unknown[] | null = null;
+    for (let i = 0; i < value.length; i++) {
+      const fixed = omitUndefinedDeepWalk(value[i], active);
+      if (fixed !== value[i] && out === null) out = value.slice(0, i);
+      if (out !== null) out.push(fixed);
+    }
+    active.delete(value);
+    return (out ?? value) as T;
+  }
+  if (!isPlainObject(value)) return value;
+  if (active.has(value)) return value;
+  active.add(value);
+  let out: Record<string, unknown> | null = null;
+  for (const key of Object.keys(value)) {
+    const original = value[key];
+    if (original === undefined) {
+      out ??= { ...value };
+      delete out[key];
+      continue;
+    }
+    const fixed = omitUndefinedDeepWalk(original, active);
+    if (fixed !== original) {
+      out ??= { ...value };
+      out[key] = fixed;
+    }
+  }
+  active.delete(value);
+  return (out ?? value) as T;
+}
+
+/**
+ * 递归移除普通对象里值为 undefined 的**字段**——这是 pi 的 durable payload 校验
+ * （assertJsonSerializable）拒绝一份数据的最常见原因（issue #74）。只处理这一种形态，
+ * **不保证结果一定合规**，未覆盖的形态由调用方兜底：
+ *
+ * - 数组元素里的 undefined 不动——删掉会挤位；
+ * - NaN / Infinity、函数、symbol 键不动；
+ * - 非普通对象（Date、Map 等）原样保留；
+ * - 当前路径上重复出现的对象（环）原样返回，不抛错；
+ * - copy-on-write：子树无改动时返回同一引用。纯函数、不改动入参
+ */
+export function omitUndefinedDeep<T>(value: T): T {
+  return omitUndefinedDeepWalk(value, new WeakSet());
+}

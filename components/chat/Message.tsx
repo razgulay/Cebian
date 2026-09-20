@@ -217,9 +217,44 @@ export function UserMessageBubble({
 
   return (
     <div
-      className="self-end max-w-[95%] group/user"
+      className="flex items-end justify-end gap-1.5 group/user"
       {...(isLast ? { 'data-user-message': 'last' as const } : {})}
     >
+      {/* Action bar (Copy / Edit / BranchSwitcher) — sits immediately to the LEFT
+          of the bubble (no extra horizontal gap). `justify-end` on the outer
+          flex pushes both children toward the right edge; with `gap-1.5`
+          the buttons are 6px away from the bubble, hugging it. Visibility is
+          hover-only via `group-hover/user:opacity-100`. */}
+      {text != null && (
+        <div className="flex h-8 items-center gap-1 opacity-0 pointer-events-none transition-opacity group-hover/user:opacity-100 group-hover/user:pointer-events-auto group-focus-within/user:opacity-100 group-focus-within/user:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto">
+          {hasBubble && <CopyButton text={bubbleText ?? ''} />}
+          {onEdit && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 text-muted-foreground hover:text-foreground"
+                  aria-label={t('common.edit')}
+                  onClick={() => {
+                    setDraft(text);
+                    setEditing(true);
+                  }}
+                >
+                  <Pencil />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('common.edit')}</TooltipContent>
+            </Tooltip>
+          )}
+          {branch && <BranchSwitcher {...branch} />}
+        </div>
+      )}
+      {/* Right column: directives + attachments + bubble + collapse button.
+          `flex flex-col items-end` right-aligns each row inside the column
+          (so the bubble + directive chips stay right-flush). No `ml-auto` —
+          the outer flex's `justify-end` already handles right-alignment. */}
+      <div className="flex flex-col items-end max-w-[95%]">
       {/* Inline directive chip strip: slash commands (COMMAND), mention
           chips (PROMPT/SKILL), and quote chips (QUOTE) render above the
           bubble so the bubble only shows the user's typed words. Pinned
@@ -397,38 +432,7 @@ export function UserMessageBubble({
         </div>
       )}
 
-      {text != null && (
-        <div className="flex h-8 items-center justify-end gap-1.5 px-1">
-          <div className="flex items-center gap-1 opacity-0 pointer-events-none transition-opacity group-hover/user:opacity-100 group-hover/user:pointer-events-auto group-focus-within/user:opacity-100 group-focus-within/user:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto">
-            {/*
-              * 复制的就是气泡里显示的那段（含开头的 `/名字`），所见即所得。
-              * `hasBubble` 为真时它必然非空，空消息也就不会给出一个「复制了空字符串」
-              * 的假成功。
-              */}
-            {hasBubble && <CopyButton text={bubbleText ?? ''} />}
-            {onEdit && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7 text-muted-foreground hover:text-foreground"
-                    aria-label={t('common.edit')}
-                    onClick={() => {
-                      setDraft(text);
-                      setEditing(true);
-                    }}
-                  >
-                    <Pencil />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t('common.edit')}</TooltipContent>
-              </Tooltip>
-            )}
-          </div>
-          {branch && <BranchSwitcher {...branch} />}
-        </div>
-      )}
+      </div>{/* end right column */}
     </div>
   );
 }
@@ -569,6 +573,7 @@ export function AgentMessage({
   meta,
   copyText,
   onRetry,
+  onFork,
   branch,
 }: {
   children?: ReactNode;
@@ -576,11 +581,13 @@ export function AgentMessage({
   showHeader?: boolean;
   /** Meta is rendered as soon as `!isStreaming`; the copy button inside the
    * row is gated on `copyText` (skipped for pure tool-call turns). */
-  meta?: Omit<MessageMetaProps, 'text' | 'onRetry' | 'branchSwitcher'>;
+  meta?: Omit<MessageMetaProps, 'text' | 'onRetry' | 'onFork' | 'branchSwitcher'>;
   copyText?: string;
   /** When provided, a retry button is shown in the meta row. Caller decides
    *  eligibility (last turn-closing assistant, agent idle). */
   onRetry?: () => void;
+  /** 提供时在操作行显示「分叉」按钮（issue #60）。资格由调用方判定（收尾回复且已落树）。 */
+  onFork?: () => void;
   /** 当前回复存在并列版本时，在操作行最左侧展示分支导航。 */
   branch?: BranchSwitcherProps;
 }) {
@@ -621,12 +628,13 @@ export function AgentMessage({
           stream end is ~60% smaller than the original combined
           ~36-40px jump and no longer leaves any empty space. */}
       <div className={isStreaming ? 'invisible' : ''}>
-        {(meta || copyText || onRetry || branch) && (
+        {(meta || copyText || onRetry || onFork || branch) && (
           <MessageMetaRow
             {...(meta ?? {})}
             text={copyText}
             getSpeakText={() => extractSpeakText(contentRef.current)}
             onRetry={onRetry}
+            onFork={onFork}
             branchSwitcher={branch ? <BranchSwitcher {...branch} /> : undefined}
           />
         )}

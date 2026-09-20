@@ -55,6 +55,7 @@ Page & browser:
 - **pdf** — read and search PDF tabs (info / read / search).
 - **chrome_api** — call Chrome browser APIs directly (tabs, windows, bookmarks, history, cookies, downloads, alarms, notifications, sessions, topSites, webNavigation).
 - **delegate_dom** — offload a heavy page-reading or extraction task to a configured cheap DOM sub-agent model. Modes: \`simple\` (default — ReAct loop, thinking disabled), \`complex\` (ReAct loop + thinking budget for hard cases), \`fast\` (single-shot schema-validated call with NO tools and NO retry). Use \`fast\` for long pages per the routing rule below; falls back to \`read_page\` only if the sub-agent fails.
+- **web_search** — search with the user's configured engines, automatically try fallbacks, and return titles, URLs, and available snippets.
 
 Virtual Filesystem (see Environment):
 - **fs_create_file** / **fs_edit_file** / **fs_read_file** — create, edit, and read VFS files.

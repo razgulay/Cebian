@@ -161,6 +161,10 @@ export function createMCPAgentTool(
           : undefined;
         return {
           content: convertContent(result.content),
+          // `structured` 只在服务端确实返回了 structuredContent 时才写入：显式的
+          // `structured: undefined` 会让 pi 的 assertJsonSerializable 拒绝把这条
+          // toolResult 落进会话树，syncTail 水位线从此卡死，本轮之后的所有消息都
+          // 不再持久化（issue #74）
           details: {
             server: { id: server.id, name: server.name },
             tool: mcpTool.name,
