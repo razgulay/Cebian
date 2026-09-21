@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { InboundMessage } from '@/lib/telegram-gateway/types';
 
-const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessions, broadcastTaps, mockToolLabel } = vi.hoisted(() => ({
+const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessions, broadcastTaps, mockToolLabel, toolExecutionCbs } = vi.hoisted(() => ({
   mockBootstrap: vi.fn(),
   mockPublishStatus: vi.fn(),
   mockPrompt: vi.fn(),
@@ -22,6 +22,7 @@ const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessio
   mockSessions: new Map<string, { record: Record<string, unknown>; messages: unknown[] }>(),
   broadcastTaps: new Set<(msg: unknown) => void>(),
   mockToolLabel: vi.fn(() => 'Browsing web'),
+  toolExecutionCbs: new Set<(sessionId: string, toolName: string, args: unknown) => void>(),
 }));
 vi.mock('@/lib/telegram-gateway/bootstrap', () => ({
   bootstrapTelegramGateway: mockBootstrap,
@@ -35,7 +36,16 @@ vi.mock('@/lib/tools/labels', () => ({
   getToolLabel: mockToolLabel,
 }));
 vi.mock('../chat/session-manager', () => ({
-  sessionManager: { prompt: mockPrompt, compactNow: mockCompactNow },
+  sessionManager: {
+    prompt: mockPrompt,
+    compactNow: mockCompactNow,
+    onToolExecution: vi.fn((cb: (sessionId: string, toolName: string, args: unknown) => void) => {
+      toolExecutionCbs.add(cb);
+      return () => {
+        toolExecutionCbs.delete(cb);
+      };
+    }),
+  },
 }));
 vi.mock('../chat/viewers', () => ({
   onBroadcastTap: vi.fn((cb: (msg: unknown) => void) => {
@@ -107,6 +117,11 @@ function inboundCallback(attempt = 0): (msg: InboundMessage) => Promise<void> {
   return cb;
 }
 
+/** 模擬 agent 開始執行一個 tool（sessionManager.onToolExecution tap）。 */
+function fireToolExecution(sessionId: string, toolName = 'web_search'): void {
+  for (const cb of [...toolExecutionCbs]) cb(sessionId, toolName, {});
+}
+
 // manager 持有模块级 `handle`——每个用例 resetModules 后重新 import，保证
 // 用例之间互不泄漏（vi.mock 注册表在 resetModules 后仍然生效）。
 let setupTelegramGatewayManager: typeof import('./manager')['setupTelegramGatewayManager'];
@@ -122,6 +137,7 @@ beforeEach(async () => {
   mockCompactNow.mockReset();
   mockSessions.clear();
   broadcastTaps.clear();
+  toolExecutionCbs.clear();
   mockBootstrap.mockImplementation(() => ({
     teardown: vi.fn(),
     client: {
@@ -634,16 +650,16 @@ describe('setupTelegramGatewayManager', () => {
       .filter((m) => m.kind === 'deleteMessage');
   }
 
-  it('首个 tool_pending → 静默状态行（1 条）；在途回执前换 label → 回执后补一次节流 edit', async () => {
+  it('首个 tool_execution_start → 静默状态行（1 条）；在途回执前换 label → 回执后补一次节流 edit', async () => {
     const client = await startTurnHarness();
     await inboundCallback(0)(TEST_INBOUND);
     const sessionId = await telegramSessionId(965822571);
 
-    // 第一個 tool_pending：狀態行 sendMessage 在途
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    // 第一個 tool execution：狀態行 sendMessage 在途
+    fireToolExecution(sessionId);
     // 回執未落地時第二個 tool 換 label——只更新 pendingStatusText，不發第二條
     mockToolLabel.mockReturnValueOnce('Reading file');
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'fs_read', args: {} });
+    fireToolExecution(sessionId, 'fs_read');
 
     await flushAsync(); // 回執落位 → statusMessageId 就位 + 補發 edit 的節流窗口啟動
     const sends = sentMessages(client);
@@ -665,11 +681,11 @@ describe('setupTelegramGatewayManager', () => {
     await flushAsync();
     const sessionId = await telegramSessionId(965822571);
 
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    fireToolExecution(sessionId);
     await vi.advanceTimersByTimeAsync(2_800); // 状态行发出（send 非 edit）
     expect(statusEdits(client)).toHaveLength(0);
 
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    fireToolExecution(sessionId);
     await vi.advanceTimersByTimeAsync(2_800);
     expect(statusEdits(client)).toHaveLength(0); // 同 label → 跳过 edit
   });
@@ -714,11 +730,11 @@ describe('setupTelegramGatewayManager', () => {
     });
 
     const sessionId = await telegramSessionId(965822571);
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    fireToolExecution(sessionId);
     await flushAsync();
     expect(sentMessages(client)).toHaveLength(1); // 失敗的狀態行嘗試
 
-    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    fireToolExecution(sessionId);
     await flushAsync();
     expect(sentMessages(client)).toHaveLength(1); // statusDead → 無重試
 
@@ -743,7 +759,7 @@ describe('setupTelegramGatewayManager', () => {
     const client = await startTurnHarness();
     mockPrompt.mockImplementationOnce(async () => {
       const sessionId = await telegramSessionId(965822571);
-      fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+      fireToolExecution(sessionId);
       throw new Error('mid-run failure');
     });
 

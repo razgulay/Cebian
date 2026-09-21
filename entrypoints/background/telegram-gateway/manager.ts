@@ -114,8 +114,6 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
   activeTurns.set(sessionId, state);
   const gateway = handle;
   if (!gateway) return;
-  // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-  console.log('[telegram-gateway] startTurnUx: reaction 👀 + typing on message', msg.message_id);
   void gateway.client
     .sendOutbound({
       kind: 'setMessageReaction',
@@ -123,10 +121,6 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
       chat_id: msg.chat_id,
       message_id: msg.message_id,
       emoji: REACTION_THINKING,
-    })
-    .then((r) => {
-      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-      console.log('[telegram-gateway] reaction result:', JSON.stringify(r));
     })
     .catch(() => {});
   void gateway.client
@@ -384,8 +378,6 @@ function abortTurnUx(sessionId: string): void {
  * 與此獨立，照常送達。
  */
 function scheduleToolStatus(state: TelegramTurnState, label: string): void {
-  // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-  console.log('[telegram-gateway] tool status:', label, '| id:', state.statusMessageId, '| dead:', state.statusDead, '| inFlight:', state.statusSendInFlight);
   if (state.statusDead) return;
   const text = `🔧 ${label}...`;
   if (state.statusMessageId === null) {
@@ -572,10 +564,6 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       : undefined;
   if (!state) return;
   switch (msg.type) {
-    case 'tool_pending':
-      // Step-Progress：工具狀態行（首個 tool 建、後續 edit、收尾刪）
-      scheduleToolStatus(state, getToolLabel(msg.toolName, msg.args));
-      break;
     case 'agent_end':
       void finalizeTurn(state, msg.messages);
       break;
@@ -592,9 +580,18 @@ export function setupTelegramGatewayManager(): void {
   telegramGatewayConfig.watch(() => scheduleSync());
   telegramGatewaySecrets.watch(() => scheduleSync());
   scheduleSync();
-  // Broadcast tap：观察 telegram session 的 agent 事件流——Step-Progress +
-  // reaction 模型下运行期间不打扰聊天窗，唯一动作是 agent_end 收尾落位。
+  // Broadcast tap：观察 telegram session 的 agent_end（收尾落位完整回复）。
+  // Step-Progress 的工具狀態行走 sessionManager.onToolExecution tap——
+  // `tool_pending` 广播只涵盖交互式工具（ask-user / permission bridge），
+  // 普通工具根本不经过 InteractiveBridge（曾因此状态行永不出现）。
   onBroadcastTap((msg) => handleTurnBroadcast(msg));
+  // 工具狀態行：Telegram session 的 agent 每開始執行一個 tool 就更新
+  sessionManager.onToolExecution((sessionId, toolName, args) => {
+    const state = activeTurns.get(sessionId);
+    if (state) {
+      scheduleToolStatus(state, getToolLabel(toolName, args as Record<string, any> | undefined));
+    }
+  });
   // First-frame push：sidepanel 的 channel 单例初始值是 'disconnected'。若 WS
   // 在 port 建立之前就连上了，之后没有新的状态变化事件可广播，徽章会永远停在
   // 灰。port 一接入就把当前真实状态发给它——canvas（canvas_state）/ recorder

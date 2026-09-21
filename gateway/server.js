@@ -251,14 +251,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-    console.log('[gateway] webhook update: chat', message.chat.id, 'msg', message.message_id, 'text:', String(message.text).slice(0, 40));
-
     // Whitelist fail-closed：ngoài danh sách → 200 OK im lặng (200 để Telegram
     // ngừng retry, không broadcast gì xuống extension)。
     if (!isChatAllowed(message.chat.id)) {
-      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-      console.log('[gateway] webhook REJECTED (whitelist): chat', message.chat.id);
       res.writeHead(200).end('OK');
       return;
     }
@@ -329,16 +324,12 @@ wss.on('connection', (ws) => {
     if (!data || typeof data.kind !== 'string' || !data.chat_id) {
       return;
     }
-    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-    console.log('[gateway] ws action:', data.kind, 'chat:', data.chat_id, 'msg_id:', data.message_id ?? '-');
 
     let result;
     if (!env.TELEGRAM_BOT_TOKEN) {
       result = { ok: false, error: 'bot token not configured' };
     } else if (!isChatAllowed(data.chat_id)) {
       result = { ok: false, error: 'chat_id not in whitelist' };
-      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-      console.log('[gateway] ws action REJECTED (whitelist):', data.kind, 'chat:', data.chat_id);
     } else {
       switch (data.kind) {
         case 'sendMessage':
@@ -381,8 +372,6 @@ wss.on('connection', (ws) => {
     // sendMessage 保留 'sendMessage_result'（向后兼容旧 extension）；
     // sendChatAction / editMessage / setMessageReaction / deleteMessage 用 'gateway_result'。
     const replyKind = data.kind === 'sendMessage' ? 'sendMessage_result' : 'gateway_result';
-    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
-    console.log('[gateway] ws result:', data.kind, JSON.stringify(result));
     try {
       ws.send(
         JSON.stringify({ kind: replyKind, request_id: data.request_id, ...result })

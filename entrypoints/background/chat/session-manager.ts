@@ -1088,6 +1088,35 @@ class SessionManager {
     });
   }
 
+  // ─── Tool-execution tap（Step-Progress 觀察者）───
+  // pi-agent-core 的 `tool_execution_start` 事件在 handleAgentEvent 裡原本被丟棄
+  // （UI 的 tool card 從 message 內容投影，不需要專用事件）。Telegram gateway 的
+  // 工具狀態行需要它——InteractiveBridge 的 `tool_pending` 只涵蓋互動工具，普通
+  // tool（web_search / fs_* / browser_*）根本不會經過 bridge。會話隔離由觀察者
+  // 自行過濾（activeTurns.get(sessionId)）。
+
+  private toolExecutionTaps = new Set<
+    (sessionId: string, toolName: string, args: unknown) => void
+  >();
+
+  /** 訂閱所有會話的 tool 執行開始事件。返回取消訂閱函數。 */
+  onToolExecution(cb: (sessionId: string, toolName: string, args: unknown) => void): () => void {
+    this.toolExecutionTaps.add(cb);
+    return () => {
+      this.toolExecutionTaps.delete(cb);
+    };
+  }
+
+  private emitToolExecution(sessionId: string, toolName: string, args: unknown): void {
+    for (const tap of this.toolExecutionTaps) {
+      try {
+        tap(sessionId, toolName, args);
+      } catch {
+        /* tap 拋錯不牽連 agent loop */
+      }
+    }
+  }
+
   private async handleAgentEvent(agentSession: AgentSession, event: AgentEvent): Promise<void> {
     const { sessionId, agent } = agentSession;
 
@@ -1117,6 +1146,12 @@ class SessionManager {
         this.tokenCounts.delete(sessionId);
         broadcastToViewers(sessionId, { type: 'agent_start', sessionId });
         this.updateKeepAlive();
+        break;
+
+      case 'tool_execution_start':
+        // Step-Progress 觀察者（telegram-gateway 的工具狀態行）——agent 每開始
+        // 執行一個 tool 就通知一次；拋錯不牽連 agent loop。
+        this.emitToolExecution(sessionId, event.toolName, event.args);
         break;
 
       case 'message_update':
