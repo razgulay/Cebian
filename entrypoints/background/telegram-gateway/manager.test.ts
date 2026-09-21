@@ -299,6 +299,11 @@ describe('setupTelegramGatewayManager', () => {
 
     expect(mockPrompt).not.toHaveBeenCalled();
     expect(mockSessions.size).toBe(0);
+    // abortTurnUx：reaction 换 ❌（失败可见，零打扰）
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    expect(reactions(client).at(-1)).toMatchObject({ emoji: '❌' });
   });
 
   it('burst 2 条消息 → 串行队列逐条处理（第 2 条排队到第 1 条跑完才跑）', async () => {
@@ -329,11 +334,62 @@ describe('setupTelegramGatewayManager', () => {
     expect(mockPrompt).toHaveBeenNthCalledWith(2, expect.any(String), 'second message');
   });
 
-  it('prompt 完成后 → 从 session 取最后一条 assistant 文本经 WS 回 Telegram', async () => {
+  // ─── Reaction lifecycle（👀 运行 → 👌 完成 / ❌ 失败）───
+
+  /** 标准 turn 前置：配置 + 模型落盘、setup、连接、拿到 mock client。 */
+  async function startTurnHarness(): Promise<{ sendOutbound: ReturnType<typeof vi.fn> }> {
     await telegramGatewayConfig.setValue(VALID_CONFIG(true));
     await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
-    // 预建带 assistant 消息的 session（prompt mock 不会写 tree）→ dispatch 走
-    // 「existing → prompt → open → reply」完整路径。
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+    return client;
+  }
+
+  /** 全部 reaction（setMessageReaction）。 */
+  function reactions(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; message_id?: number; emoji?: string })
+      .filter((m) => m.kind === 'setMessageReaction');
+  }
+
+  /** 全部 sendMessage（finalize 落位的块）。 */
+  function sentMessages(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as {
+        kind?: string;
+        text?: string;
+        reply_to_message_id?: number;
+        parse_mode?: string;
+        disable_notification?: boolean;
+        disable_link_preview?: boolean;
+      })
+      .filter((m) => m.kind === 'sendMessage');
+  }
+
+  it('inbound turn → reaction 👀 贴上用户消息，不发送任何占位消息', async () => {
+    const client = await startTurnHarness();
+
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+
+    expect(reactions(client)).toEqual([
+      expect.objectContaining({ chat_id: 965822571, message_id: 1, emoji: '👀' }),
+    ]);
+    expect(sentMessages(client)).toHaveLength(0); // 不再有 Thinking... 占位
+    // typing keepalive 照常
+    expect(
+      client.sendOutbound.mock.calls.some(([m]) => (m as { kind?: string }).kind === 'sendChatAction'),
+    ).toBe(true);
+  });
+
+  it('finalize（回复短）→ 👌 + Block 1 sendMessage reply_to 用户 + Markdown', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
     const fields = {
       id: await telegramSessionId(965822571),
       title: 'Telegram · @tester',
@@ -345,25 +401,18 @@ describe('setupTelegramGatewayManager', () => {
     const { sessionStore } = await import('../chat/session-store');
     await sessionStore.create(fields);
     await sessionStore.createWithMessages(fields, [
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'hello from telegram' }],
-      },
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'Xin chào! Tôi có thể giúp gì cho bạn?' }],
-      },
+      { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Xin chào! Tôi có thể giúp gì cho bạn?' }] },
     ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
     setupTelegramGatewayManager();
     await flushAsync();
-
     const client = mockBootstrap.mock.results[0]!.value.client as {
       sendOutbound: ReturnType<typeof vi.fn>;
     };
     client.sendOutbound.mockClear();
 
-    await inboundCallback(0)(TEST_INBOUND); // await 整个 turn（prompt mock 不广播）
-    // 模拟真实 session-manager 的完成广播 → 触发 finalizeTurn
+    await inboundCallback(0)(TEST_INBOUND);
     const sessionId = await telegramSessionId(965822571);
     fireBroadcast({
       type: 'agent_end',
@@ -371,24 +420,96 @@ describe('setupTelegramGatewayManager', () => {
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
         { role: 'assistant', content: [{ type: 'text', text: 'Xin chào! Tôi có thể giúp gì cho bạn?' }] },
-      ],
+      ] as never[],
     });
     await flushAsync();
-    expect(mockPrompt).toHaveBeenCalledWith(sessionId, 'hello from telegram');
-    // 最终回复：editMessage 占位（Markdown）
-    const editCalls = client.sendOutbound.mock.calls.filter(
-      ([m]) => (m as { kind?: string }).kind === 'editMessage',
-    );
-    expect(editCalls).toHaveLength(1);
-    expect(editCalls[0]![0]).toMatchObject({
-      kind: 'editMessage',
+
+    expect(reactions(client)[1]).toMatchObject({ message_id: 1, emoji: '👌' });
+    const sends = sentMessages(client);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({
       chat_id: 965822571,
       text: 'Xin chào! Tôi có thể giúp gì cho bạn?',
+      reply_to_message_id: 1,
       parse_mode: 'Markdown',
     });
+    // Block 1 保留通知与 link preview
+    expect(sends[0]!.disable_notification).toBeUndefined();
+    expect(sends[0]!.disable_link_preview).toBeUndefined();
   });
 
-  it('最后一帧 stopReason=error（run 失败）→ 不回退发旧文本', async () => {
+  it('finalize（回复长）→ Block 1 reply-to，Block 2+ 静默 + 关 link preview', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    const fields = {
+      id: await telegramSessionId(965822571),
+      title: 'Telegram · @tester',
+      model: 'test-model',
+      provider: 'test',
+      userInstructions: '',
+      thinkingLevel: 'medium' as const,
+    };
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create(fields);
+    const long = ['A'.repeat(900), 'B'.repeat(900), 'C'.repeat(900)].join('\n\n');
+    await sessionStore.createWithMessages(fields, [
+      { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+      { role: 'assistant', content: [{ type: 'text', text: long }] },
+    ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+        { role: 'assistant', content: [{ type: 'text', text: long }] },
+      ] as never[],
+    });
+    await flushAsync();
+
+    const sends = sentMessages(client);
+    // splitReply：Block 1 = 第一段，Block 2 = B+C 分组（≤2000）
+    expect(sends).toHaveLength(2);
+    expect(sends[0]).toMatchObject({
+      text: 'A'.repeat(900),
+      reply_to_message_id: 1,
+      parse_mode: 'Markdown',
+    });
+    expect(sends[0]!.disable_notification).toBeUndefined();
+    expect(sends[1]).toMatchObject({
+      text: `${'B'.repeat(900)}\n\n${'C'.repeat(900)}`,
+      disable_notification: true,
+      disable_link_preview: true,
+      parse_mode: 'Markdown',
+    });
+    expect(sends[1]!.reply_to_message_id).toBeUndefined();
+  });
+
+  it('prompt 抛错 → reaction ❌、零消息、typing 停', async () => {
+    const client = await startTurnHarness();
+    mockPrompt.mockRejectedValueOnce(new Error('model unavailable'));
+
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+
+    expect(reactions(client).at(-1)).toMatchObject({ emoji: '❌' });
+    expect(sentMessages(client)).toHaveLength(0);
+    // typing keepalive 已随 clearTurnTimers 清掉——推进 9s 静默。
+    const countAfterError = client.sendOutbound.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(client.sendOutbound.mock.calls.slice(countAfterError)).toHaveLength(0);
+  });
+
+  it('finalize：末帧 stopReason=error → reaction ❌ 锚到本轮消息，零消息', async () => {
     await telegramGatewayConfig.setValue(VALID_CONFIG(true));
     await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
     const fields = {
@@ -402,36 +523,21 @@ describe('setupTelegramGatewayManager', () => {
     const { sessionStore } = await import('../chat/session-store');
     await sessionStore.create(fields);
     await sessionStore.createWithMessages(fields, [
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'q1' }],
-      },
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'old answer' }],
-      },
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'q2' }],
-      },
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: '' }],
-        stopReason: 'error',
-      },
+      { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'old answer' }] },
+      { role: 'user', content: [{ type: 'text', text: 'q2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '' }], stopReason: 'error' },
     ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
     setupTelegramGatewayManager();
     await flushAsync();
-
     const client = mockBootstrap.mock.results[0]!.value.client as {
       sendOutbound: ReturnType<typeof vi.fn>;
     };
+    client.sendOutbound.mockClear();
 
+    // 第二轮 turn——顺带钉住 per-turn userMessageId 隔离（锚 = message_id 2）
     await inboundCallback(0)({ ...TEST_INBOUND, text: 'q2', update_id: 2, message_id: 2 });
-
-    expect(mockPrompt).toHaveBeenCalled();
-    // 模拟完成广播：末帧 assistant stopReason=error → 占位改成失败标记，
-    // 不回退发旧文本（'old answer'）。
     const sessionId = await telegramSessionId(965822571);
     fireBroadcast({
       type: 'agent_end',
@@ -445,15 +551,68 @@ describe('setupTelegramGatewayManager', () => {
     });
     await flushAsync();
 
-    const kinds = client.sendOutbound.mock.calls.map(([m]) => (m as { kind?: string }).kind);
-    expect(kinds).toContain('sendChatAction'); // typing keepalive 照常
-    // sendMessage 只有占位消息 1 条——run 失败不补发旧文本，改为占位改失败标记
-    expect(kinds.filter((k) => k === 'sendMessage')).toHaveLength(1);
-    const editCalls2 = client.sendOutbound.mock.calls.filter(
-      ([m]) => (m as { kind?: string }).kind === 'editMessage',
-    );
-    expect(editCalls2).toHaveLength(1);
-    expect(editCalls2[0]![0]).toMatchObject({ text: '⚠️ Agent failed' });
+    expect(reactions(client).at(-1)).toMatchObject({ message_id: 2, emoji: '❌' });
+    expect(sentMessages(client)).toHaveLength(0); // 不回退发旧文本
+  });
+
+  it('reply 目标缺失 → 三级兜底降级（reply+MD → reply+plain → 无 reply）仍送达', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    const fields = {
+      id: await telegramSessionId(965822571),
+      title: 'Telegram · @tester',
+      model: 'test-model',
+      provider: 'test',
+      userInstructions: '',
+      thinkingLevel: 'medium' as const,
+    };
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create(fields);
+    await sessionStore.createWithMessages(fields, [
+      { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Xin chào! Tôi có thể giúp gì cho bạn?' }] },
+    ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+    client.sendOutbound.mockImplementation(async (m: unknown) => {
+      const a = m as { kind?: string; reply_to_message_id?: number };
+      // 带 reply_to 的 sendMessage 一律失败（模拟用户已删消息）
+      if (a.kind === 'sendMessage' && a.reply_to_message_id) {
+        return {
+          kind: 'sendMessage_result' as const,
+          request_id: 'x',
+          ok: false,
+          error: 'Bad Request: message to be replied not found',
+        };
+      }
+      return { kind: 'sendMessage_result' as const, request_id: 'x', ok: true, message_id: 2 };
+    });
+
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Xin chào! Tôi có thể giúp gì cho bạn?' }] },
+      ] as never[],
+    });
+    await flushAsync();
+
+    const sends = sentMessages(client);
+    expect(sends).toHaveLength(3);
+    expect(sends[0]!.reply_to_message_id).toBe(1);
+    expect(sends[0]!.parse_mode).toBe('Markdown');
+    expect(sends[1]!.reply_to_message_id).toBe(1);
+    expect(sends[1]!.parse_mode).toBeUndefined();
+    expect(sends[2]!.reply_to_message_id).toBeUndefined();
+    expect(sends[2]!.text).toBe('Xin chào! Tôi có thể giúp gì cho bạn?');
   });
 
   // ─── Sliding window：每 5 turn 觸發 compaction ───

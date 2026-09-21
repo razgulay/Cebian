@@ -34,8 +34,6 @@ import {
   telegramGatewaySecrets,
 } from '@/lib/persistence/storage';
 import { getAssistantText } from '@/lib/agent/message-helpers';
-import { applyStreamOps } from '@/lib/agent/stream-replica';
-import { getToolLabel } from '@/lib/tools/labels';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { BroadcastMessage, ServerMessage } from '@/lib/ipc/protocol';
 import { sessionManager } from '../chat/session-manager';
@@ -43,6 +41,7 @@ import { sessionStore } from '../chat/session-store';
 import { onBroadcastTap } from '../chat/viewers';
 import { onPortConnect, post } from '../ipc/port-registry';
 import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
+import { splitReply } from '@/lib/telegram-gateway/message-split';
 import {
   bootstrapTelegramGateway,
   type BootstrapHandle,
@@ -58,15 +57,15 @@ const sessionQueues = new Map<string, Promise<void>>();
 /** 每 Telegram session 的 turn 計數——sliding window 的觸發依據。 */
 const telegramTurnCounts = new Map<string, number>();
 
-// ─── Inbound turn 的 UX 生命周期状态（typing keepalive / placeholder / 流式编辑）───
+// ─── Inbound turn 的 UX 生命周期状态（reaction + typing keepalive）───
 
-const THINKING_PLACEHOLDER = '🤔 Thinking…';
+// Reaction 生命周期 emoji（Step-Progress：等待 👀 → 完成 👌 / 失败 ❌）。
+// 动画由 Telegram client 原生渲染（relay 侧 is_big），运行期间零 edit 调用。
+const REACTION_THINKING = '👀';
+const REACTION_DONE = '👌';
+const REACTION_ERROR = '❌';
 // Telegram typing 状态 ~5s 自动过期 → 4s 续发
 const TYPING_INTERVAL_MS = 4_000;
-// editMessageText ~1 req/s per chat → 1.5s 节流
-const EDIT_THROTTLE_MS = 1_500;
-// Telegram message 上限 4096 → 留余量
-const EDIT_CHUNK_LIMIT = 4000;
 // Sliding window：每 N 个 turn 触发 compaction，把舊語境摘要化、LLM context
 // 回到短狀態（Telegram 對話保持快速回應）。
 const TELEGRAM_MAX_TURNS = 5;
@@ -75,42 +74,35 @@ const TELEGRAM_MAX_TURNS = 5;
 interface TelegramTurnState {
   sessionId: string;
   chatId: number;
-  /** sendMessage('🤔 Thinking…') 的 message_id——所有 edit 的锚点。null = 尚未回执。 */
-  placeholderId: number | null;
-  /** placeholder 被删 / 编辑通道硬失败后置 false——后续 edit 全部跳过。 */
-  placeholderAlive: boolean;
+  /** 用户消息的 message_id——reaction 的锚点 + finalize Block 1 的 reply_to。 */
+  userMessageId: number;
   typingTimer: ReturnType<typeof setInterval> | null;
-  throttleTimer: ReturnType<typeof setTimeout> | null;
-  /** 流式副本（与 UI 同一 applyStreamOps 语义，每 turn 从空开始）。 */
-  replica: BroadcastMessage[];
-  /** placeholder 当前展示的文本——避免 editMessage 未变更时重复调用。 */
-  lastSentText: string;
-  /** 节流窗口内挂起待发的文本。 */
-  pendingEditText: string | null;
-  /** 上一次 edit 的时间戳——节流窗口的相位基准。 */
-  lastEditAt: number;
 }
 
 /** sessionId → 进行中的 turn。agent_end / teardown 时清理。 */
 const activeTurns = new Map<string, TelegramTurnState>();
 
-/** 为 inbound turn 建 UX 状态：立刻发 typing + 占位消息，并启动 4s typing 续发。 */
+/** 为 inbound turn 建 UX 状态：在用户消息上贴 👀 reaction（client 原生动画）
+ *  + 启动 4s typing 续发。不再发送任何占位消息——运行期间聊天窗零打扰。 */
 function startTurnUx(msg: InboundMessage, sessionId: string): void {
   const state: TelegramTurnState = {
     sessionId,
     chatId: msg.chat_id,
-    placeholderId: null,
-    placeholderAlive: true,
+    userMessageId: msg.message_id,
     typingTimer: null,
-    throttleTimer: null,
-    replica: [],
-    lastSentText: '',
-    pendingEditText: null,
-    lastEditAt: 0,
   };
   activeTurns.set(sessionId, state);
   const gateway = handle;
   if (!gateway) return;
+  void gateway.client
+    .sendOutbound({
+      kind: 'setMessageReaction',
+      request_id: crypto.randomUUID(),
+      chat_id: msg.chat_id,
+      message_id: msg.message_id,
+      emoji: REACTION_THINKING,
+    })
+    .catch(() => {});
   void gateway.client
     .sendOutbound({
       kind: 'sendChatAction',
@@ -132,24 +124,6 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
       })
       .catch(() => {});
   }, TYPING_INTERVAL_MS);
-  // 占位消息：拿到 message_id 回执后，后续 edit 才有锚点。
-  void gateway.client
-    .sendOutbound({
-      kind: 'sendMessage',
-      request_id: crypto.randomUUID(),
-      chat_id: msg.chat_id,
-      text: THINKING_PLACEHOLDER,
-    })
-    .then((result) => {
-      if (result.kind === 'sendMessage_result' && result.ok) {
-        state.placeholderId = result.message_id;
-      } else {
-        state.placeholderAlive = false;
-      }
-    })
-    .catch(() => {
-      state.placeholderAlive = false;
-    });
 }
 
 /** FNV-1a 32-bit（多个不同 seed 派生 128 位）。仅作稳定标识，非安全哈希。 */
@@ -193,8 +167,9 @@ async function syncGateway(): Promise<void> {
     // 拆线后立刻把状态归位——旧客户端的事件不再来，徽章不该停在旧状态。
     telegramGatewayChannel.publishStatus('disconnected');
   }
-  // gateway 拆除 → 进行中 turn 的 timer 一并清理（编辑发不出去，占位停在
-  // 最后一帧；下次 Save / 重启时重建）。sliding window 計數也歸零。
+  // gateway 拆除 → 进行中 turn 的 timer（typing 续发）一并清理；👀 reaction
+  // 留在用户消息上成为静默残留（Telegram client 行为，API 无法回收）。turn
+  // 状态一并丢弃——agent_end 晚到也无人收尾。sliding window 計數也歸零。
   for (const state of activeTurns.values()) {
     clearTurnTimers(state);
   }
@@ -262,11 +237,11 @@ async function dispatchInbound(msg: InboundMessage): Promise<void> {
 
 /**
  * 一个完整的 Telegram turn：确保 session 行 → 跑 agent。回复的发送不再在此——
- * agent_end（经 broadcast tap）触发 finalizeTurn 完成占位编辑 / 拆分发送。
+ * agent_end（经 broadcast tap）触发 finalizeTurn 完成 reaction 收尾 / 分块落位。
  */
 async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<void> {
   // Re-arm UX per turn：每個排隊的訊息在實際開始執行時建自己的 UX 生命週期
-  // （fresh placeholder + typing keepalive）。前一個 turn 的 agent_end 已清理
+  // （fresh reaction + typing keepalive）。前一個 turn 的 agent_end 已清理
   // 前一個 state，此處建立的是本輪專屬的。
   startTurnUx(msg, sessionId);
   // 确保 session 行存在（带「Telegram ·」识别标题）。prompt() 也会建——但用
@@ -282,6 +257,7 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
       ]);
       if (!globalModel) {
         console.warn('[telegram-gateway] no model configured — cannot run Telegram agent');
+        abortTurnUx(sessionId);
         return;
       }
       const name = msg.from?.username ? `@${msg.from.username}` : String(msg.chat_id);
@@ -298,6 +274,7 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
     const still = await sessionStore.load(sessionId).catch(() => null);
     if (!still) {
       console.warn('[telegram-gateway] ensure session failed:', err);
+      abortTurnUx(sessionId);
       return;
     }
   }
@@ -308,163 +285,111 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
     await sessionManager.prompt(sessionId, msg.text);
   } catch (err) {
     console.warn('[telegram-gateway] prompt failed:', err);
-    // prompt 抛错（模型不可用等）→ 占位改成失败标记，避免永远停在 Thinking。
-    const state = activeTurns.get(sessionId);
-    if (state?.placeholderAlive && state.placeholderId !== null) {
-      void handle?.client
-        .sendOutbound({
-          kind: 'editMessage',
-          request_id: crypto.randomUUID(),
-          chat_id: msg.chat_id,
-          message_id: state.placeholderId,
-          text: '⚠️ Agent error',
-        })
-        .catch(() => {});
-    }
+    abortTurnUx(sessionId);
     return;
   }
 }
 
-/** 清理 turn 的 timers（typing 续发 / 节流编辑）。 */
+/** 清理 turn 的 timers（typing 续发）。 */
 function clearTurnTimers(state: TelegramTurnState): void {
   if (state.typingTimer !== null) {
     clearInterval(state.typingTimer);
     state.typingTimer = null;
   }
-  if (state.throttleTimer !== null) {
-    clearTimeout(state.throttleTimer);
-    state.throttleTimer = null;
-  }
-  state.pendingEditText = null;
 }
 
 /**
- * 节流编辑：1.5s trailing 窗口，把 pendingEditText 经 editMessage 发出
- * （不带 parse_mode——流式进行中 markdown 未闭合会 400）。同一窗口合并多次
- * 触发；文本未变化时跳过（'message is not modified' 的客户端预防）。
+ * Turn 无法继续（无模型 / session 行缺失 / prompt 抛错）：清掉 typing timer，
+ * 用户消息上的 reaction 换成 ❌——失败可见、聊天窗依然零打扰（不再发
+ * 「⚠️ Agent error」占位文本）。state 留在表里——迟到的 agent_end 广播仍能收尾。
  */
-function scheduleEdit(state: TelegramTurnState, text: string): void {
-  if (!state.placeholderAlive || state.placeholderId === null) return;
-  if (text === state.lastSentText) return;
-  state.pendingEditText = text;
-  if (state.throttleTimer !== null) return;
-  const gateway = handle;
-  if (!gateway) return;
-  const since = Date.now() - state.lastEditAt;
-  state.throttleTimer = setTimeout(
-    () => {
-      state.throttleTimer = null;
-      const pending = state.pendingEditText;
-      state.pendingEditText = null;
-      if (
-        pending === null ||
-        pending === state.lastSentText ||
-        !state.placeholderAlive ||
-        state.placeholderId === null
-      ) {
-        return;
-      }
-      state.lastSentText = pending;
-      state.lastEditAt = Date.now();
-      void gateway.client
-        .sendOutbound({
-          kind: 'editMessage',
-          request_id: crypto.randomUUID(),
-          chat_id: state.chatId,
-          message_id: state.placeholderId,
-          text: pending,
-        })
-        .catch(() => {});
-    },
-    Math.max(0, EDIT_THROTTLE_MS - since),
-  );
+function abortTurnUx(sessionId: string): void {
+  const state = activeTurns.get(sessionId);
+  if (!state) return;
+  clearTurnTimers(state);
+  void handle?.client
+    .sendOutbound({
+      kind: 'setMessageReaction',
+      request_id: crypto.randomUUID(),
+      chat_id: state.chatId,
+      message_id: state.userMessageId,
+      emoji: REACTION_ERROR,
+    })
+    .catch(() => {});
 }
 
 /**
- * agent_end：清 timers，并把最终回复写回 Telegram——≤4000 编辑占位
- * （Markdown，失败退 plain）；>4000 首段编辑占位、余段逐条 sendMessage
- * （末段 Markdown，失败退 plain）。
+ * agent_end：清 timers + 换 reaction（👀 → 👌 / ❌），把最终回复写回 Telegram
+ * （首段锚点模型的 finalize）——splitReply 把回复切成「完整第一段 + ≤2000 的
+ * 段落分组块」：Block 1 以 reply_to 回链用户消息（Markdown → plain → 无 reply
+ * 三级兜底，保证送达），Block 2+ 静默补发（关 link preview）。运行期间聊天窗
+ * 零打扰，finalize 每块仅 1-2 次调用。
  */
 async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage[]): Promise<void> {
   clearTurnTimers(state);
   activeTurns.delete(state.sessionId);
 
   const gateway = handle;
-  if (!gateway || !state.placeholderAlive || state.placeholderId === null) return;
+  if (!gateway) return;
 
-  // run 失败（合成 assistant 带 stopReason error/aborted）→ 占位改成失败标记，
+  // run 失败（合成 assistant 带 stopReason error/aborted）→ reaction 换 ❌，
   // 不回退发旧文本（避免重复回复）。
   const last = messages[messages.length - 1] as
     | { role?: string; stopReason?: string }
     | undefined;
-  if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) {
-    void gateway.client
-      .sendOutbound({
-        kind: 'editMessage',
-        request_id: crypto.randomUUID(),
-        chat_id: state.chatId,
-        message_id: state.placeholderId,
-        text: '⚠️ Agent failed',
-      })
-      .catch(() => {});
-    return;
-  }
+  const failed =
+    last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted');
+  void gateway.client
+    .sendOutbound({
+      kind: 'setMessageReaction',
+      request_id: crypto.randomUUID(),
+      chat_id: state.chatId,
+      message_id: state.userMessageId,
+      emoji: failed ? REACTION_ERROR : REACTION_DONE,
+    })
+    .catch(() => {});
+  if (failed) return;
 
   const text = lastAssistantText(messages);
   if (!text) return;
 
-  const chunks = text.length > EDIT_CHUNK_LIMIT
-    ? [text.slice(0, EDIT_CHUNK_LIMIT), ...splitRemainder(text.slice(EDIT_CHUNK_LIMIT), EDIT_CHUNK_LIMIT)]
-    : [text];
-  const editChunk = async (chunk: string, useMarkdown: boolean): Promise<boolean> => {
-    const result = await gateway.client.sendOutbound({
-      kind: 'editMessage',
-      request_id: crypto.randomUUID(),
-      chat_id: state.chatId,
-      message_id: state.placeholderId!,
-      text: chunk,
-      ...(useMarkdown ? { parse_mode: 'Markdown' as const } : {}),
-    });
-    return result.ok;
-  };
-  const sendChunk = async (chunk: string, useMarkdown: boolean): Promise<boolean> => {
+  const blocks = splitReply(text);
+  const sendBlock = async (
+    chunk: string,
+    opts: { replyTo?: boolean; useMarkdown: boolean },
+  ): Promise<boolean> => {
     const result = await gateway.client.sendOutbound({
       kind: 'sendMessage',
       request_id: crypto.randomUUID(),
       chat_id: state.chatId,
       text: chunk,
-      ...(useMarkdown ? { parse_mode: 'Markdown' as const } : {}),
+      ...(opts.replyTo ? { reply_to_message_id: state.userMessageId } : {}),
+      ...(opts.useMarkdown ? { parse_mode: 'Markdown' as const } : {}),
+      // Block 2+（无 reply）：静默 + 关 link preview——多块不刷通知 / 预览卡
+      ...(!opts.replyTo
+        ? { disable_notification: true, disable_link_preview: true }
+        : {}),
     });
-    return result.ok;
+    return result.kind === 'sendMessage_result' && result.ok;
   };
 
   try {
-    // 首段：编辑占位（Markdown，失败退 plain）
-    if (!(await editChunk(chunks[0]!, true))) {
-      await editChunk(chunks[0]!, false);
+    // Block 1：reply_to 用户消息，三级兜底保证送达（Markdown → plain → 无 reply）
+    const first = blocks[0]!;
+    if (!(await sendBlock(first, { replyTo: true, useMarkdown: true }))) {
+      if (!(await sendBlock(first, { replyTo: true, useMarkdown: false }))) {
+        await sendBlock(first, { useMarkdown: false });
+      }
     }
-    // 余段：sendMessage 逐条补发（末段 Markdown，失败退 plain）
-    for (let i = 1; i < chunks.length; i++) {
-      const isLast = i === chunks.length - 1;
-      if (!(await sendChunk(chunks[i]!, isLast))) {
-        await sendChunk(chunks[i]!, false);
+    // Block 2+：静默补发，Markdown 失败退 plain
+    for (const block of blocks.slice(1)) {
+      if (!(await sendBlock(block, { useMarkdown: true }))) {
+        await sendBlock(block, { useMarkdown: false });
       }
     }
   } catch (err) {
     console.warn('[telegram-gateway] finalize failed:', err);
   }
-}
-
-/** Telegram >4000 拆分：按 limit 硬切（v1 不做段落边界回溯）。 */
-function splitRemainder(text: string, limit: number): string[] {
-  const chunks: string[] = [];
-  let rest = text;
-  while (rest.length > limit) {
-    chunks.push(rest.slice(0, limit));
-    rest = rest.slice(limit);
-  }
-  if (rest.length > 0) chunks.push(rest);
-  return chunks;
 }
 
 /**
@@ -481,8 +406,9 @@ async function maybeCompactTelegramSession(sessionId: string): Promise<void> {
   await sessionManager.compactNow(sessionId);
 }
 
-/** Broadcast tap 的 handler：只关心本侧 telegram session 的事件
- *  （typing / tool 状态 / 流式文本编辑在 agent 跑期间驱动；agent_end 收尾）。 */
+/** Broadcast tap 的 handler：只关心本侧 telegram session 的 agent_end
+ *  （Step-Progress + reaction 模型：运行期间不打扰聊天窗——reaction / typing
+ *  已在 startTurnUx 布好，唯一动作是 agent_end 收尾落位完整回复）。 */
 function handleTurnBroadcast(msg: ServerMessage): void {
   const state =
     'sessionId' in msg && typeof msg.sessionId === 'string'
@@ -490,20 +416,11 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       : undefined;
   if (!state) return;
   switch (msg.type) {
-    case 'stream_ops': {
-      state.replica = applyStreamOps(state.replica, msg.ops) ?? state.replica;
-      const text = lastAssistantText(state.replica);
-      if (text !== null) scheduleEdit(state, text);
-      break;
-    }
-    case 'tool_pending':
-      scheduleEdit(state, `🔧 ${getToolLabel(msg.toolName, msg.args)}…`);
-      break;
     case 'agent_end':
       void finalizeTurn(state, msg.messages);
       break;
     default:
-      // agent_start / message_end / session_* —— UX 不需要
+      // stream_ops / tool_pending / agent_start / message_end / session_* —— UX 不需要
       break;
   }
 }
@@ -514,8 +431,8 @@ export function setupTelegramGatewayManager(): void {
   telegramGatewayConfig.watch(() => scheduleSync());
   telegramGatewaySecrets.watch(() => scheduleSync());
   scheduleSync();
-  // Broadcast tap：观察 telegram session 的 agent 事件流（typing / tool 状态 /
-  // 流式文本编辑在 agent 跑期间驱动；agent_end 收尾）。
+  // Broadcast tap：观察 telegram session 的 agent 事件流——Step-Progress +
+  // reaction 模型下运行期间不打扰聊天窗，唯一动作是 agent_end 收尾落位。
   onBroadcastTap((msg) => handleTurnBroadcast(msg));
   // First-frame push：sidepanel 的 channel 单例初始值是 'disconnected'。若 WS
   // 在 port 建立之前就连上了，之后没有新的状态变化事件可广播，徽章会永远停在
