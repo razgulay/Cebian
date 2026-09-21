@@ -196,12 +196,15 @@ class SessionStore {
     return { id, title };
   }
 
-  /** 把会话的模型 / 思考档落库（background 是唯一写者，故经由此处）。 */
+  /** 把会话的模型 / 思考档落库（background 是唯一写者，故经由此处）。
+   *  `touchUpdatedAt` 默认 true（prompt 路径）；页头配置路径传 false——换模型
+   *  不算对话发生，不该把会话顶到历史列表最上面。 */
   async updateSettings(
     id: string,
     settings: { provider?: string; model?: string; thinkingLevel?: string },
+    opts: { touchUpdatedAt?: boolean } = {},
   ): Promise<void> {
-    await updateSessionSettings(id, settings);
+    await updateSessionSettings(id, settings, opts);
   }
 
   /** 批量设置会话在历史列表里的位置（置顶 / 归档 / 普通）。单条 = 长度 1 的数组。 */

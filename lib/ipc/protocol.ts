@@ -146,6 +146,18 @@ export type ClientMessage =
   /** Rename a session (sidebar "Rename" action). Bg updates the row and
    *  broadcasts `session_changed`. */
   | { type: 'session_rename'; sessionId: string; title: string }
+  /** 直接设置会话的模型 / 思考档（页头选择器立即落库，无需先发一条消息）。
+   *  provider + model 必须成对出现（模型身份不可拆）；thinkingLevel 独立可选。
+   *  Telegram session 的 BG prompt 以会话行为模型来源——不落库的话选择器会被
+   *  下一次 session_state 广播 revert。成功广播 `session_changed`，失败回
+   *  `session_write_failed`（op: 'config'）。 */
+  | {
+      type: 'session_config_set';
+      sessionId: string;
+      provider?: string;
+      model?: string;
+      thinkingLevel?: string;
+    }
   | { type: 'recorder_start' }
   | { type: 'recorder_stop' }
   /** Sent by a sidepanel right after it opens a port, declaring a unique
@@ -231,6 +243,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'session_set_placement',
   'session_fork',
   'session_rename',
+  'session_config_set',
   'recorder_start',
   'recorder_stop',
   'hello',
@@ -308,9 +321,9 @@ export type SessionSnapshot = Omit<SessionRecord, 'messages'> & {
   branchInfo?: Record<string, BranchEntryInfo>;
 };
 
-/** 会话写操作的种类（`session_write_failed.op`）：删除 / 改位置 / 改名。UI 侧 channel 与
- *  hook 的失败分发按它查表。 */
-export type SessionWriteOp = 'delete' | 'placement' | 'rename';
+/** 会话写操作的种类（`session_write_failed.op`）：删除 / 改位置 / 改名 / 配置。
+ *  UI 侧 channel 与 hook 的失败分发按它查表。 */
+export type SessionWriteOp = 'delete' | 'placement' | 'rename' | 'config';
 
 /** Session metadata without messages, for listing. */
 export type SessionMeta = Omit<SessionRecord, 'messages'> & {

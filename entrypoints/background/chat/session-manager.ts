@@ -45,6 +45,7 @@ import {
   type CompactionSummaryMessage,
 } from '@/lib/agent/compaction-summary';
 import { appendSessionMessage, sessionStore } from './session-store';
+import { isTelegramSessionTitle } from '@/lib/telegram-gateway/session-title';
 import type { SessionTreeMeta } from '@/lib/persistence/session-tree';
 import {
   buildBranchInfo,
@@ -225,6 +226,13 @@ interface AgentSession {
    * 只有在本轮 turn 显式带来一个能解析的模型时才清掉此标记并放行，否则诚实报错。
    */
   modelFallback?: boolean;
+  /**
+   * Telegram session（标题前缀「Telegram · 」）恒为 true——worker team 对
+   * Telegram 入口无意义（UI 已隐藏 chip），全局 `local:workerTeamEnabled` 不得
+   * 渗透：prompt / rewindAndResume / refreshAllSessionTools 的 team flag 一律以
+   * `forceFast ? false : 全局值` 为准。createAgent 从会话行标题推导，终身不变。
+   */
+  forceFast: boolean;
   /** Unified interactive tool bridge manager for this session. */
   toolCtx: SessionToolContext;
   /**
@@ -663,7 +671,8 @@ class SessionManager {
             agentSession.toolCtx,
             {
               broadcast: (msg) => broadcastToViewers(agentSession.sessionId, msg),
-              workerTeamOn: teamOn,
+              // Telegram session（forceFast）恒 Fast——全局翻转不渗透
+              workerTeamOn: teamOn && !agentSession.forceFast,
               getMainModel: () => agentSession.modelIdentity,
             },
           );
@@ -949,6 +958,11 @@ class SessionManager {
 
     const thinkingLvl = existingSession?.thinkingLevel || (await lastSelectedThinkingLevel.getValue());
 
+    // Telegram session（标题前缀「Telegram · 」）强制 Fast：worker team 对 Telegram
+    // 入口无意义（UI 已隐藏 chip），全局 `local:workerTeamEnabled` 不得渗透。该标记
+    // 从会话行标题推导、终身不变，prompt / rewind / tool rebuild 各处以此覆盖全局。
+    const forceFast = isTelegramSessionTitle(existingSession?.title);
+
     // Forward-declared：getMainModel 闭包被下方 createSessionTools() 捕获，
     // 当时 agentSession 尚未建好；赋值在本函数末尾，闭包在 delegate_task execute
     // 时才被读，永远读到 live ref。prompt() 直接闭包 agentSession.modelIdentity，
@@ -963,6 +977,8 @@ class SessionManager {
       {
         broadcast: (msg) => broadcastToViewers(sessionId, msg),
         getMainModel,
+        // Telegram session：不装 delegate_task（undefined = 非 Telegram 读全局）
+        workerTeamOn: forceFast ? false : undefined,
       },
     );
 
@@ -980,7 +996,9 @@ class SessionManager {
     // 里另起的 createCebianAgent）不传这个 hook，所以 frontend_coder 自己写
     // HTML 不会被拦。getWorkerTeamOn 每次调用才读 storage，让 hook 永远用
     // 当前快照——与 prompt/tool snapshot 同一份 workerTeamEnabled。
-    const workerTeamRoutingHook = createWorkerTeamRoutingHook(() => workerTeamEnabled.getValue());
+    const workerTeamRoutingHook = createWorkerTeamRoutingHook(async () =>
+      forceFast ? false : workerTeamEnabled.getValue(),
+    );
     const beforeToolCall: BeforeToolCallHook = async (context, signal) => {
       const blocked = await workerTeamRoutingHook(context);
       if (blocked) return blocked;
@@ -1010,6 +1028,7 @@ class SessionManager {
       phase: 'idle',
       modelKey: `${resolved.provider}/${resolved.modelId}`,
       modelIdentity: { provider: resolved.provider, modelId: resolved.modelId },
+      forceFast,
       ...(usedFallback ? { modelFallback: true } : {}),
       toolCtx,
       permissionBridge,
@@ -1451,11 +1470,12 @@ class SessionManager {
     // tool array / system prompt / user reminder，避免一轮内 prompt 说能用 worker
     // 但 tools 里还没有 delegate_task（或反之）。Persona 与 Team 同源：单一 snapshot
     // 喂给 system prompt block + user message reminder，确保两侧 byte 一致。
-    const [memoryEnabled, workerTeamOn, personaOn] = await Promise.all([
+    const [memoryEnabled, personaOn] = await Promise.all([
       memorySettings.getValue().then((settings) => settings.enabled),
-      workerTeamEnabled.getValue(),
       personaEnabled.getValue(),
     ]);
+    // Telegram session（forceFast）强制 Fast：全局 flag 不得渗透进 Telegram 入口。
+    const workerTeamOn = agentSession.forceFast ? false : await workerTeamEnabled.getValue();
     // Persona identity 只在 personaOn 时读（避免空 identity 进 helper 触发 noisy
     // 空字符串处理；OFF 时完全跳读，cache 也更稳定）。
     const personaIdentityValue = personaOn
@@ -1671,6 +1691,57 @@ class SessionManager {
    * pre-compaction-shaped and cancellation drops the summary instead of
    * leaving a stale aborted marker (no run was in flight).
    */
+  /**
+   * 会话配置（模型 / 思考档）在页头被直接修改（`session_config_set`）时的热刷新：
+   * 会话行已由 handler 落库，这里负责把**活着的** in-memory agent 就地对齐——
+   * 否则下一次无 turn 的 prompt（Telegram 入口）会继续用旧模型跑
+   * （getOrCreateAgent 原样返回既有条目，prompt 的 reconcile 块只在带 turn 时触发），
+   * 行与 agent 无限分歧。
+   *
+   * 冷 agent（map 里没有）无事可做——createAgent 落地时会读会话行。agent 正在跑
+   * （phase ≠ idle）时跳过模型刷新：运行中换 `state.model` 的行为未定义，改动会在
+   * 下一轮 turn 生效（行已是新值）。模型解析失败（被删 / 凭据被拔）不 throw——配置
+   * 写入本身已成功、UI 不应报错；立起 modelFallback 让 prompt 的兜底路径接管。
+   */
+  async refreshSessionConfig(
+    sessionId: string,
+    config: { provider?: string; model?: string; thinkingLevel?: string },
+  ): Promise<void> {
+    const agentSession = this.sessions.get(sessionId);
+    // 冷 agent：createAgent 落地时读会话行，无需对齐
+    if (!agentSession) return;
+    const identity =
+      config.provider && config.model
+        ? { provider: config.provider, modelId: config.model }
+        : null;
+    if (identity && agentSession.phase === 'idle') {
+      const nextKey = `${identity.provider}/${identity.modelId}`;
+      if (nextKey !== agentSession.modelKey) {
+        const resolved = await this.resolveSessionModel(identity);
+        if (!resolved) {
+          // 模型解析不出（被删 / 凭据被并行 tab 拔掉）→ 立起兜底标记，prompt 时
+          // 按兜底模型跑；会话行保持新值，用户换回可用模型即自动恢复。
+          agentSession.modelFallback = true;
+        } else {
+          // 与 prompt 的 modelChanged 分支同款就地赋值：同步字段替换，无
+          // resume/cancel 窗口（agent idle，下一轮 agent_start 自然生效）。
+          agentSession.agent.state.model = resolved.model;
+          agentSession.modelKey = nextKey;
+          agentSession.modelIdentity = { provider: resolved.provider, modelId: resolved.modelId };
+        }
+      }
+    }
+    if (config.thinkingLevel != null && agentSession.phase === 'idle') {
+      const nextThinking = clampThinkingLevel(
+        agentSession.agent.state.model,
+        config.thinkingLevel as ThinkingLevel,
+      );
+      if (nextThinking !== agentSession.agent.state.thinkingLevel) {
+        agentSession.agent.state.thinkingLevel = nextThinking;
+      }
+    }
+  }
+
   async compactNow(sessionId: string): Promise<void> {
     const agentSession = await this.getOrCreateAgent(sessionId);
     if (agentSession.phase !== 'idle') {
@@ -2253,7 +2324,8 @@ class SessionManager {
       // 喂给 tool array 与 system prompt，避免用户空闲时从 Team 切到 Fast（或反之）
       // 后立即按 Retry/Edit，prompt 里还在写「DEFAULT to delegate_task」但 tool list
       // 已经看不到 `delegate_task`（或反之），LLM 幻觉调工具 / 不知何时用 worker。
-      const workerTeamOn = await workerTeamEnabled.getValue();
+      // Telegram session（forceFast）恒为 false——全局 flag 不渗透。
+      const workerTeamOn = agentSession.forceFast ? false : await workerTeamEnabled.getValue();
       const personaOn = await personaEnabled.getValue();
       const personaIdentityValue = personaOn
         ? await personaIdentity.getValue()

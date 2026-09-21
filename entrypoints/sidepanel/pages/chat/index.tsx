@@ -60,6 +60,8 @@ import { uiToolRegistry } from '@/lib/tools/ui-registry';
 import { isCompactionSummary } from '@/lib/agent/compaction-summary';
 import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
+import { sessionListChannel } from '@/lib/agent/session-list-channel';
+import { isTelegramSessionTitle } from '@/lib/telegram-gateway/session-title';
 import { useContextUsage } from '@/components/chat/context/useContextUsage';
 import { ContextUsageBadge } from '@/components/chat/context/ContextUsageBadge';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
@@ -145,18 +147,6 @@ export function ChatPage({
     if (!hasUserOverrideThinkingRef.current) {
       setTurnThinking((thinkingLevel as ThinkingLevel) || 'medium');
     }
-  }, []);
-
-  // 切模型 / 思考档：更新本地草稿 + 标记 user-override + 回写全局种子（供下一个新对话用）。
-  const handleModelChange = useCallback((m: ModelIdentity) => {
-    hasUserOverrideModelRef.current = true;
-    setTurnModel(m);
-    void lastSelectedModel.setValue(m);
-  }, []);
-  const handleThinkingChange = useCallback((l: ThinkingLevel) => {
-    hasUserOverrideThinkingRef.current = true;
-    setTurnThinking(l);
-    void thinkingLevelStorage.setValue(l);
   }, []);
 
   // 句柄：欢迎页示例卡片通过它把 prompt 填入输入框。
@@ -300,6 +290,10 @@ export function ChatPage({
   useEffect(() => {
     onTitleChange?.(sessionTitle);
   }, [sessionTitle, onTitleChange]);
+
+  // Telegram session 判定：team chip / thinking selector 对 BG 侧 prompt 无意义，
+  // 隐藏（ModelSelector 保留——session 级模型选择正是为 Telegram 服务的入口）。
+  const isTelegramSession = isTelegramSessionTitle(sessionTitle);
 
   // Subtask 5：BG 主动压缩找不到切点时弹 toast 的订阅挂在 chat 表面（与 chat
   // 同生命周期即可），installed flag 守单例，重渲染安全。
@@ -479,6 +473,40 @@ export function ChatPage({
   // 当前 chat session id（新会话还没落 id 时为 null）。ChatInput 的历史导航与
   // ChatSessionIdContext（canvas 链接拦截）共用同一口径，避免两处各算一遍漂移。
   const chatSessionId = isNewChat ? activeSessionId : routeSessionId ?? null;
+
+  // ─── 切模型 / 思考档：session 级落库 ───
+  // 已有会话：选择立即写入 session row——Telegram 侧 BG prompt 的模型来源就是
+  // 这一行，不落库的话选择器会被下一次 session_state 广播 revert 回旧值。不写
+  // 全局——会话级选择与全局默认互不影响；全局只是新会话的种子（isNewChat /
+  // chatSessionId 为空的分支，保持原行为）。
+  const handleModelChange = useCallback(
+    (m: ModelIdentity) => {
+      hasUserOverrideModelRef.current = true;
+      setTurnModel(m);
+      if (isNewChat || !chatSessionId) {
+        void lastSelectedModel.setValue(m);
+        return;
+      }
+      if (!sessionListChannel.setConfig(chatSessionId, { provider: m.provider, model: m.modelId })) {
+        console.warn('[chat] session_config_set dropped — agent port not connected');
+      }
+    },
+    [isNewChat, chatSessionId],
+  );
+  const handleThinkingChange = useCallback(
+    (l: ThinkingLevel) => {
+      hasUserOverrideThinkingRef.current = true;
+      setTurnThinking(l);
+      if (isNewChat || !chatSessionId) {
+        void thinkingLevelStorage.setValue(l);
+        return;
+      }
+      if (!sessionListChannel.setConfig(chatSessionId, { thinkingLevel: l })) {
+        console.warn('[chat] session_config_set dropped — agent port not connected');
+      }
+    },
+    [isNewChat, chatSessionId],
+  );
 
   return (
     // canvas 链接拦截（MarkdownRenderer 深处的 MarkdownLink）需要当前 session
@@ -1184,6 +1212,7 @@ export function ChatPage({
           thinkingLevel={turnThinking}
           onModelChange={handleModelChange}
           onThinkingChange={handleThinkingChange}
+          hideTeamControls={isTelegramSession}
         />
 
       {/* Floating "Quote" button — appears whenever the user selects text

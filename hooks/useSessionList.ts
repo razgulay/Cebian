@@ -55,6 +55,9 @@ const WRITE_FAILED_MESSAGE: Record<SessionWriteOp, (() => string) | null> = {
   delete: () => t('common.session.deleteFailed'),
   placement: () => t('common.session.placementFailed'),
   rename: null,
+  // 配置写失败只影响「下一次 Telegram 消息用哪个模型」——BG 侧已 console.warn，
+  // 这里静默刷新列表即可（选择器草稿保留，不弹 toast）。
+  config: null,
 };
 
 /** 把某个会话的标题就地改成 `title`。乐观更新与 `session_renamed` 广播共用。 */

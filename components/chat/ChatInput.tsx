@@ -94,6 +94,10 @@ interface ChatInputProps {
   thinkingLevel: ThinkingLevel;
   onModelChange: (model: ModelIdentity) => void;
   onThinkingChange: (level: ThinkingLevel) => void;
+  /** 隐藏 team chip + thinking selector（Telegram session 的产品决策：worker team
+   *  对 Telegram 入口无意义；thinking 档位对 Telegram 会话选择不暴露——页头
+   *  ModelSelector 不受影响，session 级模型选择由此入口承担）。 */
+  hideTeamControls?: boolean;
   /** When set, the textarea pre-fills with this value on mount (used by
    *  the edit flow to seed the composer with the previous user message).
    *  Lazy initializer — only read on first render, subsequent prop
@@ -135,6 +139,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     thinkingLevel: currentThinkingLevel,
     onModelChange,
     onThinkingChange,
+    hideTeamControls = false,
     initialValue,
     onCancelEdit,
   },
@@ -2342,7 +2347,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
          *   - Idle state: row still renders (chips always visible), so the
          *     user does not have to click empty space to find the toggle. */}
         <div className="flex items-center gap-1.5 px-2.5 pb-0.5">
-          <WorkerTeamChip />
+          {!hideTeamControls && <WorkerTeamChip />}
           <PersonaChip />
           <span className="flex-1" />
         </div>
@@ -2374,7 +2379,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               onSelect={handleModelSelect}
               showAddModels
             />
-            {thinkingLevels.length > 1 && (
+            {!hideTeamControls && thinkingLevels.length > 1 && (
               <ThinkingLevelSelector
                 level={displayThinkingLevel}
                 levels={thinkingLevels}

@@ -316,13 +316,16 @@ export async function getSessionLabels(ids: string[]): Promise<SessionLabelRow[]
 export async function updateSessionSettings(
   id: string,
   settings: { provider?: string; model?: string; thinkingLevel?: string },
+  opts: { touchUpdatedAt?: boolean } = {},
 ): Promise<void> {
   const patch: Partial<SessionRecord> = {};
   if (settings.provider !== undefined) patch.provider = settings.provider;
   if (settings.model !== undefined) patch.model = settings.model;
   if (settings.thinkingLevel !== undefined) patch.thinkingLevel = settings.thinkingLevel;
   if (Object.keys(patch).length === 0) return;
-  patch.updatedAt = Date.now();
+  // touchUpdatedAt（默认 true，prompt 路径 = 真实对话发生）；配置路径传 false——
+  // 只换模型不算对话，不该把会话顶到历史列表最上面（rename 同样不 bump）。
+  if (opts.touchUpdatedAt !== false) patch.updatedAt = Date.now();
   await db.sessions.update(id, patch);
 }
 

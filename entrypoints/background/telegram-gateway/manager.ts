@@ -47,6 +47,7 @@ import {
   type BootstrapHandle,
 } from '@/lib/telegram-gateway/bootstrap';
 import type { InboundMessage } from '@/lib/telegram-gateway/types';
+import { TELEGRAM_TITLE_PREFIX } from '@/lib/telegram-gateway/session-title';
 
 let handle: BootstrapHandle | null = null;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -263,7 +264,7 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
       const name = msg.from?.username ? `@${msg.from.username}` : String(msg.chat_id);
       await sessionStore.create({
         id: sessionId,
-        title: `Telegram · ${name}`,
+        title: `${TELEGRAM_TITLE_PREFIX}${name}`,
         model: globalModel.modelId,
         provider: globalModel.provider,
         userInstructions: '',

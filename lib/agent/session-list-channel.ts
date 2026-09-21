@@ -165,4 +165,20 @@ export const sessionListChannel = {
   rename(sessionId: string, title: string): boolean {
     return post({ type: 'session_rename', sessionId, title } satisfies ClientMessage);
   },
+
+  /** 设置会话的模型 / 思考档（立即落库，无需先发一条消息）。
+   *  provider+model 成对传（模型身份不可拆）；thinkingLevel 独立可选。
+   *  Returns true if the message was posted. */
+  setConfig(
+    sessionId: string,
+    config: { provider?: string; model?: string; thinkingLevel?: string },
+  ): boolean {
+    return post(
+      {
+        type: 'session_config_set',
+        sessionId,
+        ...config,
+      } satisfies ClientMessage,
+    );
+  },
 };

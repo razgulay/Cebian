@@ -454,6 +454,71 @@ const chatClientHandlers: ClientHandlerMap = {
   },
 
   /**
+   * 直接设置会话的模型 / 思考档（页头选择器立即落库，无需先发一条消息）。
+   * Telegram session 的 BG prompt 以会话行为模型来源——这里写不进去的话，
+   * 页头选择器会被下一次 session_state 广播 revert 回旧值。provider + model
+   * 必须成对（模型身份不可拆），thinkingLevel 独立可选。成功广播
+   * `session_changed`（刷新列表 + 其它窗口的会话行）；失败回
+   * `session_write_failed`（op: 'config'），UI 保留自己的乐观草稿。
+   */
+  async session_config_set(port, msg) {
+    const { sessionId } = msg;
+    const fail = (error: string) =>
+      post(port, { type: 'session_write_failed', op: 'config', sessionIds: [sessionId], error });
+
+    if (!isValidSessionId(sessionId)) {
+      console.warn('[session_config_set] rejecting non-UUID sessionId:', sessionId);
+      fail('invalid session id');
+      return;
+    }
+    const provider = typeof msg.provider === 'string' && msg.provider ? msg.provider : undefined;
+    const model = typeof msg.model === 'string' && msg.model ? msg.model : undefined;
+    const thinkingLevel =
+      typeof msg.thinkingLevel === 'string' && msg.thinkingLevel ? msg.thinkingLevel : undefined;
+    if (!provider && !model && !thinkingLevel) {
+      fail('nothing to set');
+      return;
+    }
+    if ((provider ? 1 : 0) !== (model ? 1 : 0)) {
+      fail('provider and model must be set together');
+      return;
+    }
+    try {
+      await sessionStore.updateSettings(
+        sessionId,
+        {
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        },
+        { touchUpdatedAt: false },
+      );
+    } catch (err) {
+      console.warn('[session_config_set] failed:', err);
+      fail(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    // 活着的 in-memory agent 就地对齐新配置——只写行的话，下一次无 turn 的
+    // prompt（Telegram 入口）会继续用旧模型跑，行与 agent 无限分歧。
+    try {
+      await sessionManager.refreshSessionConfig(sessionId, { provider, model, thinkingLevel });
+    } catch (err) {
+      // 热刷新失败不回滚行写入（行是真相）；下一次冷建 / 带 turn 的 prompt 自会对齐。
+      console.warn('[session_config_set] warm-agent refresh failed:', err);
+    }
+    const current = await sessionStore.open(sessionId);
+    if (!current) {
+      // 会话行在写入窗口内被并行删除（db.update 对缺失 key 静默 no-op）
+      fail('session not found');
+      return;
+    }
+    broadcastAll({
+      type: 'session_changed',
+      session: toSessionSnapshot(current),
+    });
+  },
+
+  /**
    * Pin / unpin a session in the sidebar (legacy single-id form, kept for
    * older clients that still send `session_pin`). New code should use
    * `session_set_placement` which is the multi-id, mutually-exclusive form.
