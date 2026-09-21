@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { CopyButton } from '@/components/common/CopyButton';
+import { useTypewriterText } from '@/hooks/useTypewriterText';
 import { MarkdownRenderer } from '@/components/common/MarkdownRenderer';
 import { MessageMetaRow, type MessageMetaProps } from '@/components/chat/MessageMetaRow';
 import { StreamingCursor } from '@/components/chat/StreamingCursor';
@@ -644,24 +645,24 @@ export function AgentMessage({
 }
 
 /* ─── Agent Text Block (Markdown) ───
- *  Renders the assistant's full text through the standard markdown
- *  pipeline. Streaming appearance is handled at the *bubble* level
- *  (AgentMessage's content container — see `animate-message-fade-in`):
- *  the whole bubble fades in once when the message mounts, while
- *  the LLM-streamed text inside naturally "pours" out token-by-token
- *  at the model's pace. Per-chunk / per-token animations inside the
- *  markdown surface were tried but the discrete commit pops felt
- *  jarring against the smooth reading-speed stream the model already
- *  provides. data-speech-content keeps extractSpeakText focused on
- *  the response body (skips thinking / tool cards in sibling blocks).
- *  streaming=true 走 MarkdownRenderer 的分块 memo 路径，末尾块单独重渲染，
- *  前面已定稿块全部跳过——长回复流式期间的 CPU 占用显著降低。 */
+ *  Renders the assistant's text through the standard markdown pipeline.
+ *  During streaming the raw content goes through the Typewriter Buffer
+ *  Queue (useTypewriterText): tokens accumulate in a buffer and are
+ *  revealed at a steady ~30Hz pace instead of landing as discrete
+ *  80ms-coalesced chunks. data-speech-content keeps extractSpeakText
+ *  focused on the response body (skips thinking / tool cards in sibling
+ *  blocks). streaming=true 走 MarkdownRenderer 的分块 memo 路径，末尾块
+ *  单独重渲染，前面已定稿块全部跳过——长回复流式期间的 CPU 占用显著降低。 */
 export function AgentTextBlock({ content, streaming }: { content: string; streaming?: boolean }) {
+  // Typewriter Buffer Queue：streaming 期间 content 经缓冲队列匀速上屏（把
+  // 80ms coalesce 攒出的成块文本拉平成连续出字），结束后冲刷剩余 buffer 不吞字。
+  // 非流式（历史消息）直接透传 content，零开销。
+  const shown = useTypewriterText(content, !!streaming);
   // data-speech-content：标记「可朗读的回复正文」，供 extractSpeakText 只读此子树，
   // 从而跳过 thinking / 工具卡片 / 错误提示等同处一个容器下的其它块。
   return (
     <div data-speech-content>
-      <MarkdownRenderer content={content} normalizeMath streaming={streaming} />
+      <MarkdownRenderer content={shown} normalizeMath streaming={streaming} />
     </div>
   );
 }
