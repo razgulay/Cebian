@@ -14,6 +14,7 @@
 //                        { kind: 'sendChatAction', request_id, chat_id, action }
 //                        { kind: 'editMessage', request_id, chat_id, message_id, text, parse_mode? }
 //                        { kind: 'setMessageReaction', request_id, chat_id, message_id, emoji? }
+//                        { kind: 'deleteMessage', request_id, chat_id, message_id }
 //   Worker → extension : { kind: 'sendMessage_result', request_id, ok, message_id?, error? }
 //                        { kind: 'gateway_result', request_id, ok, error? }（后两种 action 用）
 //
@@ -163,6 +164,30 @@ async function callSetMessageReaction(chatId, messageId, emoji) {
   }
 }
 
+/** deleteMessage — Step-Progress 收尾用：正式回覆落位後刪掉臨時工具狀態行。
+ *  'message to delete not found' 吞掉視為 ok（冪等——重複刪除 / 已刪不報錯，
+ *  同 'message is not modified' 的處理先例）。 */
+async function callDeleteMessage(chatId, messageId) {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (json.ok) return { ok: true };
+    if (typeof json.description === 'string' && json.description.includes('message to delete not found')) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: json.description ? `${res.status}: ${json.description}` : `status ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, error: `telegram api unreachable: ${String(err)}` };
+  }
+}
+
 /** Đọc toàn bộ body của một incoming request dưới dạng string. */
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -226,9 +251,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+    console.log('[gateway] webhook update: chat', message.chat.id, 'msg', message.message_id, 'text:', String(message.text).slice(0, 40));
+
     // Whitelist fail-closed：ngoài danh sách → 200 OK im lặng (200 để Telegram
     // ngừng retry, không broadcast gì xuống extension)。
     if (!isChatAllowed(message.chat.id)) {
+      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+      console.log('[gateway] webhook REJECTED (whitelist): chat', message.chat.id);
       res.writeHead(200).end('OK');
       return;
     }
@@ -299,12 +329,16 @@ wss.on('connection', (ws) => {
     if (!data || typeof data.kind !== 'string' || !data.chat_id) {
       return;
     }
+    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+    console.log('[gateway] ws action:', data.kind, 'chat:', data.chat_id, 'msg_id:', data.message_id ?? '-');
 
     let result;
     if (!env.TELEGRAM_BOT_TOKEN) {
       result = { ok: false, error: 'bot token not configured' };
     } else if (!isChatAllowed(data.chat_id)) {
       result = { ok: false, error: 'chat_id not in whitelist' };
+      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+      console.log('[gateway] ws action REJECTED (whitelist):', data.kind, 'chat:', data.chat_id);
     } else {
       switch (data.kind) {
         case 'sendMessage':
@@ -331,6 +365,13 @@ wss.on('connection', (ws) => {
           }
           result = await callSetMessageReaction(data.chat_id, data.message_id, data.emoji);
           break;
+        case 'deleteMessage':
+          if (typeof data.message_id !== 'number') {
+            result = { ok: false, error: 'message_id required' };
+            break;
+          }
+          result = await callDeleteMessage(data.chat_id, data.message_id);
+          break;
         default:
           return; // 未知 kind——静默忽略
       }
@@ -338,8 +379,10 @@ wss.on('connection', (ws) => {
 
     // request_id 必须回显——extension 用它配对 in-flight 请求。
     // sendMessage 保留 'sendMessage_result'（向后兼容旧 extension）；
-    // sendChatAction / editMessage / setMessageReaction 用 'gateway_result'。
+    // sendChatAction / editMessage / setMessageReaction / deleteMessage 用 'gateway_result'。
     const replyKind = data.kind === 'sendMessage' ? 'sendMessage_result' : 'gateway_result';
+    // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+    console.log('[gateway] ws result:', data.kind, JSON.stringify(result));
     try {
       ws.send(
         JSON.stringify({ kind: replyKind, request_id: data.request_id, ...result })

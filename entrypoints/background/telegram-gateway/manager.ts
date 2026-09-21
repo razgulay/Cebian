@@ -42,6 +42,7 @@ import { onBroadcastTap } from '../chat/viewers';
 import { onPortConnect, post } from '../ipc/port-registry';
 import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
 import { splitReply } from '@/lib/telegram-gateway/message-split';
+import { getToolLabel } from '@/lib/tools/labels';
 import {
   bootstrapTelegramGateway,
   type BootstrapHandle,
@@ -65,6 +66,8 @@ const telegramTurnCounts = new Map<string, number>();
 const REACTION_THINKING = '👀';
 const REACTION_DONE = '👌';
 const REACTION_ERROR = '❌';
+// 工具狀態行的 edit 節流（editMessageText ~1/s per chat → 2.75s trailing 窗口）
+const TOOL_STATUS_THROTTLE_MS = 2_750;
 // Telegram typing 状态 ~5s 自动过期 → 4s 续发
 const TYPING_INTERVAL_MS = 4_000;
 // Sliding window：每 N 个 turn 触发 compaction，把舊語境摘要化、LLM context
@@ -78,6 +81,16 @@ interface TelegramTurnState {
   /** 用户消息的 message_id——reaction 的锚点 + finalize Block 1 的 reply_to。 */
   userMessageId: number;
   typingTimer: ReturnType<typeof setInterval> | null;
+  // ─── 工具狀態行（Step-Progress：首個 tool 到達時建立，finalize / abort 刪除）───
+  /** 狀態行 message_id；null = 尚未發出。首發失敗 → statusDead，本輪不再嘗試。 */
+  statusMessageId: number | null;
+  statusDead: boolean;
+  /** 首發在途標記——回執未到時的後續 tool_pending 只更新 pendingStatusText。 */
+  statusSendInFlight: boolean;
+  statusThrottleTimer: ReturnType<typeof setTimeout> | null;
+  pendingStatusText: string | null;
+  /** 狀態行當前文本——label 未變化時跳過 edit（'message is not modified' 預防）。 */
+  lastSentStatus: string;
 }
 
 /** sessionId → 进行中的 turn。agent_end / teardown 时清理。 */
@@ -91,10 +104,18 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
     chatId: msg.chat_id,
     userMessageId: msg.message_id,
     typingTimer: null,
+    statusMessageId: null,
+    statusDead: false,
+    statusSendInFlight: false,
+    statusThrottleTimer: null,
+    pendingStatusText: null,
+    lastSentStatus: '',
   };
   activeTurns.set(sessionId, state);
   const gateway = handle;
   if (!gateway) return;
+  // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+  console.log('[telegram-gateway] startTurnUx: reaction 👀 + typing on message', msg.message_id);
   void gateway.client
     .sendOutbound({
       kind: 'setMessageReaction',
@@ -102,6 +123,10 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
       chat_id: msg.chat_id,
       message_id: msg.message_id,
       emoji: REACTION_THINKING,
+    })
+    .then((r) => {
+      // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+      console.log('[telegram-gateway] reaction result:', JSON.stringify(r));
     })
     .catch(() => {});
   void gateway.client
@@ -173,6 +198,9 @@ async function syncGateway(): Promise<void> {
   // 状态一并丢弃——agent_end 晚到也无人收尾。sliding window 計數也歸零。
   for (const state of activeTurns.values()) {
     clearTurnTimers(state);
+    // 置 statusDead：首發在途時被拆除的話，遲到的回執自刪狀態行（best-effort，
+    // 走正在 drain 的舊 client）——不留孤兒狀態行
+    state.statusDead = true;
   }
   activeTurns.clear();
   telegramTurnCounts.clear();
@@ -291,12 +319,39 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
   }
 }
 
-/** 清理 turn 的 timers（typing 续发）。 */
+/** 清理 turn 的 timers（typing 续发 / 工具狀態行 edit 節流）。 */
 function clearTurnTimers(state: TelegramTurnState): void {
   if (state.typingTimer !== null) {
     clearInterval(state.typingTimer);
     state.typingTimer = null;
   }
+  if (state.statusThrottleTimer !== null) {
+    clearTimeout(state.statusThrottleTimer);
+    state.statusThrottleTimer = null;
+  }
+  state.pendingStatusText = null;
+}
+
+/** 刪掉工具狀態行（正式回覆落位 / turn 中止時的收尾——聊天窗不留作業殘渣）。
+ *  置 statusDead：遲到的首發回執見此標記會自刪（見 scheduleToolStatus 的 .then）。 */
+function deleteStatusMessage(state: TelegramTurnState): void {
+  if (state.statusThrottleTimer !== null) {
+    clearTimeout(state.statusThrottleTimer);
+    state.statusThrottleTimer = null;
+  }
+  state.pendingStatusText = null;
+  const id = state.statusMessageId;
+  state.statusMessageId = null;
+  state.statusDead = true;
+  if (id === null) return;
+  void handle?.client
+    .sendOutbound({
+      kind: 'deleteMessage',
+      request_id: crypto.randomUUID(),
+      chat_id: state.chatId,
+      message_id: id,
+    })
+    .catch(() => {});
 }
 
 /**
@@ -317,6 +372,103 @@ function abortTurnUx(sessionId: string): void {
       emoji: REACTION_ERROR,
     })
     .catch(() => {});
+  deleteStatusMessage(state);
+}
+
+/**
+ * 工具狀態行（Step-Progress）：第一個 tool_pending 到達時發出一條**靜默**狀態
+ * 消息（`🔧 <label>...`）——即時確認「系統在做事、在做什麼」；後續 tool 切換以
+ * trailing 窗口（TOOL_STATUS_THROTTLE_MS）就地 edit，多步 ReAct 鏈每步有名有姓、
+ * 又不刷屏。agent_end / abort 時整行刪除——正式回覆落位後聊天窗乾淨。
+ * 首發失敗（relay 舊 / 網路斷）→ statusDead，本輪不再嘗試；finalize 的回覆路徑
+ * 與此獨立，照常送達。
+ */
+function scheduleToolStatus(state: TelegramTurnState, label: string): void {
+  // [TEMP-DEBUG] Bỏ sau khi rap lỗi xong
+  console.log('[telegram-gateway] tool status:', label, '| id:', state.statusMessageId, '| dead:', state.statusDead, '| inFlight:', state.statusSendInFlight);
+  if (state.statusDead) return;
+  const text = `🔧 ${label}...`;
+  if (state.statusMessageId === null) {
+    if (state.statusSendInFlight) {
+      // 首發在途：只記最新文本——回執到達後若已變化，補一次節流 edit
+      state.pendingStatusText = text;
+      return;
+    }
+    const gateway = handle;
+    if (!gateway) return;
+    state.statusSendInFlight = true;
+    state.lastSentStatus = text;
+    void gateway.client
+      .sendOutbound({
+        kind: 'sendMessage',
+        request_id: crypto.randomUUID(),
+        chat_id: state.chatId,
+        text,
+        disable_notification: true,
+      })
+      .then((result) => {
+        state.statusSendInFlight = false;
+        if (!(result.kind === 'sendMessage_result' && result.ok)) {
+          state.statusDead = true;
+          return;
+        }
+        if (state.statusDead) {
+          // 收尾（finalize / abort）已跑过而回执迟到：消息刚落地就得删——不留孤儿
+          void gateway.client
+            .sendOutbound({
+              kind: 'deleteMessage',
+              request_id: crypto.randomUUID(),
+              chat_id: state.chatId,
+              message_id: result.message_id,
+            })
+            .catch(() => {});
+          return;
+        }
+        state.statusMessageId = result.message_id;
+        if (state.pendingStatusText !== null && state.pendingStatusText !== text) {
+          const pending = state.pendingStatusText;
+          state.pendingStatusText = null;
+          scheduleStatusEdit(state, pending);
+        }
+      })
+      .catch(() => {
+        state.statusSendInFlight = false;
+        state.statusDead = true;
+      });
+    return;
+  }
+  scheduleStatusEdit(state, text);
+}
+
+/** 節流 edit 狀態行：窗口內合併為最新文本；label 未變化時跳過。 */
+function scheduleStatusEdit(state: TelegramTurnState, text: string): void {
+  if (text === state.lastSentStatus) return;
+  state.pendingStatusText = text;
+  if (state.statusThrottleTimer !== null) return;
+  const gateway = handle;
+  if (!gateway) return;
+  state.statusThrottleTimer = setTimeout(() => {
+    state.statusThrottleTimer = null;
+    const pending = state.pendingStatusText;
+    state.pendingStatusText = null;
+    if (
+      pending === null ||
+      pending === state.lastSentStatus ||
+      state.statusMessageId === null
+    ) {
+      return;
+    }
+    state.lastSentStatus = pending;
+    void gateway.client
+      .sendOutbound({
+        kind: 'editMessage',
+        request_id: crypto.randomUUID(),
+        chat_id: state.chatId,
+        message_id: state.statusMessageId,
+        text: pending,
+      })
+      .catch(() => {});
+  }, TOOL_STATUS_THROTTLE_MS);
 }
 
 /**
@@ -349,6 +501,9 @@ async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage
       emoji: failed ? REACTION_ERROR : REACTION_DONE,
     })
     .catch(() => {});
+  // 工具狀態行收尾：先刪——正式回覆隨後落地，聊天窗不留作業殘渣
+  //（relay 舊不支援 deleteMessage 時靜默失敗，狀態行殘留為已知取捨）。
+  deleteStatusMessage(state);
   if (failed) return;
 
   const text = lastAssistantText(messages);
@@ -417,11 +572,16 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       : undefined;
   if (!state) return;
   switch (msg.type) {
+    case 'tool_pending':
+      // Step-Progress：工具狀態行（首個 tool 建、後續 edit、收尾刪）
+      scheduleToolStatus(state, getToolLabel(msg.toolName, msg.args));
+      break;
     case 'agent_end':
       void finalizeTurn(state, msg.messages);
       break;
     default:
-      // stream_ops / tool_pending / agent_start / message_end / session_* —— UX 不需要
+      // stream_ops / agent_start / message_end / session_* —— UX 不需要
+      //（tool_pending 走上方 case）
       break;
   }
 }
