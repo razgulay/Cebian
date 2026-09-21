@@ -8,15 +8,18 @@
 //   Worker → extension : { kind: 'telegram_message', update_id, message_id,
 //                          chat_id, chat_type, text, date,
 //                          from: { id, username? } | null }
-//   extension → Worker : { kind: 'sendMessage', request_id, chat_id, text }
+//   extension → Worker : { kind: 'sendMessage', request_id, chat_id, text,
+//                          parse_mode?, reply_to_message_id?,
+//                          disable_notification?, disable_link_preview? }
 //                        { kind: 'sendChatAction', request_id, chat_id, action }
 //                        { kind: 'editMessage', request_id, chat_id, message_id, text, parse_mode? }
+//                        { kind: 'setMessageReaction', request_id, chat_id, message_id, emoji? }
 //   Worker → extension : { kind: 'sendMessage_result', request_id, ok, message_id?, error? }
 //                        { kind: 'gateway_result', request_id, ok, error? }（后两种 action 用）
 //
 // Env vars (Koyeb Variables hoặc .env):
 //   TELEGRAM_BOT_TOKEN      — bot token (chỉ Worker đọc, không log)
-//   TELEGRAM_WEBHOOK_SECRET — giá trị header X-Telegram-Bot-Api-Secret
+//   TELEGRAM_WEBHOOK_SECRET — giá trị header X-Telegram-Bot-Api-Secret-Token
 //   WS_AUTH_TOKEN           — shared secret extension trình diện ở ?token=
 //   ALLOWED_CHAT_IDS        — CSV chat id; rỗng/chưa set = từ chối tất cả (fail-closed)
 //   PORT                    — mặc định 8000 (Koyeb web port mặc định)
@@ -52,13 +55,23 @@ function isChatAllowed(chatId) {
   return parseAllowedChatIds(env.ALLOWED_CHAT_IDS).has(String(chatId));
 }
 
-/** Gọi Telegram Bot API sendMessage; chuẩn hoá kết quả thành reply shape. */
-async function callSendMessage(chatId, text) {
+/** Gọi Telegram Bot API sendMessage; chuẩn hoá kết quả thành reply shape.
+ *  extra — các field tuỳ chọn forward thẳng từ wire action:
+ *    parse_mode            → body.parse_mode
+ *    reply_to_message_id   → body.reply_to_message_id (Block 1 reply vào tin user)
+ *    disable_notification  → body.disable_notification (Block 2+ im lặng)
+ *    disable_link_preview  → body.link_preview_options.is_disabled (chống card preview lợn cột) */
+async function callSendMessage(chatId, text, extra = {}) {
   try {
+    const body = { chat_id: chatId, text };
+    if (extra.parse_mode) body.parse_mode = extra.parse_mode;
+    if (extra.reply_to_message_id) body.reply_to_message_id = extra.reply_to_message_id;
+    if (extra.disable_notification) body.disable_notification = true;
+    if (extra.disable_link_preview) body.link_preview_options = { is_disabled: true };
     const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text }),
+      body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => ({}));
     if (json.ok && typeof json.result?.message_id === 'number') {
@@ -121,6 +134,35 @@ async function callEditMessage(chatId, messageId, text, parseMode) {
   }
 }
 
+/** setMessageReaction — dán / đổi / gỡ emoji reaction trên một message
+ *  (Step-Progress: 👀 lúc chạy → 👌 hoàn tất / ❌ lỗi). `emoji` rỗng/undefined
+ *  → reaction rỗng = gỡ. is_big bật animation to (client-native).
+ *  Lỗi Telegram (reaction không được hỗ trợ trên chat loại đó, v.v.) trả
+ *  ok:false — caller phía extension tự catch-im lặng. */
+async function callSetMessageReaction(chatId, messageId, emoji) {
+  try {
+    const reaction = emoji ? [{ type: 'emoji', emoji }] : [];
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMessageReaction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        reaction,
+        is_big: true,
+      }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (json.ok) return { ok: true };
+    return {
+      ok: false,
+      error: json.description ? `${res.status}: ${json.description}` : `status ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, error: `telegram api unreachable: ${String(err)}` };
+  }
+}
+
 /** Đọc toàn bộ body của một incoming request dưới dạng string. */
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -159,9 +201,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     // fail-closed：chưa set secret → từ chối tất cả (chặn giả mạo Telegram update)。
+    // Header đúng theo Bot API là X-Telegram-Bot-Api-Secret-Token (Node lowercase
+    // toàn bộ tên header)——đọc sai tên header = 401 vĩnh viễn với mọi update。
     if (
       !env.TELEGRAM_WEBHOOK_SECRET ||
-      !safeEqual(req.headers['x-telegram-bot-api-secret'] ?? '', env.TELEGRAM_WEBHOOK_SECRET)
+      !safeEqual(req.headers['x-telegram-bot-api-secret-token'] ?? '', env.TELEGRAM_WEBHOOK_SECRET)
     ) {
       res.writeHead(401).end('Unauthorized');
       return;
@@ -268,7 +312,7 @@ wss.on('connection', (ws) => {
             result = { ok: false, error: 'text required' };
             break;
           }
-          result = await callSendMessage(data.chat_id, data.text);
+          result = await callSendMessage(data.chat_id, data.text, data);
           break;
         case 'sendChatAction':
           result = await callSendChatAction(data.chat_id, data.action);
@@ -280,6 +324,13 @@ wss.on('connection', (ws) => {
           }
           result = await callEditMessage(data.chat_id, data.message_id, data.text, data.parse_mode);
           break;
+        case 'setMessageReaction':
+          if (typeof data.message_id !== 'number') {
+            result = { ok: false, error: 'message_id required' };
+            break;
+          }
+          result = await callSetMessageReaction(data.chat_id, data.message_id, data.emoji);
+          break;
         default:
           return; // 未知 kind——静默忽略
       }
@@ -287,7 +338,7 @@ wss.on('connection', (ws) => {
 
     // request_id 必须回显——extension 用它配对 in-flight 请求。
     // sendMessage 保留 'sendMessage_result'（向后兼容旧 extension）；
-    // sendChatAction / editMessage 用 'gateway_result'。
+    // sendChatAction / editMessage / setMessageReaction 用 'gateway_result'。
     const replyKind = data.kind === 'sendMessage' ? 'sendMessage_result' : 'gateway_result';
     try {
       ws.send(

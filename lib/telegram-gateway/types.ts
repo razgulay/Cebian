@@ -28,15 +28,32 @@ export interface InboundMessage {
  *  `request_id` correlates with the reply (`OutboundResult` / `GatewayResult`)
  *  so the extension can match response to in-flight request.
  *
- *  - sendMessage    : 发消息（reply 带 `message_id`——placeholder anchor 用它）
+ *  - sendMessage    : 发消息（reply 带 `message_id`）。可选字段均由 relay 原样
+ *    透传 Bot API：`parse_mode`（Markdown 块）、`reply_to_message_id`（Block 1
+ *    回链用户消息）、`disable_notification`（Block 2+ 静默）、
+ *    `disable_link_preview`（→ link_preview_options.is_disabled，Block 2+ 防
+ *    预览卡片刷屏）
  *  - sendChatAction : typing 指示器（Telegram ~5s 自动过期 → 每 4s 重发）
  *  - editMessage    : editMessageText——parse_mode 只在最后一次 edit 打开
  *    （stream 进行中 markdown 未闭合会 400；'message is not modified' 由
- *    server-side 吞掉——见 gateway/server.js） */
+ *    server-side 吞掉——见 gateway/server.js）
+ *  - setMessageReaction : 给消息贴 / 换 / 清 emoji reaction（`emoji` 省略 =
+ *    清空）。Step-Progress 的 👀 / 👌 / ❌ 生命周期走这里——reaction 动画是
+ *    Telegram client 原生渲染（is_big），零 edit 成本 */
 export type OutboundAction =
-  | { kind: 'sendMessage'; request_id: string; chat_id: number; text: string }
+  | {
+      kind: 'sendMessage';
+      request_id: string;
+      chat_id: number;
+      text: string;
+      parse_mode?: 'Markdown';
+      reply_to_message_id?: number;
+      disable_notification?: boolean;
+      disable_link_preview?: boolean;
+    }
   | { kind: 'sendChatAction'; request_id: string; chat_id: number; action: 'typing' }
-  | { kind: 'editMessage'; request_id: string; chat_id: number; message_id: number; text: string; parse_mode?: 'Markdown' };
+  | { kind: 'editMessage'; request_id: string; chat_id: number; message_id: number; text: string; parse_mode?: 'Markdown' }
+  | { kind: 'setMessageReaction'; request_id: string; chat_id: number; message_id: number; emoji?: string };
 
 /** Outbound wire reply — Worker → extension (cho `sendMessage`). */
 export type OutboundResult =
@@ -89,7 +106,7 @@ export interface TelegramGatewaySecret {
   id: string;
   botToken: string;
   /** Shared secret between extension ↔ Worker; the Worker verifies the inbound
-   *  Telegram `X-Telegram-Bot-Api-Secret` header matches this (set in Worker
+   *  Telegram `X-Telegram-Bot-Api-Secret-Token` header matches this (set in Worker
    *  env `TELEGRAM_WEBHOOK_SECRET`). */
   webhookSecret: string;
   /** WS auth — extension presents this as `?token=<wsAuthToken>` on Worker
