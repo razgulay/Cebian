@@ -14,19 +14,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { InboundMessage } from '@/lib/telegram-gateway/types';
 
-const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessions, broadcastTaps } = vi.hoisted(() => ({
+const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessions, broadcastTaps, mockToolLabel } = vi.hoisted(() => ({
   mockBootstrap: vi.fn(),
   mockPublishStatus: vi.fn(),
   mockPrompt: vi.fn(),
   mockCompactNow: vi.fn(async () => {}),
   mockSessions: new Map<string, { record: Record<string, unknown>; messages: unknown[] }>(),
   broadcastTaps: new Set<(msg: unknown) => void>(),
+  mockToolLabel: vi.fn(() => 'Browsing web'),
 }));
 vi.mock('@/lib/telegram-gateway/bootstrap', () => ({
   bootstrapTelegramGateway: mockBootstrap,
 }));
 vi.mock('@/lib/telegram-gateway/channel', () => ({
   telegramGatewayChannel: { publishStatus: mockPublishStatus },
+}));
+// getToolLabel 走 i18n t()——单测环境没有 locale 上下文会 throw，且 label 文案
+// 不是 manager 的判定逻辑，给固定默认值（单个用例可 mockReturnValueOnce 换 label）。
+vi.mock('@/lib/tools/labels', () => ({
+  getToolLabel: mockToolLabel,
 }));
 vi.mock('../chat/session-manager', () => ({
   sessionManager: { prompt: mockPrompt, compactNow: mockCompactNow },
@@ -613,6 +619,142 @@ describe('setupTelegramGatewayManager', () => {
     expect(sends[1]!.parse_mode).toBeUndefined();
     expect(sends[2]!.reply_to_message_id).toBeUndefined();
     expect(sends[2]!.text).toBe('Xin chào! Tôi có thể giúp gì cho bạn?');
+  });
+
+  // ─── Step-Progress 工具狀態行 ───
+
+  function statusEdits(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; message_id?: number; text?: string })
+      .filter((m) => m.kind === 'editMessage');
+  }
+  function statusDeletes(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; message_id?: number })
+      .filter((m) => m.kind === 'deleteMessage');
+  }
+
+  it('首个 tool_pending → 静默状态行（1 条）；在途回执前换 label → 回执后补一次节流 edit', async () => {
+    const client = await startTurnHarness();
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
+
+    // 第一個 tool_pending：狀態行 sendMessage 在途
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    // 回執未落地時第二個 tool 換 label——只更新 pendingStatusText，不發第二條
+    mockToolLabel.mockReturnValueOnce('Reading file');
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'fs_read', args: {} });
+
+    await flushAsync(); // 回執落位 → statusMessageId 就位 + 補發 edit 的節流窗口啟動
+    const sends = sentMessages(client);
+    expect(sends).toHaveLength(1); // 在途合併：只有 1 條狀態行
+    expect(sends[0]).toMatchObject({ text: '🔧 Browsing web...', disable_notification: true });
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(statusEdits(client)).toHaveLength(0); // 節流窗口內未放行
+
+    await vi.advanceTimersByTimeAsync(2_500);
+    const edits = statusEdits(client);
+    expect(edits).toHaveLength(1);
+    expect(edits[0]).toMatchObject({ message_id: 1, text: '🔧 Reading file...' });
+  });
+
+  it('label 未变化 → 不重复 edit', async () => {
+    const client = await startTurnHarness();
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+    const sessionId = await telegramSessionId(965822571);
+
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    await vi.advanceTimersByTimeAsync(2_800); // 状态行发出（send 非 edit）
+    expect(statusEdits(client)).toHaveLength(0);
+
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    await vi.advanceTimersByTimeAsync(2_800);
+    expect(statusEdits(client)).toHaveLength(0); // 同 label → 跳过 edit
+  });
+
+  it('status 首發失敗 → 本輪放棄（不重試），finalize 照常送達', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    const fields = {
+      id: await telegramSessionId(965822571),
+      title: 'Telegram · @tester',
+      model: 'test-model',
+      provider: 'test',
+      userInstructions: '',
+      thinkingLevel: 'medium' as const,
+    };
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create(fields);
+    await sessionStore.createWithMessages(fields, [
+      { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Trả lời' }] },
+      { role: 'user', content: [{ type: 'text', text: 'q2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Đáp án' }] },
+    ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: 'q2', update_id: 2, message_id: 2 });
+    await flushAsync();
+    // mockImplementationOnce 消耗在下一個呼叫——此時 reaction / typing 已發，
+    // 下一個 sendMessage 正是狀態行首發（讓它失敗）
+    client.sendOutbound.mockImplementationOnce(async (m: unknown) => {
+      const a = m as { kind?: string };
+      if (a.kind === 'sendMessage') {
+        return { kind: 'sendMessage_result' as const, request_id: 'x', ok: false, error: 'blocked' };
+      }
+      return { kind: 'gateway_result' as const, request_id: 'x', ok: true };
+    });
+
+    const sessionId = await telegramSessionId(965822571);
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    await flushAsync();
+    expect(sentMessages(client)).toHaveLength(1); // 失敗的狀態行嘗試
+
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+    await flushAsync();
+    expect(sentMessages(client)).toHaveLength(1); // statusDead → 無重試
+
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'q2' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'Đáp án' }] },
+      ] as never[],
+    });
+    await flushAsync();
+
+    // finalize 照常：👌 + Block 1（reply）送達；status 不存在 → 無 deleteMessage
+    expect(reactions(client).at(-1)).toMatchObject({ emoji: '👌' });
+    const answer = sentMessages(client).filter((m) => m.reply_to_message_id !== undefined);
+    expect(answer).toHaveLength(1);
+    expect(statusDeletes(client)).toHaveLength(0);
+  });
+
+  it('prompt 中途抛错 → 状态行删除 + ❌（迟到回执自删，不留孤儿）', async () => {
+    const client = await startTurnHarness();
+    mockPrompt.mockImplementationOnce(async () => {
+      const sessionId = await telegramSessionId(965822571);
+      fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', args: {} });
+      throw new Error('mid-run failure');
+    });
+
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+
+    // 状态行已发出 → abort 删除。此刻回执未到、deleteStatusMessage 排不了队
+    // （id 尚为 null）——真正的 deleteMessage 由迟到的首发回执自删路径补上
+    expect(sentMessages(client)).toHaveLength(1);
+    expect(reactions(client).at(-1)).toMatchObject({ emoji: '❌' });
+    expect(statusDeletes(client)).toHaveLength(1);
   });
 
   // ─── Sliding window：每 5 turn 觸發 compaction ───

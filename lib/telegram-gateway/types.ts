@@ -39,7 +39,10 @@ export interface InboundMessage {
  *    server-side 吞掉——见 gateway/server.js）
  *  - setMessageReaction : 给消息贴 / 换 / 清 emoji reaction（`emoji` 省略 =
  *    清空）。Step-Progress 的 👀 / 👌 / ❌ 生命周期走这里——reaction 动画是
- *    Telegram client 原生渲染（is_big），零 edit 成本 */
+ *    Telegram client 原生渲染（is_big），零 edit 成本
+ *  - deleteMessage  : 刪除訊息——Step-Progress 的工具狀態行收尾用（正式回覆
+ *    落位前刪掉臨時狀態行，聊天窗不留作業殘渣）。'message to delete not
+ *    found' 由 server-side 吞掉（冪等——重複刪除不報錯） */
 export type OutboundAction =
   | {
       kind: 'sendMessage';
@@ -53,7 +56,8 @@ export type OutboundAction =
     }
   | { kind: 'sendChatAction'; request_id: string; chat_id: number; action: 'typing' }
   | { kind: 'editMessage'; request_id: string; chat_id: number; message_id: number; text: string; parse_mode?: 'Markdown' }
-  | { kind: 'setMessageReaction'; request_id: string; chat_id: number; message_id: number; emoji?: string };
+  | { kind: 'setMessageReaction'; request_id: string; chat_id: number; message_id: number; emoji?: string }
+  | { kind: 'deleteMessage'; request_id: string; chat_id: number; message_id: number };
 
 /** Outbound wire reply — Worker → extension (cho `sendMessage`). */
 export type OutboundResult =
