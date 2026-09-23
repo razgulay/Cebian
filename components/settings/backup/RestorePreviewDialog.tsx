@@ -27,7 +27,8 @@ interface RestorePreviewDialogProps {
   submitting?: boolean;
 }
 
-/** manifest 里实际包含的分类（included=true）。预览只让用户在这些里挑。 */
+/** manifest 里实际包含的分类（included=true）。预览只让用户在这些里挑。
+ *  可选链：旧版备份的 categories JSON 没有 vfsCustom 字段，不能裸取。 */
 function includedCategories(manifest: BackupManifest): BackupCategory[] {
   const c = manifest.categories;
   const out: BackupCategory[] = [];
@@ -35,6 +36,7 @@ function includedCategories(manifest: BackupManifest): BackupCategory[] {
   if (c.settings.included) out.push('settings');
   if (c.skillsPrompts.included) out.push('skillsPrompts');
   if (c.memories.included) out.push('memories');
+  if (c.vfsCustom?.included) out.push('vfsCustom');
   if (c.credentials.included) out.push('credentials');
   return out;
 }
@@ -44,6 +46,7 @@ const CATEGORY_LABEL: Record<BackupCategory, () => string> = {
   settings: () => t('settings.backup.restore.catSettings'),
   skillsPrompts: () => t('settings.backup.restore.catSkillsPrompts'),
   memories: () => t('settings.backup.restore.catMemories'),
+  vfsCustom: () => t('settings.backup.restore.catVfsCustom'),
   credentials: () => t('settings.backup.restore.catCredentials'),
 };
 
@@ -85,6 +88,7 @@ export function RestorePreviewDialog({ open, onOpenChange, manifest, onConfirm, 
     // credentials 不展示数字：无统一且解耦的「条数」口径（见 CredentialsCategorySummary）。
     if (cat === 'skillsPrompts') return manifest.categories.skillsPrompts.fileCount;
     if (cat === 'memories') return manifest.categories.memories.fileCount;
+    if (cat === 'vfsCustom') return manifest.categories.vfsCustom?.fileCount;
     return undefined;
   };
 
@@ -147,6 +151,18 @@ export function RestorePreviewDialog({ open, onOpenChange, manifest, onConfirm, 
                 </label>
               );
             })}
+            {/* The vfsCustom root list must be visible: it is the replace-mode
+                wipe scope. A bare count (from the same manifest) does not tell
+                the user which data the restore will touch. */}
+            {selected.has('vfsCustom') && (manifest.vfs?.custom?.roots?.length ?? 0) > 0 && (
+              <div className="pl-6 space-y-0.5">
+                {(manifest.vfs?.custom?.roots ?? []).map((root) => (
+                  <p key={root} className="truncate text-xs text-muted-foreground" title={root}>
+                    {root}
+                  </p>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* strategy */}

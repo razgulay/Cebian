@@ -14,6 +14,7 @@ import {
   MEMORIES_ROOTS,
   vfsKeyToPath,
   isUnderAnyRoot,
+  sanitizeVfsCustomRoots,
 } from './payload-format';
 import { WORKSPACES_ROOT, workspaceRootForSession } from '@/lib/persistence/vfs-paths';
 import {
@@ -47,7 +48,11 @@ export async function createBackup(options: BackupOptions): Promise<Uint8Array> 
   const wantSessions = cats.has('sessions');
   const wantSkillsPrompts = cats.has('skillsPrompts');
   const wantMemories = cats.has('memories');
+  const wantVfsCustom = cats.has('vfsCustom');
   const wantWorkspaces = wantSessions && options.includeWorkspaces;
+  // 自选 VFS 路径：partial 模式 picker 的选择。sanitize 在 collect 侧同样执行——
+  // 选项对象可能经手持久化 / IPC，不假设它已是规范化形态。
+  const customRoots = wantVfsCustom ? sanitizeVfsCustomRoots(options.vfsCustomRoots) : [];
 
   const files: Record<string, Uint8Array> = {};
 
@@ -79,10 +84,12 @@ export async function createBackup(options: BackupOptions): Promise<Uint8Array> 
   const roots: string[] = [];
   if (wantSkillsPrompts) roots.push(...SKILLS_PROMPTS_ROOTS);
   if (wantMemories) roots.push(...MEMORIES_ROOTS);
+  if (wantVfsCustom) roots.push(...customRoots);
   if (wantWorkspaces) roots.push(...sessionIds.map(workspaceRootForSession));
   let skillsPromptsFileCount = 0;
   let memoriesFileCount = 0;
   let workspacesFileCount = 0;
+  let vfsCustomFileCount = 0;
   if (roots.length > 0) {
     const { files: vfsFiles, index } = await collectVfs(roots);
     Object.assign(files, vfsFiles);
@@ -92,6 +99,9 @@ export async function createBackup(options: BackupOptions): Promise<Uint8Array> 
     skillsPromptsFileCount = wantSkillsPrompts ? countUnder(vfsFiles, SKILLS_PROMPTS_ROOTS) : 0;
     memoriesFileCount = wantMemories ? countUnder(vfsFiles, MEMORIES_ROOTS) : 0;
     workspacesFileCount = wantWorkspaces ? countUnder(vfsFiles, [WORKSPACES_ROOT]) : 0;
+    // 自选路径与固定分类可能重叠（用户把 skills 目录也选进 custom）——fileCount
+    // 按各自的 roots 口径独立统计，重叠时同一文件在多个分类里各计一次，属预期。
+    vfsCustomFileCount = wantVfsCustom ? countUnder(vfsFiles, customRoots) : 0;
   }
 
   // ─ manifest（明文；packArchive 会覆盖 encrypted/encryption） ─
@@ -109,6 +119,7 @@ export async function createBackup(options: BackupOptions): Promise<Uint8Array> 
       credentials: { included: wantCredentials },
       skillsPrompts: { included: wantSkillsPrompts, fileCount: skillsPromptsFileCount },
       memories: { included: wantMemories, fileCount: memoriesFileCount },
+      vfsCustom: { included: wantVfsCustom, fileCount: vfsCustomFileCount },
     },
     vfs: {
       ...(wantSkillsPrompts
@@ -116,6 +127,9 @@ export async function createBackup(options: BackupOptions): Promise<Uint8Array> 
         : {}),
       ...(wantMemories
         ? { memories: { roots: MEMORIES_ROOTS, fileCount: memoriesFileCount } }
+        : {}),
+      ...(wantVfsCustom && customRoots.length > 0
+        ? { custom: { roots: customRoots, fileCount: vfsCustomFileCount } }
         : {}),
       ...(wantWorkspaces
         ? { workspaces: { roots: [WORKSPACES_ROOT], fileCount: workspacesFileCount } }

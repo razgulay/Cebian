@@ -12,8 +12,14 @@
  *  正确消费，故不 bump。 */
 export const BACKUP_FORMAT_VERSION = 1;
 
-/** 用户可见的备份分类。 */
-export type BackupCategory = 'sessions' | 'settings' | 'skillsPrompts' | 'credentials' | 'memories';
+/** 用户可见的备份分类。`vfsCustom` = 用户在 partial 模式自选的 VFS 目录 / 文件。 */
+export type BackupCategory =
+  | 'sessions'
+  | 'settings'
+  | 'skillsPrompts'
+  | 'credentials'
+  | 'memories'
+  | 'vfsCustom';
 
 /** 恢复语义：merge = 只增不减；replace = 清空后照搬。 */
 export type RestoreStrategy = 'merge' | 'replace';
@@ -65,6 +71,13 @@ export interface MemoriesCategorySummary {
   fileCount?: number;
 }
 
+/** 「VFS 自选路径」分类摘要。具体选了哪些路径在 `vfs.custom.roots`（见
+ *  BackupVfsManifest），这里只放 included + 条目数供预览列表展示。 */
+export interface VfsCustomCategorySummary {
+  included: boolean;
+  fileCount?: number;
+}
+
 /** manifest 的 categories 块：各分类是否包含 + 条目数（无敏感值）。 */
 export interface BackupCategorySummaries {
   sessions: SessionsCategorySummary;
@@ -72,6 +85,7 @@ export interface BackupCategorySummaries {
   credentials: CredentialsCategorySummary;
   skillsPrompts: SkillsPromptsCategorySummary;
   memories: MemoriesCategorySummary;
+  vfsCustom: VfsCustomCategorySummary;
 }
 
 /** 一个 VFS 分类的归属：一组根目录前缀 + 该分类下的文件数。单根分类（如
@@ -89,6 +103,9 @@ export interface BackupVfsManifest {
   skillsPrompts?: VfsRootGroup;
   workspaces?: VfsRootGroup;
   memories?: VfsRootGroup;
+  /** 用户自选的 VFS 路径（目录或单文件；绝对路径，已 sanitize——见
+   *  payload-format.sanitizeVfsCustomRoots）。旧版备份无此字段。 */
+  custom?: VfsRootGroup;
 }
 
 /** 备份包的明文 manifest。 */
@@ -117,6 +134,9 @@ export interface BackupOptions {
   categories: BackupCategory[];
   /** 「会话记录」下的子选项：是否一并备份工作区文件。 */
   includeWorkspaces: boolean;
+  /** 「VFS 自选路径」分类的选择：要打包的绝对 VFS 路径（目录或单文件）。
+   *  partial 模式由 picker 产出；full 模式不含该分类（无「全选」语义）。 */
+  vfsCustomRoots?: string[];
   /** 设置则启用口令加密；不设则明文。 */
   password?: string;
 }

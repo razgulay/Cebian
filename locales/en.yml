@@ -448,6 +448,12 @@ settings:
       catSettings: General settings
       catSkillsPrompts: Skills & prompts
       catMemories: Memory
+      catVfsCustom: VFS files & folders (custom)
+      # $1 = number of selected VFS paths
+      vfsSelected: $1 selected
+      catVfsCustomHint: Pick arbitrary VFS folders or files to include
+      vfsPick: Choose folders / files…
+      vfsCustomEmpty: Select at least one folder or file
       catCredentials: Credentials
       catCredentialsHint: Includes API keys, OAuth tokens, etc.
       encrypt: Encrypt backup
@@ -458,6 +464,13 @@ settings:
       atLeastOne: Select at least one category to back up
       success: Backup created
       failed: Backup failed
+    picker:
+      title: Select VFS folders / files
+      hint: Ticking a folder includes its entire contents. Selection is stored in the backup and restored to the same paths
+      # $1 = number of selected VFS paths
+      selectedCount: $1 selected
+      empty: Empty folder
+      loadFailed: Failed to read folder contents
     restore:
       title: Restore backup
       source: From Cebian v$1
@@ -475,11 +488,14 @@ settings:
       catSettings: General settings
       catSkillsPrompts: Skills & prompts
       catMemories: Memory
+      catVfsCustom: VFS files & folders (custom)
       catCredentials: Credentials
       apply: Restore
       confirmReplaceTitle: Replace local data?
       confirmReplaceBody: Replace mode wipes the selected categories before restoring. This cannot be undone
       confirmReplaceCredentialsBody: Replace mode wipes the selected categories before restoring, and writes API keys and tokens from the backup onto this device. This cannot be undone
+      # $1 = custom VFS roots joined with ' · '
+      confirmReplaceVfsCustom: 'The following custom VFS paths will be wiped first: $1'
       confirmCredentialsTitle: Restore credentials?
       confirmCredentialsBody: This will write API keys and tokens from the backup onto this device
       invalidFile: This file is not a valid Cebian backup

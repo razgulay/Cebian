@@ -610,6 +610,12 @@ settings:
       catSettings: 一般設定
       catSkillsPrompts: 技能與提示詞
       catMemories: 記憶
+      catVfsCustom: VFS 檔案與資料夾（自選）
+      # $1 = 已選 VFS 路徑數
+      vfsSelected: 已選 $1 項
+      catVfsCustomHint: 自由挑選要封裝的 VFS 資料夾或檔案
+      vfsPick: 選擇資料夾 / 檔案…
+      vfsCustomEmpty: 請至少選擇一個資料夾或檔案
       catCredentials: 金鑰資訊
       catCredentialsHint: 包含 API Key、OAuth token 等
       encrypt: 加密備份
@@ -620,6 +626,13 @@ settings:
       atLeastOne: 請至少選擇一個要備份的分類
       success: 備份已建立
       failed: 備份失敗
+    picker:
+      title: 選擇 VFS 資料夾 / 檔案
+      hint: 勾選資料夾將包含其全部內容；選擇會記入備份並還原到相同路徑
+      # $1 = 已選 VFS 路徑數
+      selectedCount: 已選 $1 項
+      empty: 空資料夾
+      loadFailed: 讀取資料夾內容失敗
     restore:
       title: 復原備份
       source: 來自 Cebian v$1
@@ -637,11 +650,14 @@ settings:
       catSettings: 一般設定
       catSkillsPrompts: 技能與提示詞
       catMemories: 記憶
+      catVfsCustom: VFS 檔案與資料夾（自選）
       catCredentials: 金鑰資訊
       apply: 復原
       confirmReplaceTitle: 取代本機資料？
       confirmReplaceBody: 取代模式會先清空所選分類再還原，此操作無法復原
       confirmReplaceCredentialsBody: 取代模式會先清空所選分類再還原，並把備份中的 API Key 與 token 寫入本機，此操作無法復原
+      # $1 = 自選 VFS 路徑（以 · 連接）
+      confirmReplaceVfsCustom: 以下自選 VFS 路徑會先被清空：$1
       confirmCredentialsTitle: 復原金鑰資訊？
       confirmCredentialsBody: 這會把備份中的 API Key 與 token 寫入本機
       invalidFile: 該檔案不是有效的 Cebian 備份

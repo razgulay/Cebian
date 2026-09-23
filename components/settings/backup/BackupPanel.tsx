@@ -118,6 +118,10 @@ export function BackupPanel() {
   // 选中文件 / 快照的字节与已校验的 manifest，在恢复弹窗确认时使用。
   const pendingBytes = useRef<Uint8Array | null>(null);
   const [pendingManifest, setPendingManifest] = useState<BackupManifest | null>(null);
+  // 与 pendingBytes 同一套 ref 模式：handleRestoreConfirm 的 useCallback deps 不含
+  // pendingManifest（beginBusy / endBusy 恒定 → 闭包冻结在首帧），state 直读会永远
+  // 拿到 null。ref 侧供回调读，state 侧供 <RestorePreviewDialog> 渲染。
+  const pendingManifestRef = useRef<BackupManifest | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // WebDAV 连接与快照列表状态。
@@ -149,6 +153,7 @@ export function BackupPanel() {
     try {
       const manifest = inspectBackup(bytes);
       pendingBytes.current = bytes;
+      pendingManifestRef.current = manifest;
       setPendingManifest(manifest);
       setRestoreOpen(true);
     } catch (err) {
@@ -227,14 +232,24 @@ export function BackupPanel() {
       if (!beginBusy()) return;
       try {
         // 强确认：替换（破坏性）与含密钥各自有风险，兼顾两者时用合并文案。
+        // vfsCustom 被 replace 时还要点名「清空范围」——自选路径可能罩住未选分类
+        // 的子树（如整个 /home/user），必须让用户看到具体路径再确认。
         const hasCredentials = args.categories.includes('credentials');
         const isReplace = args.strategy === 'replace';
         if (isReplace) {
+          const customRoots = args.categories.includes('vfsCustom')
+            ? (pendingManifestRef.current?.vfs?.custom?.roots ?? [])
+            : [];
+          const vfsScope =
+            customRoots.length > 0
+              ? ' ' + t('settings.backup.restore.confirmReplaceVfsCustom', [customRoots.join(' · ')])
+              : '';
           const ok = await showConfirm({
             title: t('settings.backup.restore.confirmReplaceTitle'),
-            description: hasCredentials
-              ? t('settings.backup.restore.confirmReplaceCredentialsBody')
-              : t('settings.backup.restore.confirmReplaceBody'),
+            description:
+              (hasCredentials
+                ? t('settings.backup.restore.confirmReplaceCredentialsBody')
+                : t('settings.backup.restore.confirmReplaceBody')) + vfsScope,
             destructive: true,
           });
           if (!ok) return;
@@ -250,6 +265,7 @@ export function BackupPanel() {
         // 成功后才关闭并清理 pending（含字节）。
         setRestoreOpen(false);
         pendingBytes.current = null;
+        pendingManifestRef.current = null;
         setPendingManifest(null);
         // 有跳过 → 「部分恢复完成（跳过 …）」；无跳过 → 「恢复完成」。
         const skipped = skippedSummary(result);
@@ -275,6 +291,7 @@ export function BackupPanel() {
     setRestoreOpen(next);
     if (!next) {
       pendingBytes.current = null;
+      pendingManifestRef.current = null;
       setPendingManifest(null);
     }
   }, []);

@@ -26,6 +26,7 @@ function baseManifest(): BackupManifest {
       credentials: { included: false },
       skillsPrompts: { included: true, fileCount: 1 },
       memories: { included: false },
+      vfsCustom: { included: false },
     },
   };
 }

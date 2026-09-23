@@ -47,6 +47,32 @@ export const SKILLS_PROMPTS_ROOTS = [
 /** 「跨对话记忆」分类对应的 VFS 绝对根目录。 */
 export const MEMORIES_ROOTS = [normalizePath(CEBIAN_MEMORIES_DIR)];
 
+// ─── VFS 自选路径（vfsCustom 分类） ───
+
+/**
+ * 规范化 + 净化一组「自选 VFS 路径」（目录或单文件的绝对路径）。
+ *
+ * 来源有二：创建备份时 picker 产出的 `BackupOptions.vfsCustomRoots`（可信 UI 输入），
+ * 与恢复时 manifest 里的 `vfs.custom.roots`（**不可信输入**——备份包可能被构造）。
+ * 两条路共用同一净化：normalizePath 解析 `~` / `.` / `..` / 冗余斜杠并强制绝对；
+ * 丢弃解析后为 `/` 的条目（VFS 根不是合法选择目标——collect 无从采集，restore 也
+ * 不该以它为清空前缀）与非字符串 / 空串条目；最后按规范化形态去重、保留首次出现
+ * 的顺序。
+ */
+export function sanitizeVfsCustomRoots(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string' || item === '') continue;
+    const norm = normalizePath(item);
+    if (norm === '/' || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
+}
+
 // ─── VFS 在 bundle 里的命名空间映射（collect / restore / vfs 源共用） ───
 
 /** bundle 内 VFS 文件 key 的前缀。 */

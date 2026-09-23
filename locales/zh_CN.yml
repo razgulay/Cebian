@@ -610,6 +610,12 @@ settings:
       catSettings: 普通设置
       catSkillsPrompts: 技能与提示词
       catMemories: 记忆
+      catVfsCustom: VFS 文件与文件夹（自选）
+      # $1 = 已选 VFS 路径数
+      vfsSelected: 已选 $1 项
+      catVfsCustomHint: 自由挑选要打包的 VFS 文件夹或文件
+      vfsPick: 选择文件夹 / 文件…
+      vfsCustomEmpty: 请至少选择一个文件夹或文件
       catCredentials: 密钥信息
       catCredentialsHint: 包含 API Key、OAuth token 等
       encrypt: 加密备份
@@ -620,6 +626,13 @@ settings:
       atLeastOne: 请至少选择一个要备份的分类
       success: 备份已创建
       failed: 备份失败
+    picker:
+      title: 选择 VFS 文件夹 / 文件
+      hint: 勾选文件夹将包含其全部内容；选择会记入备份并恢复到相同路径
+      # $1 = 已选 VFS 路径数
+      selectedCount: 已选 $1 项
+      empty: 空文件夹
+      loadFailed: 读取文件夹内容失败
     restore:
       title: 恢复备份
       source: 来自 Cebian v$1
@@ -637,11 +650,14 @@ settings:
       catSettings: 普通设置
       catSkillsPrompts: 技能与提示词
       catMemories: 记忆
+      catVfsCustom: VFS 文件与文件夹（自选）
       catCredentials: 密钥信息
       apply: 恢复
       confirmReplaceTitle: 替换本地数据？
       confirmReplaceBody: 替换模式会先清空所选分类再还原，此操作不可撤销
       confirmReplaceCredentialsBody: 替换模式会先清空所选分类再还原，并把备份中的 API Key 与 token 写入本地，此操作不可撤销
+      # $1 = 自选 VFS 路径（以 · 连接）
+      confirmReplaceVfsCustom: 以下自选 VFS 路径会先被清空：$1
       confirmCredentialsTitle: 恢复密钥信息？
       confirmCredentialsBody: 这会把备份中的 API Key 与 token 写入本地
       invalidFile: 该文件不是有效的 Cebian 备份

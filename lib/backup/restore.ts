@@ -7,7 +7,7 @@ import { unpackArchive, readManifest, type BackupBundle } from './archive';
 import { restoreStorage, type StorageRestoreResult } from './sources/storage';
 import { restoreSessions, type ApplySessionsResult } from './sources/sessions';
 import { restoreVfs, type VfsRestoreResult } from './sources/vfs';
-import { PAYLOAD_FILES, sessionIdFromFileKey, SKILLS_PROMPTS_ROOTS, MEMORIES_ROOTS } from './payload-format';
+import { PAYLOAD_FILES, sessionIdFromFileKey, SKILLS_PROMPTS_ROOTS, MEMORIES_ROOTS, sanitizeVfsCustomRoots } from './payload-format';
 import { WORKSPACES_ROOT } from '@/lib/persistence/vfs-paths';
 import {
   BACKUP_FORMAT_VERSION,
@@ -160,6 +160,12 @@ export async function restoreBackup(
   if (cats.has('memories')) roots.push(...MEMORIES_ROOTS);
   if (cats.has('sessions') && summaries.sessions.workspaces) {
     roots.push(WORKSPACES_ROOT);
+  }
+  if (cats.has('vfsCustom')) {
+    // manifest.vfs.custom 在旧版备份里不存在（vfsCustom 是新分类）——sanitize 对
+    // undefined 返回 []，旧包照常恢复，只是没有自选 VFS 数据可写。备份包是不可信
+    // 输入，roots 必须过同一净化（normalizePath 解析 ..、丢 `/`、去重）。
+    roots.push(...sanitizeVfsCustomRoots(bundle.manifest.vfs?.custom?.roots));
   }
   if (roots.length > 0) {
     const index = parseJson<Record<string, number>>(bundle, PAYLOAD_FILES.vfsIndex) ?? {};

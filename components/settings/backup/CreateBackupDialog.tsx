@@ -16,6 +16,7 @@ import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
 import { RadioGroup } from '@/components/ui/radio-group';
 import { BackupRadioOption } from '@/components/settings/backup/BackupRadioOption';
+import { VfsPathPickerDialog } from '@/components/settings/backup/VfsPathPickerDialog';
 import { cn } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 import type { BackupCategory, BackupOptions } from '@/lib/backup/types';
@@ -59,6 +60,11 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
   const [skillsPrompts, setSkillsPrompts] = useState(true);
   const [memories, setMemories] = useState(true);
   const [credentials, setCredentials] = useState(false);
+  // vfsCustom：自选 VFS 路径。勾选后必须至少选 1 项（picker 里挑，confirm 禁用
+  // 空选）——空目录集合的「自选分类」没有任何意义，只会产出一个空分类。
+  const [vfsCustom, setVfsCustom] = useState(false);
+  const [vfsRoots, setVfsRoots] = useState<string[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [encrypt, setEncrypt] = useState(false);
   const [password, setPassword] = useState('');
 
@@ -74,11 +80,15 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
     setSkillsPrompts(true);
     setMemories(true);
     setCredentials(false);
+    setVfsCustom(false);
+    setVfsRoots([]);
+    setPickerOpen(false);
     setEncrypt(false);
     setPassword('');
   }, [open]);
 
-  // 完整备份 = 全部分类（含密钥）；部分备份 = 用户勾选。
+  // 完整备份 = 全部分类（含密钥，不含自选 VFS——full 没有「全选自选路径」的语义，
+  // 固定分类已覆盖 VFS 的全部已知区域）；部分备份 = 用户勾选。
   const effective = useMemo(() => {
     if (mode === 'full') {
       return {
@@ -88,14 +98,17 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
         skillsPrompts: true,
         memories: true,
         credentials: true,
+        vfsCustom: false,
       };
     }
-    return { sessions, includeWorkspaces, settings, skillsPrompts, memories, credentials };
-  }, [mode, sessions, includeWorkspaces, settings, skillsPrompts, memories, credentials]);
+    return { sessions, includeWorkspaces, settings, skillsPrompts, memories, credentials, vfsCustom };
+  }, [mode, sessions, includeWorkspaces, settings, skillsPrompts, memories, credentials, vfsCustom]);
 
   const hasCredentials = effective.credentials;
   const anySelected =
-    effective.sessions || effective.settings || effective.skillsPrompts || effective.memories || effective.credentials;
+    effective.sessions || effective.settings || effective.skillsPrompts || effective.memories || effective.credentials || effective.vfsCustom;
+  // 勾了自选 VFS 但一个路径都没挑：不允许确认（否则产出空的自选分类）。
+  const vfsCustomEmpty = effective.vfsCustom && vfsRoots.length === 0;
 
   // 名称非法：含禁用字符或超长。空名不算非法（confirm 会回退默认名）。“允许输入但
   // 标红”：不静默剔除字符，只提示并禁用确认，让用户自行修改。
@@ -107,6 +120,7 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
     if (effective.settings) categories.push('settings');
     if (effective.skillsPrompts) categories.push('skillsPrompts');
     if (effective.memories) categories.push('memories');
+    if (effective.vfsCustom) categories.push('vfsCustom');
     if (effective.credentials) categories.push('credentials');
 
     onConfirm({
@@ -114,6 +128,7 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
       description: description.trim(),
       categories,
       includeWorkspaces: effective.sessions && effective.includeWorkspaces,
+      vfsCustomRoots: effective.vfsCustom ? vfsRoots : undefined,
       password: encrypt && password ? password : undefined,
     });
   };
@@ -192,6 +207,32 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
                 <CategoryRow checked={skillsPrompts} onChange={setSkillsPrompts} label={t('settings.backup.create.catSkillsPrompts')} />
                 <CategoryRow checked={memories} onChange={setMemories} label={t('settings.backup.create.catMemories')} />
                 <CategoryRow
+                  checked={vfsCustom}
+                  onChange={setVfsCustom}
+                  label={t('settings.backup.create.catVfsCustom')}
+                  hint={t('settings.backup.create.catVfsCustomHint')}
+                />
+                {effective.vfsCustom && (
+                  <div className="pl-6 space-y-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => setPickerOpen(true)}
+                    >
+                      {t('settings.backup.create.vfsPick')}
+                    </Button>
+                    {vfsRoots.length > 0 ? (
+                      <p className="text-xs text-muted-foreground" aria-live="polite">
+                        {t('settings.backup.create.vfsSelected', [String(vfsRoots.length)])}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-destructive">{t('settings.backup.create.vfsCustomEmpty')}</p>
+                    )}
+                  </div>
+                )}
+                <CategoryRow
                   checked={credentials}
                   onChange={setCredentials}
                   label={t('settings.backup.create.catCredentials')}
@@ -238,10 +279,26 @@ export function CreateBackupDialog({ open, onOpenChange, onConfirm }: CreateBack
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button onClick={confirm} disabled={!anySelected || nameInvalid || (encrypt && !password)}>
+          <Button
+            onClick={confirm}
+            disabled={!anySelected || nameInvalid || vfsCustomEmpty || (encrypt && !password)}
+          >
             {t('common.confirm')}
           </Button>
         </DialogFooter>
+
+        {/* Nested picker dialog (Radix portals render/focus independently; focus
+            returns to this form when the picker closes). Confirm only writes back
+            the selection -- it never triggers the backup itself. */}
+        <VfsPathPickerDialog
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          selected={vfsRoots}
+          onConfirm={(paths) => {
+            setVfsRoots(paths);
+            setPickerOpen(false);
+          }}
+        />
       </DialogContent>
     </Dialog>
   );

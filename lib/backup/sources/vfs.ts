@@ -127,28 +127,42 @@ export function planVfsWrites(
 
 /**
  * 采集给定 roots 下的全部常规文件及其 mtime。roots 应为绝对 VFS 路径（顶层据用户
- * 勾选的分类传入，如技能 / 提示词目录、`/workspaces`）。不存在的 root 静默跳过。
+ * 勾选的分类传入，如技能 / 提示词目录、`/workspaces`）；vfsCustom 自选路径还可能是
+ * **单个文件**——stat 分流处理（`walkFiles` 对文件根会以 ENOTDIR 抛出）。不存在的
+ * root 静默跳过。
  */
 export async function collectVfs(roots: string[]): Promise<CollectedVfs> {
   const files: Record<string, Uint8Array> = {};
   const index: VfsIndex = {};
 
+  /** 采集单个常规文件（读字节 + 记 mtime）。单个文件在 walk 与 read/stat 之间被
+   *  并发删除 / 出错 → 跳过该文件，不让一个坏条目中断整次采集。 */
+  const collectFile = async (absPath: string) => {
+    try {
+      const bytes = (await vfs.readFile(absPath)) as unknown as Uint8Array;
+      const st = await vfs.stat(absPath);
+      const key = vfsPathToKey(absPath);
+      files[key] = bytes;
+      index[key] = st.mtimeMs;
+    } catch {
+      // 同上：静默跳过。
+    }
+  };
+
   for (const rawRoot of roots) {
     const root = normalizePath(rawRoot);
     if (!(await vfs.exists(root))) continue;
 
+    // 文件型 root（vfsCustom 自选单个文件）：直接采集该文件本身。
+    const rootStat = await vfs.stat(root);
+    if (!rootStat.isDirectory()) {
+      await collectFile(root);
+      continue;
+    }
+
     const entries = await vfs.walkFiles(root);
     for (const { absPath } of entries) {
-      try {
-        const bytes = (await vfs.readFile(absPath)) as unknown as Uint8Array;
-        const st = await vfs.stat(absPath);
-        const key = vfsPathToKey(absPath);
-        files[key] = bytes;
-        index[key] = st.mtimeMs;
-      } catch {
-        // 单个文件在 walk 与 read/stat 之间被并发删除 / 出错 → 跳过该文件，不让一个
-        // 坏条目中断整次采集（与 vfs.walkFiles 跳过坏条目同理）。
-      }
+      await collectFile(absPath);
     }
   }
 
@@ -207,6 +221,11 @@ async function clearDirContents(root: string): Promise<boolean> {
   // VFS 根永不清空——它不是任何分类的合法清空目标，仅作兜底守卫。
   if (norm === '/') return false;
   if (!(await vfs.exists(norm))) return false;
+  // 文件型 root（vfsCustom 自选单个文件）没有「内容」可清——readdir 对文件会以
+  // ENOTDIR 抛出、中断整个 replace 恢复。文件本身随 toWrite 的 writeFile 覆盖（或
+  // 备份缺失时保持本地），无需也不应清空。
+  const st = await vfs.stat(norm);
+  if (!st.isDirectory()) return false;
   const names = await vfs.readdir(norm);
   for (const name of names) {
     await vfs.rm(`${norm}/${name}`, { recursive: true, force: true });
