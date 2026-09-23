@@ -59,6 +59,8 @@ import {
   type CustomProviderConfig,
   type WorkerModelMap,
   type WorkerTimeoutMap,
+  type ModelIdentity,
+  type AutoTitleSettings,
 } from '@/lib/persistence/storage';
 import { ragSettings, ragCollections } from '@/lib/rag/settings';
 import type { RagSettings, RagCollection } from '@/lib/rag/types';
@@ -362,8 +364,24 @@ function entry<T>(e: BackupEntry<T>): BackupEntry<any> {
  */
 export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   entry({ item: lastSelectedModel, storageClass: 'settings' }),
-  entry({ item: compactionModel, storageClass: 'settings' }),
-  entry({ item: domSubAgentModel, storageClass: 'settings' }),
+  // 压缩模型：`null` = 跟随对话主模型（默认）。merge：本地 null 视为未配置 → 用备份
+  // 补入；本地已选模型保留本地。不声明 fillMissing 时 merge 会整体跳过本 item，新
+  // profile 恢复后压缩模型落回「跟随主模型」（user 报告丢失，与 telegramGatewayConfig
+  // 同类问题）。
+  entry({
+    item: compactionModel,
+    storageClass: 'settings',
+    fillMissing: (local: ModelIdentity | null, backup: ModelIdentity | null) => local ?? backup,
+  }),
+  // DOM 子代理模型：`null` = 关闭功能（默认），merge 视为空 → 用备份补入；本地已
+  // 配置保留本地。语义与 compactionModel 同形态。Caveat：无法区分「用户主动清空以
+  // 关闭 delegate_dom」与「从未配置」，前者在备份带模型时会被重新填回（merge「只增
+  // 不减」契约使然，与 workerModels「Off 以 delete key 表达」同 caveat）。
+  entry({
+    item: domSubAgentModel,
+    storageClass: 'settings',
+    fillMissing: (local: ModelIdentity | null, backup: ModelIdentity | null) => local ?? backup,
+  }),
   // Worker team per-role 模型映射（4 个 worker role 各自的专用模型；key 缺失 = 该
   // role 未配置 / 跟随主模型，UI 以 delete key 表达。无密钥）。
   entry({
@@ -430,7 +448,17 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
       ...local,
     }),
   }),
-  entry({ item: autoTitleSettings, storageClass: 'settings' }),
+  entry({
+    item: autoTitleSettings,
+    storageClass: 'settings',
+    // merge：本地等于默认值（enabled=true 且 model=null）视为未配置 → 用备份整体补入；
+    // 任一字段偏离默认（配了标题模型 / 主动关闭）保留本地整体。「主动关闭 enabled 且未
+    // 配模型」由此在 merge 下存活（比 personaEnabled 的 `local || backup` 更精确：false
+    // 显式区分于默认）。仅剩「enabled=true + model=null 恰好是用户刻意的完整配置」与
+    // 「从未配置」不可区分——此时备份整体生效，merge「只增不减」契约使然。
+    fillMissing: (local: AutoTitleSettings, backup: AutoTitleSettings) =>
+      local.enabled && local.model == null ? backup : local,
+  }),
   entry({
     item: customProviders,
     storageClass: 'settings',
@@ -443,7 +471,13 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
     fillMissing: (local: CustomProviderConfig[], backup: CustomProviderConfig[]) =>
       fillMissingById(local, backup, (p) => p.id),
   }),
-  entry({ item: userInstructions, storageClass: 'settings' }),
+  entry({
+    item: userInstructions,
+    storageClass: 'settings',
+    // merge：本地空串视为默认 → 用备份的自定义指引补入；非空保留本地（与 personaSoul
+    // 同形态；纯空白串视为用户输入，保留本地）。
+    fillMissing: (local: string, backup: string) => (isEmptyValue(local) ? backup : local),
+  }),
   entry({ item: themePreference, storageClass: 'settings' }),
   entry({ item: vfsOpenPreferenceV1, storageClass: 'settings' }),
   entry({ item: lastSelectedThinkingLevel, storageClass: 'settings' }),

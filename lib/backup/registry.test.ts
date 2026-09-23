@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as storageModule from '@/lib/persistence/storage';
 import * as ragStorageModule from '@/lib/rag/settings';
-import type { MCPServerConfig, CustomProviderConfig, PersonaIdentity } from '@/lib/persistence/storage';
+import type { MCPServerConfig, CustomProviderConfig, PersonaIdentity, ModelIdentity, AutoTitleSettings } from '@/lib/persistence/storage';
 import type { RagSettings } from '@/lib/rag/types';
 import { DEFAULT_RAG_SETTINGS } from '@/lib/rag/types';
 import type { CustomPageAction, PageActionsConfig } from '@/lib/page-actions/types';
@@ -444,6 +444,102 @@ describe('persona items 合并补缺', () => {
       };
       // local 整体保留，backup 整体不接管。
       expect(fillPersonaIdentity(local, backup)).toEqual(local);
+    });
+  });
+});
+
+describe('compactionModel / domSubAgentModel / userInstructions / autoTitleSettings 合并补缺', () => {
+  // 4 个 scalar settings 之前都没声明 fillMissing → merge 模式下被
+  // lib/backup/sources/storage.ts 整体跳过，restore merge 后落回默认（user 报告
+  // DOM 子代理模型 + 自定义指引丢失）。与 scheduledTasks / telegramGatewayConfig
+  // 同类修复，本 describe 覆盖「补缺 + 本地优先」契约。
+
+  const fillCompactionModel = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:compactionModel',
+  )!.fillMissing! as (local: ModelIdentity | null, backup: ModelIdentity | null) => ModelIdentity | null;
+
+  const fillDomSubAgentModel = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:domSubAgentModel',
+  )!.fillMissing! as (local: ModelIdentity | null, backup: ModelIdentity | null) => ModelIdentity | null;
+
+  const fillUserInstructions = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:userInstructions',
+  )!.fillMissing! as (local: string, backup: string) => string;
+
+  const fillAutoTitle = BACKUP_REGISTRY.find(
+    (e) => e.item.key === 'local:autoTitleSettings',
+  )!.fillMissing! as (local: AutoTitleSettings, backup: AutoTitleSettings) => AutoTitleSettings;
+
+  const identity = (provider: string, modelId: string): ModelIdentity => ({ provider, modelId });
+
+  describe('compactionModel / domSubAgentModel（同为 ModelIdentity | null，同形态）', () => {
+    // 两个 item 的 fillMissing 语义完全一致，共用同一组断言。
+    const expectFillBehaves = (
+      fill: (local: ModelIdentity | null, backup: ModelIdentity | null) => ModelIdentity | null,
+    ) => {
+      // 本地 null（默认：跟随主模型 / 功能关闭）→ 取备份补入。
+      const backup = identity('openai', 'gpt-4o-mini');
+      expect(fill(null, backup)).toEqual(backup);
+      // 本地已配置 → 保留本地，不被备份覆盖。
+      const local = identity('anthropic', 'claude-haiku');
+      expect(fill(local, backup)).toEqual(local);
+      // 两侧都 null → null（idempotent）。
+      expect(fill(null, null)).toBeNull();
+    };
+
+    it('compactionModel：本地 null（默认）→ 取备份；已配置 → 保留本地；双 null → null', () => {
+      expectFillBehaves(fillCompactionModel);
+    });
+
+    it('domSubAgentModel：本地 null（默认）→ 取备份；已配置 → 保留本地；双 null → null', () => {
+      expectFillBehaves(fillDomSubAgentModel);
+    });
+  });
+
+  describe('userInstructions', () => {
+    it('本地空串（默认）→ 取备份的自定义指引', () => {
+      expect(fillUserInstructions('', 'Always reply in Vietnamese.')).toBe('Always reply in Vietnamese.');
+      expect(fillUserInstructions('', '')).toBe('');
+    });
+
+    it('本地有内容 → 保留本地、不被备份覆盖', () => {
+      expect(fillUserInstructions('local rules', 'backup rules')).toBe('local rules');
+    });
+
+    it('本地仅空白字符 → 视为非空保留本地（与 personaSoul 同形态）', () => {
+      expect(fillUserInstructions('   ', 'backup rules')).toBe('   ');
+    });
+  });
+
+  describe('autoTitleSettings', () => {
+    const backup: AutoTitleSettings = { enabled: true, model: identity('openai', 'gpt-4o-mini') };
+
+    it('本地等于默认值（enabled=true + model=null）→ 整体取备份（常见：新 profile 首次 restore merge）', () => {
+      expect(fillAutoTitle({ enabled: true, model: null }, backup)).toEqual(backup);
+    });
+
+    it('本地配了标题模型 → 整体保留本地', () => {
+      const local: AutoTitleSettings = { enabled: true, model: identity('anthropic', 'claude-haiku') };
+      expect(fillAutoTitle(local, backup)).toEqual(local);
+    });
+
+    it('本地主动关闭 enabled（model=null）→ 保留本地，不被备份重新打开', () => {
+      // enabled=false 显式偏离默认 → 视为用户已配置（比 personaEnabled 的
+      // `local || backup` 更精确：主动关闭能在 merge 下存活）。
+      const local: AutoTitleSettings = { enabled: false, model: null };
+      expect(fillAutoTitle(local, backup)).toEqual(local);
+    });
+
+    it('本地 enabled=false 但配了 model → 视为已配置，保留本地', () => {
+      const local: AutoTitleSettings = { enabled: false, model: identity('openai', 'gpt-4o-mini') };
+      expect(fillAutoTitle(local, backup)).toEqual(local);
+    });
+
+    it('两侧都是默认 → 默认（idempotent）', () => {
+      expect(fillAutoTitle({ enabled: true, model: null }, { enabled: true, model: null })).toEqual({
+        enabled: true,
+        model: null,
+      });
     });
   });
 });
