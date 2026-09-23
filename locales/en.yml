@@ -874,6 +874,8 @@ settings:
     save: Save
     saved: Saved successfully
 chat:
+  # Shown in place of a web (non-VFS) inline image whose URL failed to load.
+  inlineImageFailed: Image unavailable
   composer:
     placeholder: Type '/' for commands…
     pickElement: Pick element

@@ -104,6 +104,19 @@ interface SearchResultItem {
   title: string;
   url: string;
   snippet?: string;
+  /** Result item 的缩略图（已过 `lib/search/images.ts` 的过滤器）。extract 脚本
+   *  可以选择返回原始 `images: [{ url, alt? }]`（不带 sourceUrl），normalize 层
+   *  负责过滤 + 用该 item 的 url 补 `sourceUrl`。旧脚本不返回该字段，完全兼容。 */
+  images?: SearchResultImage[];
+}
+
+/** 一张与搜索结果关联的图片。`sourceUrl` = 该图片所属 result 的页面 URL。 */
+interface SearchResultImage {
+  /** 绝对 http(s) 直链（或引擎缩略图代理域名，均通过过滤器）。 */
+  url: string;
+  /** alt 文本；缺省 = 脚本没给或为空。 */
+  alt?: string;
+  sourceUrl: string;
 }
 
 interface ExtractResult {
@@ -124,5 +137,6 @@ export {
   type SearchEngineDraft,
   type ExtractStatus,
   type SearchResultItem,
+  type SearchResultImage,
   type ExtractResult,
 };

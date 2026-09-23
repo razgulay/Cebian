@@ -902,6 +902,8 @@ settings:
       usedError: 无法计算
     title: 数据
 chat:
+  # 显示在加载失败的 web（非 VFS）内联图片位置上。
+  inlineImageFailed: 图片不可用
   composer:
     placeholder: 输入 / 查看命令…
     pickElement: 选择元素

@@ -184,3 +184,56 @@ describe('validateExtractScript / extractScriptFromSelector', () => {
     expect(JSON.parse(raw)).toEqual({ status: 'empty', results: [] });
   });
 });
+
+describe('normalizeExtractResult — images 字段（可选契约）', () => {
+  const opts = { maxResults: 10, baseUrl: 'https://www.bing.com/search?q=x' };
+
+  it('合法图通过过滤并补 sourceUrl；噪音图（favicon / data:）被丢弃', () => {
+    const out = normalizeExtractResult(
+      {
+        status: 'ok',
+        results: [
+          {
+            title: 'Cats',
+            url: 'https://example.test/cats',
+            snippet: 's',
+            images: [
+              { url: 'https://cdn.example.test/cat.jpg', alt: 'A cat' },
+              { url: '/favicon.ico' },
+              { url: 'data:image/png;base64,AAAA' },
+              { url: 'https://th.bing.com/th/id/OIP.abc?w=250&h=180' },
+            ],
+          },
+        ],
+      },
+      opts,
+    );
+    expect(out.ok && out.result.results[0].images).toEqual([
+      { url: 'https://cdn.example.test/cat.jpg', alt: 'A cat', sourceUrl: 'https://example.test/cats' },
+      { url: 'https://th.bing.com/th/id/OIP.abc?w=250&h=180', sourceUrl: 'https://example.test/cats' },
+    ]);
+  });
+
+  it('不返回 images / 全被过滤 → 条目不带该字段（旧脚本完全兼容）', () => {
+    const plain = normalizeExtractResult(
+      { status: 'ok', results: [{ title: 'T', url: 'https://a.test/' }] },
+      opts,
+    );
+    expect(plain.ok && 'images' in plain.result.results[0]).toBe(false);
+
+    const allJunk = normalizeExtractResult(
+      { status: 'ok', results: [{ title: 'T', url: 'https://a.test/', images: [{ url: '/favicon.ico' }] }] },
+      opts,
+    );
+    expect(allJunk.ok && 'images' in allJunk.result.results[0]).toBe(false);
+  });
+
+  it('images 不是数组 → 静默忽略，不影响该条目本身', () => {
+    const out = normalizeExtractResult(
+      { status: 'ok', results: [{ title: 'T', url: 'https://a.test/', images: 'https://x.test/a.png' }] },
+      opts,
+    );
+    expect(out.ok).toBe(true);
+    expect(out.ok && 'images' in out.result.results[0]).toBe(false);
+  });
+});

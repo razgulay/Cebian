@@ -375,6 +375,15 @@ function VfsImage({ src, alt, ...rest }: { src?: string; alt?: string } & Record
   const [state, setState] = useState<VfsImageState>(
     vfsPath ? { kind: 'loading', path: vfsPath } : { kind: 'idle', path: null },
   );
+  // web（非 VFS）图加载失败标记。src 变化（消息编辑 / rewind 重渲染）时在渲染期
+  // 复位（React 的 reset-state-on-prop-change 模式）——走 useEffect 会让新 src 的
+  // 第一帧还闪现旧失败 chip。
+  const [webFailed, setWebFailed] = useState(false);
+  const [prevSrc, setPrevSrc] = useState(resolvedSrc);
+  if (prevSrc !== resolvedSrc) {
+    setPrevSrc(resolvedSrc);
+    setWebFailed(false);
+  }
   // 当前正在渲染的 blob URL；effect cleanup 时 revoke，避免内存泄漏。
   const currentUrlRef = useRef<string | null>(null);
 
@@ -429,18 +438,37 @@ function VfsImage({ src, alt, ...rest }: { src?: string; alt?: string } & Record
     };
   }, [vfsPath]);
 
-  // 非 VFS：直接走原生 <img>，保持原有行为
+  // 非 VFS（web 图）：紧凑缩略图渲染。sidepanel 窄，全宽大图把纵向空间吃光——
+  // 固定小盒 + object-cover 裁切，点开 lightbox 看原图（handler 不变）。安全三件套：
+  // lazy（离屏不拉取）、no-referrer（图源服务器拿不到来源页）、onError 降级占位
+  // chip（不渲染破图）。搜索结果的 thumbnails 由此路径渲染。
   if (!vfsPath) {
+    if (webFailed) {
+      return (
+        <span
+          role="img"
+          aria-label={alt || t('chat.inlineImageFailed')}
+          className="inline-flex items-center gap-1 rounded-md border border-dashed border-destructive/40 bg-destructive/5 px-2 h-6 text-xs text-destructive align-middle my-2"
+          title={resolvedSrc}
+        >
+          ⚠ {alt || t('chat.inlineImageFailed')}
+        </span>
+      );
+    }
     return (
       <img
         src={resolvedSrc}
         alt={alt}
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+        onError={() => setWebFailed(true)}
         role="button"
         tabIndex={0}
         onClick={() => resolvedSrc && showDialog('image-preview', { src: resolvedSrc, alt })}
         onKeyDown={(e) => e.key === 'Enter' && resolvedSrc && showDialog('image-preview', { src: resolvedSrc, alt })}
         {...rest}
-        className="max-w-full rounded cursor-pointer hover:opacity-90 transition-opacity my-2"
+        className="h-24 w-32 max-w-[35%] object-cover rounded-md border border-border/40 cursor-pointer transition-opacity hover:opacity-90 my-2"
       />
     );
   }

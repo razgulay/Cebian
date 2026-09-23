@@ -10,6 +10,7 @@
 // 用户在设置里改过的字段以覆盖层形式存储，这里的默认值永远可以「恢复」。
 
 import { t } from '@/lib/i18n';
+import { MAX_IMAGES_PER_RESULT } from './images';
 import type { BuiltinSearchEngineId } from './types';
 
 interface BuiltinSearchEngineDef {
@@ -50,10 +51,17 @@ const BING: BuiltinSearchEngineDef = {
   const results = [...root.querySelectorAll('li.b_algo')].map((li) => {
     const a = li.querySelector('h2 a');
     if (!a) return null;
+    // Thumbnails for the main agent to inline as Markdown images (optional
+    // contract field; the tool layer filters and stamps sourceUrl).
+    const images = [...li.querySelectorAll('img')].slice(0, ${MAX_IMAGES_PER_RESULT}).map((im) => ({
+      url: im.currentSrc || im.src || im.getAttribute('data-src') || '',
+      alt: (im.alt || '').trim(),
+    })).filter((im) => /^https?:[/][/]/.test(im.url));
     return {
       title: a.textContent.trim(),
       url: unwrap(a.href),
       snippet: li.querySelector('.b_caption p, .b_lineclamp2, .b_algoSlug')?.textContent?.trim() ?? '',
+      ...(images.length ? { images } : {}),
     };
   }).filter(Boolean);
   return { status: 'ok', results };
@@ -71,10 +79,16 @@ const BRAVE: BuiltinSearchEngineDef = {
   const results = [...root.querySelectorAll('.snippet[data-type="web"]')].map((el) => {
     const a = el.querySelector('a[href^="http"]');
     if (!a) return null;
+    // Optional thumbnails field (see the Bing script note).
+    const images = [...el.querySelectorAll('img')].slice(0, ${MAX_IMAGES_PER_RESULT}).map((im) => ({
+      url: im.currentSrc || im.src || im.getAttribute('data-src') || '',
+      alt: (im.alt || '').trim(),
+    })).filter((im) => /^https?:[/][/]/.test(im.url));
     return {
       title: (el.querySelector('.title') || a).textContent.trim(),
       url: a.href,
       snippet: el.querySelector('.snippet-description, .snippet-content')?.textContent?.trim() ?? '',
+      ...(images.length ? { images } : {}),
     };
   }).filter(Boolean);
   return { status: 'ok', results };
@@ -101,10 +115,17 @@ const GOOGLE: BuiltinSearchEngineDef = {
   const results = [...root.querySelectorAll('a[href^="http"] h3')].map((h3) => {
     const a = h3.closest('a');
     const block = h3.closest('div[data-hveid], div.g') || a.parentElement;
+    // Optional thumbnails field (see the Bing script note). favicons lack a
+    // bitmap extension / thumb host and are filtered by the tool layer.
+    const images = [...(block?.querySelectorAll('img') ?? [])].slice(0, ${MAX_IMAGES_PER_RESULT}).map((im) => ({
+      url: im.currentSrc || im.src || im.getAttribute('data-src') || '',
+      alt: (im.alt || '').trim(),
+    })).filter((im) => /^https?:[/][/]/.test(im.url));
     return {
       title: h3.textContent.trim(),
       url: a.href,
       snippet: block?.querySelector('div[data-sncf], div[style*="-webkit-line-clamp"], .VwiC3b')?.textContent?.trim() ?? '',
+      ...(images.length ? { images } : {}),
     };
   });
   return { status: 'ok', results };
@@ -134,10 +155,17 @@ const DUCKDUCKGO: BuiltinSearchEngineDef = {
       const real = new URL(a.href, document.baseURI).searchParams.get('uddg');
       if (real) url = real;
     } catch {}
+    // Optional thumbnails field (see the Bing script note). DDG proxies images
+    // via external-content.duckduckgo.com; the tool layer unwraps the real URL.
+    const images = [...el.querySelectorAll('img')].slice(0, ${MAX_IMAGES_PER_RESULT}).map((im) => ({
+      url: im.currentSrc || im.src || im.getAttribute('data-src') || '',
+      alt: (im.alt || '').trim(),
+    })).filter((im) => /^https?:[/][/]/.test(im.url));
     return {
       title: a.textContent.trim(),
       url,
       snippet: el.querySelector('.result__snippet')?.textContent?.trim() ?? '',
+      ...(images.length ? { images } : {}),
     };
   }).filter(Boolean);
   return { status: 'ok', results };
@@ -158,11 +186,18 @@ const BAIDU: BuiltinSearchEngineDef = {
   const results = [...root.querySelectorAll('.result, .result-op')].map((el) => {
     const a = el.querySelector('h3 a');
     if (!a) return null;
+    // Optional thumbnails field (see the Bing script note). Baidu lazy-loads
+    // thumbs, hence the data-src fallback.
+    const images = [...el.querySelectorAll('img')].slice(0, ${MAX_IMAGES_PER_RESULT}).map((im) => ({
+      url: im.currentSrc || im.src || im.getAttribute('data-src') || '',
+      alt: (im.alt || '').trim(),
+    })).filter((im) => /^https?:[/][/]/.test(im.url));
     return {
       title: a.textContent.trim(),
       // href is a baidu.com/link redirect; the real address is in the mu attribute.
       url: el.getAttribute('mu') || a.href,
       snippet: el.querySelector('[class*="content-right"], .c-abstract, .c-span-last')?.textContent?.trim() ?? '',
+      ...(images.length ? { images } : {}),
     };
   }).filter(Boolean);
   return { status: 'ok', results };

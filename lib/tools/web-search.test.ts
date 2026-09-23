@@ -107,3 +107,58 @@ describe('createWebSearchTool', () => {
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+describe('formatSearchResults — images 行', () => {
+  const img = (url: string, alt?: string) => ({ url, ...(alt ? { alt } : {}), sourceUrl: 'https://src.test/' });
+
+  it('有图的条目追加 images: 行（带 alt 的拼在 URL 后）', () => {
+    const text = formatSearchResults(
+      'Bing',
+      'cat',
+      [{ title: 'Cats', url: 'https://a.test/', images: [img('https://cdn.test/1.jpg', 'A cat'), img('https://cdn.test/2.png')] }],
+      [],
+    );
+    expect(text).toContain('   images: https://cdn.test/1.jpg (A cat) | https://cdn.test/2.png');
+  });
+
+  it('无 images 字段的条目不追加该行（与旧行为逐字节一致）', () => {
+    const text = formatSearchResults('Bing', 'q', [{ title: 't', url: 'https://a.test/' }], []);
+    expect(text).not.toContain('images:');
+  });
+
+  it('整次调用封顶 12 张：预算耗尽后剩余条目不再输出 images 行', () => {
+    const results = Array.from({ length: 8 }, (_, i) => ({
+      title: `t${i}`,
+      url: `https://r.test/${i}`,
+      // 每条 3 张 → 8×3=24，预算 12：第 4 条后耗尽。
+      images: [img(`https://cdn.test/${i}a.jpg`), img(`https://cdn.test/${i}b.jpg`), img(`https://cdn.test/${i}c.jpg`)],
+    }));
+    const text = formatSearchResults('Bing', 'q', results, []);
+    expect(text.match(/images: /g)).toHaveLength(4);
+    // 第 5 条起不再有 images 行。
+    expect(text).toContain('5. **t4**\n   https://r.test/4\n6. **t5**');
+  });
+
+  it('预算耗尽落在某条中间时，该行只输出剩余预算内的图（部分截断）', () => {
+    const n = (i: number) => Array.from({ length: i }, (_, k) => img(`https://cdn.test/${k}.jpg`));
+    // 4+4+3=11 → 第 4 条只剩 1 张预算；第 5 条 0。
+    const results = [
+      { title: 't0', url: 'https://r.test/0', images: n(4) },
+      { title: 't1', url: 'https://r.test/1', images: n(4) },
+      { title: 't2', url: 'https://r.test/2', images: n(3) },
+      { title: 't3', url: 'https://r.test/3', images: n(5) },
+      { title: 't4', url: 'https://r.test/4', images: n(2) },
+    ];
+    const text = formatSearchResults('Bing', 'q', results, []);
+    expect(text.match(/cdn\.test/g)).toHaveLength(12);
+    // 第 4 行部分截断：预算内 1 张。
+    expect(text).toContain('4. **t3**\n   https://r.test/3\n   images: https://cdn.test/0.jpg');
+    expect(text).not.toContain('5. **t4**\n   https://r.test/4\n   images:');
+  });
+
+  it('工具描述说明 images 行的用法', () => {
+    const tool = createWebSearchTool([engine('bing')]);
+    expect(tool.description).toContain('images:');
+    expect(tool.description).toContain('inline-image rules');
+  });
+});

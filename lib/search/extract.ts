@@ -10,6 +10,7 @@
 //      此时用户源码直接内联进表达式，不再经过 `new Function`。
 
 import { oneLine, truncate } from '@/lib/utils';
+import { filterSearchImages } from './images';
 import type { ExtractResult, ExtractStatus, SearchResultItem } from './types';
 
 /** 页内 runner 在 CSP 拦住 `new Function` 时返回的哨兵。 */
@@ -128,7 +129,15 @@ function normalizeItem(raw: unknown, baseUrl: string): SearchResultItem | null {
     return null;
   }
   const snippet = typeof r.snippet === 'string' ? truncate(oneLine(r.snippet), SNIPPET_MAX) : '';
-  return snippet ? { title, url, snippet } : { title, url };
+  // 图片：脚本可选返回 `images: [{ url, alt? }]`，在此过滤并补 sourceUrl（= 本
+  // result 的 url）。全被过滤掉 / 没返回 → 字段省略，与旧脚本完全兼容。
+  const images = filterSearchImages(r.images, url, baseUrl);
+  return {
+    title,
+    url,
+    ...(snippet ? { snippet } : {}),
+    ...(images ? { images } : {}),
+  };
 }
 
 /**
