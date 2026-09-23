@@ -73,6 +73,14 @@ import { REVIEWER_HANDOFF_SCHEMA } from '@/lib/agent/schema-validate';
 const SESSION_ID = '11111111-2222-4333-8444-555555555555';
 const MAIN_MODEL = { provider: 'anthropic', modelId: 'claude-opus-5' } as const;
 
+// workerTeamEnabled 的 storage fallback 是 false（多代理委派默认 OFF，见
+// lib/persistence/storage.ts）。本文件绝大多数用例测的是工具本身的 execute
+// 行为，execute-time 的开关 belt 会因默认 OFF 而整体拒绝——文件级 beforeEach
+// 统一打开；「worker-team guards」describe 自己按用例覆写，不依赖默认值。
+beforeEach(async () => {
+  await workerTeamEnabled.setValue(true);
+});
+
 describe('createDelegateTaskTool — delegate_task 工具', () => {
   beforeEach(() => {
     vi.clearAllMocks();

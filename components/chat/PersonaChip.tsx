@@ -9,8 +9,8 @@ import type { ComponentProps } from 'react';
  * Composer toolbar 上的 Persona 切换芯片 —— 镜像 `WorkerTeamChip.tsx` 的 UX：
  * Normal (默认 Cebian) / OpenClaw (自定义人设 + 身份 + 1-line recap)。点击
  * 立即翻转，状态写回共享 storage (`local:personaEnabled`) —— Settings →
- * Advanced 的 Switch 和本芯片通过同一个 `useStorageItem` hook 监听，双向
- * 同步。Persona 副本本身存在 Settings → Persona，不在 chip 上编辑。
+ * Persona 页首的 Switch 和本芯片通过同一个 `useStorageItem` hook 监听，双向
+ * 同步。Persona 副本本身也在 Settings → Persona 编辑，不在 chip 上编辑。
  *
  * 选 Normal vs OpenClaw：
  *   - Normal：persona block 不注入 system prompt / user message，prompt 字节

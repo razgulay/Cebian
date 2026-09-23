@@ -30,7 +30,9 @@ export function WorkerTeamChip({
   className,
   ...rest
 }: Omit<ComponentProps<'button'>, 'children' | 'onClick'>) {
-  const [enabled, setEnabled] = useStorageItem(workerTeamEnabled, true);
+  // 本地默认必须与 storage fallback 一致（false = Fast）：首帧 storage 未读出时
+  // 不能闪现「Team」态，否则与读出后的真实状态抖动。
+  const [enabled, setEnabled] = useStorageItem(workerTeamEnabled, false);
   const onClick = () => void setEnabled(!enabled);
   const label = enabled
     ? t('chat.composer.workerTeam.team')

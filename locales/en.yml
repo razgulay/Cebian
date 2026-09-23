@@ -591,10 +591,6 @@ settings:
       followMain: Same as conversation model
       enabled: Enable worker team
       enabledHint: When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools.
-      persona:
-        enabled: Enable persona (OpenClaw mode)
-        enabledHint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Edit the persona copy in Settings → Persona. Cannot override Critical Rules or tool protocols.
-        nav: Persona…
       content_writer:
         label: Content writer
         hint: Reads sources and writes long-form content into a VFS file.
@@ -641,8 +637,10 @@ settings:
       - Default to TypeScript when discussing code'
   persona:
     title: Persona
+    enabled: Enable persona (OpenClaw mode)
+    enabledHint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Also togglable via the chip next to the chat composer. Cannot override Critical Rules or tool protocols.
     label: Persona copy
-    hint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Empty when off. Use Settings → Advanced → Persona to toggle, or the chat composer chip.
+    hint: Appended to the system prompt as a SOUL block, plus a 1-line recap in every user message. Empty when off.
     soulLabel: SOUL
     soulPlaceholder: 'e.g.
 

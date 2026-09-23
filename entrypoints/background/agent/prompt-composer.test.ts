@@ -81,11 +81,22 @@ describe('composeSystemPrompt', () => {
     expect(prompt.indexOf('<skills>')).toBeLessThan(prompt.indexOf('<user-instructions>'));
   });
 
-  it('workerTeamEnabled 开启（默认）→ 注入 <available-workers> L1 块', async () => {
-    // workerTeamEnabled storage fallback = true（见 lib/persistence/storage.ts），
-    // 故默认 composeSystemPrompt 应包含 <available-workers> 块。Runner 在某个
-    // role 的 model 未配置时会自己报错，故此处不区分 4 个 role 的 per-model
-    // 配置——只要总开关 ON，4 个 role 都在 L1 菜单中可见。
+  it('workerTeamEnabled 默认 OFF（storage fallback）→ 不注入 <available-workers>', async () => {
+    // 钉死默认值契约：storage 未写入时（fakeBrowser.reset 后）worker team 必须
+    // 默认关闭——不注入 <available-workers>，主代理走原生 fs_* 工具。若有人把
+    // fallback 改回 true，本用例立刻失败（与下方 ON / OFF 显式用例构成三态覆盖）。
+    expect(await workerTeamEnabled.getValue()).toBe(false);
+    const prompt = await composeSystemPrompt('s', false);
+    expect(prompt).not.toContain('<available-workers>');
+    expect(prompt).not.toContain('DEFAULT to `delegate_task`');
+  });
+
+  it('workerTeamEnabled 开启 → 注入 <available-workers> L1 块', async () => {
+    // workerTeamEnabled storage fallback = false（见 lib/persistence/storage.ts，
+    // 多代理委派默认 OFF），显式打开后再断言注入。Runner 在某个 role 的 model
+    // 未配置时会自己报错，故此处不区分 4 个 role 的 per-model 配置——只要总开关
+    // ON，4 个 role 都在 L1 菜单中可见。
+    await workerTeamEnabled.setValue(true);
     const prompt = await composeSystemPrompt('s', false);
     expect(prompt).toContain('<available-workers>');
     // Prescriptive polarity 标记——见 worker-roles.test.ts 同名注释了解为何
@@ -128,6 +139,10 @@ describe('composeSystemPrompt', () => {
     // 的 "Runtime Extensions" 段里就被描述过一次（base prompt 自己讲它们
     // 是什么），裸 tag 的 `indexOf()` 会返回那个描述位置而不是注入位置，
     // 测试就会给出"位置错"的假阳性。
+    //
+    // 本用例验的是三段相对顺序，<available-workers> 必须在场——storage 默认
+    // OFF，显式打开。
+    await workerTeamEnabled.setValue(true);
     vi.mocked(buildSkillsBlock).mockReturnValue('<skills>\nfoo\n</skills>');
     await userInstructions.setValue('bar');
     const prompt = await composeSystemPrompt('s', false);

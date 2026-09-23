@@ -231,15 +231,17 @@ export const workerModels = defineLoggedItem<WorkerModelMap>(
 );
 
 /** Worker Team 总开关 —— 主代理是否可通过 `delegate_task` 委派子任务给 worker 角色。
- *  `true` (default) = 当前行为：暴露 `delegate_task` 工具 + 注入 `<available-workers>`
- *  系统提示块；`false` = 主代理用原生 fs_* 工具直接产出 artifact，两边同时撤掉。
+ *  `false` (default) = 主代理用原生 fs_* 工具直接产出 artifact，`delegate_task` 工具与
+ *  `<available-workers>` 系统提示块两边都不注入；`true` = 暴露 `delegate_task` 工具 +
+ *  注入 `<available-workers>` 系统提示块。默认 OFF：多代理委派是进阶能力，未主动
+ *  开启的用户不应承担额外的 system prompt 开销与 delegate 分心。
  *  与 `delegate_dom` 无关（DOM 读取是独立功能，不受本 flag 影响）。
  *  In-flight：用户在半轮切换时，正在跑的 worker 不会被 cancel；prompt 侧在下轮
  *  `composeSystemPrompt` 时被读出（每轮 dispatch 调用，见 factory.ts），tool 侧由
  *  `sessionManager.watchWorkerTeam()` 订阅翻转、立即重建活会话的工具数组。 */
 export const workerTeamEnabled = defineLoggedItem<boolean>(
   'local:workerTeamEnabled',
-  { fallback: true },
+  { fallback: false },
 );
 
 /** Per-role 超时覆盖（ms）。每个 role 的 runner ceiling 用户可手动调——典型

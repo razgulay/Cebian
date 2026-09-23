@@ -1,13 +1,19 @@
 import { useState, useEffect } from 'react';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { personaSoul, personaIdentity, type PersonaIdentity } from '@/lib/persistence/storage';
+import {
+  personaEnabled,
+  personaSoul,
+  personaIdentity,
+  type PersonaIdentity,
+} from '@/lib/persistence/storage';
 import { t } from '@/lib/i18n';
 
 /**
- * PersonaSection — user-authored persona copy + identity fields.
+ * PersonaSection — persona layer 开关 + user-authored persona copy + identity fields.
  *
  * Mirrors `InstructionsSection.tsx:11–37` (single Textarea + i18n keys + char
  * counter). Persona data is consumed by `composeSystemPrompt` (the `<persona>`
@@ -15,12 +21,12 @@ import { t } from '@/lib/i18n';
  * by `composeUserMessage` (a 1-line recap is appended inside
  * `<reminder-instructions>` adjacent to `<user-request>`).
  *
- * Toggle for the persona layer lives in Settings → Advanced (mirror the
- * Worker Team toggle at `AdvancedSection.tsx:159–194`) and in the chat
- * composer chip (mirror `WorkerTeamChip.tsx`). Both sides share the same
- * `local:personaEnabled` storage item via `useStorageItem`'s watch.
+ * Master switch 位于本页顶部、authoring 表单之上；与 chat composer 芯片
+ * (`PersonaChip.tsx`) 互为镜像——两侧共享同一 `local:personaEnabled`
+ * storage item，经 `useStorageItem` 的 watch 保持双向同步。
  */
 export function PersonaSection() {
+  const [personaOn, setPersonaOn] = useStorageItem(personaEnabled, false);
   const [currentSoul, setCurrentSoul] = useStorageItem(personaSoul, '');
   const [currentIdentity, setCurrentIdentity] = useStorageItem(personaIdentity, {
     name: '',
@@ -55,6 +61,23 @@ export function PersonaSection() {
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
       <h2 className="text-base font-semibold">{t('settings.persona.title')}</h2>
+
+      <div className="flex items-center justify-between gap-4 pb-3 border-b border-border/50">
+        <div className="min-w-0 space-y-1">
+          <Label htmlFor="persona-enabled" className="text-sm">
+            {t('settings.persona.enabled')}
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.persona.enabledHint')}
+          </p>
+        </div>
+        <Switch
+          id="persona-enabled"
+          checked={personaOn}
+          onCheckedChange={(v) => void setPersonaOn(v)}
+          className="shrink-0"
+        />
+      </div>
 
       <div className="space-y-2">
         <Label htmlFor="persona-soul" className="text-sm">

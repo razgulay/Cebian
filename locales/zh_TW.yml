@@ -247,10 +247,6 @@ settings:
       followMain: 與對話模型相同
       enabled: 啟用 Worker 團隊
       enabledHint: 開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker 子代理。關閉時，主代理直接用原生檔案工具產出。
-      persona:
-        enabled: 啟用人設（OpenClaw 模式）
-        enabledHint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。在「人設」設定頁編輯副本。無法覆蓋 Critical Rules 或工具協定。
-        nav: 人設…
       content_writer:
         label: 內容寫手
         hint: 閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。
@@ -350,8 +346,10 @@ settings:
       - 討論程式碼時預設使用 TypeScript'
   persona:
     title: 人設
+    enabled: 啟用人設（OpenClaw 模式）
+    enabledHint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。也可透過聊天輸入框旁的晶片切換。無法覆蓋 Critical Rules 或工具協定。
     label: 人設副本
-    hint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息頂端加上一行 recap。需在「進階設定」中開啟，或透過聊天輸入框旁的晶片切換。
+    hint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。關閉時為空。
     soulLabel: SOUL
     soulPlaceholder: '例如：
 
