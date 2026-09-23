@@ -495,6 +495,7 @@ export const telegramGatewayConfig = defineLoggedItem<TelegramGatewayConfig>(
       workerUrl: '',
       allowedChatIdsCsv: '',
       interactiveMode: false,
+      enabled: true,
     },
   },
 );

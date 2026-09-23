@@ -28,6 +28,7 @@ export function TelegramGatewaySection() {
   const [wsAuthToken, setWsAuthToken] = useState('');
   const [allowedChatIdsCsv, setAllowedChatIdsCsv] = useState('');
   const [interactiveMode, setInteractiveMode] = useState(false);
+  const [enabled, setEnabled] = useState(true);
 
   // 挂载后直读一次 storage 做表单种子。不能写 `useState(config.workerUrl)`：
   // useStorageItem 的首读是异步的，首个 render 只拿到 fallback（空串），等
@@ -45,6 +46,7 @@ export function TelegramGatewaySection() {
       setWorkerUrl(cfg.workerUrl);
       setAllowedChatIdsCsv(cfg.allowedChatIdsCsv);
       setInteractiveMode(cfg.interactiveMode);
+      setEnabled(cfg.enabled !== false);
       setBotToken(secs[0]?.botToken ?? '');
       setWebhookSecret(secs[0]?.webhookSecret ?? '');
       setWsAuthToken(secs[0]?.wsAuthToken ?? '');
@@ -57,7 +59,7 @@ export function TelegramGatewaySection() {
   const handleSave = async () => {
     if (saving) return;
     await save(
-      { workerUrl, allowedChatIdsCsv, interactiveMode },
+      { workerUrl, allowedChatIdsCsv, interactiveMode, enabled },
       [{ id: 'default', botToken, webhookSecret, wsAuthToken }],
     );
     toast.success(t('settings.telegramGateway.saved'));
@@ -108,6 +110,14 @@ export function TelegramGatewaySection() {
           <TooltipContent>{t('settings.telegramGateway.chatIdHint')}</TooltipContent>
         </Tooltip>
       </div>
+
+      <label className="flex items-center gap-2 text-xs">
+        <Checkbox
+          checked={enabled}
+          onCheckedChange={(v) => setEnabled(v === true)}
+        />
+        {t('settings.telegramGateway.enabled')}
+      </label>
 
       <label className="flex items-center gap-2 text-xs">
         <Checkbox

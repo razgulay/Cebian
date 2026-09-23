@@ -135,6 +135,10 @@ export interface TelegramGatewayConfig {
   workerUrl: string;
   allowedChatIdsCsv: string;
   interactiveMode: boolean;
+  /** 主开关（master switch）—— OFF 时 WS 立刻 teardown 且不 reconnect；
+   *  storage watch 重新触发 syncGateway 时若仍为 false 则跳过 bootstrap。
+   *  默认 ON（undefined 等价于 true），保持存量用户不受影响。 */
+  enabled?: boolean;
 }
 
 /** Secrets (credentials class) — stored at `local:telegramGatewaySecrets`,

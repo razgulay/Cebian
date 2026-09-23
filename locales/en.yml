@@ -856,6 +856,7 @@ settings:
     allowedChatIds: Allowed chat IDs
     chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after messaging the bot.
     interactiveMode: Interactive mode (route Telegram messages to agent)
+    enabled: Enable connection (turn off to disconnect from gateway)
     save: Save
     saved: Saved successfully
 chat:

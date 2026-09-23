@@ -203,7 +203,7 @@ async function syncGateway(): Promise<void> {
   activeTurns.clear();
   telegramTurnCounts.clear();
 
-  if (url.length === 0 || token.length === 0) return;
+  if (url.length === 0 || token.length === 0 || config.enabled === false) return;
 
   handle = bootstrapTelegramGateway({ url, token });
   console.log('[Telegram Gateway] Connecting to:', url);
@@ -249,7 +249,9 @@ async function dispatchInbound(msg: InboundMessage): Promise<void> {
   // `/tabs` 是用户显式命令 — 直接处理，不走 LLM，也不受 interactiveMode
   // gate（显式命令不走 LLM 路由：OFF interactive 时 utility command 依然可用；想让它
   // 也吃 gate 的话把下面两行移到 `if (!interactiveMode)` 之后即可）。
-  if (/^\/tabs(@\S+)?\s*$/.test(msg.text.trim())) {
+  // 接受 `/tabs`、`/t`（短别名 — Telegram autocomplete UX）、`/tabs@botname`
+  // 三种形式；空白不匹配。
+  if (/^\/(tabs|t)(@\S+)?\s*$/.test(msg.text.trim())) {
     return dispatchTabsCommand(msg);
   }
   if (!interactiveMode) return;

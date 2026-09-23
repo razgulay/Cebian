@@ -813,6 +813,7 @@ settings:
     allowedChatIds: 允许的 chat IDs
     chatIdHint: 给 @userinfobot 发消息或调 getUpdates 即可查到目标 chat 的 ID。
     interactiveMode: 交互模式（把 Telegram 消息路由到 agent）
+    enabled: 启用连接（关闭后断开 gateway 连接）
     save: 保存
     saved: 已保存
   chat:
