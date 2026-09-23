@@ -414,15 +414,13 @@ async function dispatchTabsCallback(cb: TelegramCallback): Promise<void> {
   }
 }
 
-/** Capture 任一 tab（包括后台 tab）：switch → capture → restore。约束：
+/** Capture 任一 tab（包括后台 tab）：switch → capture。被点击的 tab
+ *  **保持 active**（不 restore 回旧 tab —— user 意图是一步到位）。约束：
  *  - active tab 以**目标 tab 的 windowId** scope（SW 里
  *    `currentWindow` 无意义，不 scope 会拿错 window 的 active tab）；
  *  - captureVisibleTab 在 window minimized / 屏幕锁定时会直接 throw
  *    —— map 成友好文案向上抛，绝不让 unhandled rejection
- *    落到 SW；
- *  - restore 在 finally 里用 setTimeout(300ms) 调度且吞掉自身错误 ——
- *    慢一步是为了 capture 的 framebuffer 稳定，吞错是为了不遮蔽 capture
- *    结果、不拖慢 sendPhoto。 */
+ *    落到 SW。 */
 async function captureTabForTelegram(
   tabId: number,
 ): Promise<{ base64: string; title: string }> {
@@ -441,48 +439,24 @@ async function captureTabForTelegram(
     active: true,
     windowId: targetTab.windowId,
   });
-  const needsSwitch = currentActive?.id !== targetTab.id;
-  console.log('[telegram-gateway] /tabs capture: switch decision', {
-    tabId,
-    windowId: targetTab.windowId,
-    currentActiveId: currentActive?.id,
-    needsSwitch,
-  });
-  if (needsSwitch) {
+  if (currentActive?.id !== targetTab.id) {
     await chrome.tabs.update(tabId, { active: true });
     // 等 render —— captureVisibleTab 拍 framebuffer，切完立即拍可能拿到
     // 白屏/黑屏帧；250ms 是实测安全的下限。
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  let dataUrl: string;
-  try {
-    console.log('[telegram-gateway] /tabs capture: captureVisibleTab start', {
-      tabId, windowId: targetTab.windowId,
-    });
-    dataUrl = await chrome.tabs.captureVisibleTab(targetTab.windowId, {
-      format: 'jpeg',
-      quality: 60,
-    });
-    console.log('[telegram-gateway] /tabs capture: captureVisibleTab ok', {
-      tabId, jpegBytes: Math.round(dataUrl.length * 3 / 4),
-    });
-  } catch (err) {
+  const dataUrl = await chrome.tabs.captureVisibleTab(targetTab.windowId, {
+    format: 'jpeg',
+    quality: 60,
+  }).catch((err) => {
     const raw = err instanceof Error ? err.message : String(err);
     const lower = raw.toLowerCase();
-    console.warn('[telegram-gateway] /tabs capture: captureVisibleTab threw', { tabId, raw });
     if (lower.includes('minimize') || lower.includes('lock') || lower.includes('not visible')) {
       throw new Error('Chrome đang bị thu nhỏ hoặc màn hình khoá — mở Chrome lên rồi thử lại');
     }
     throw new Error(`Capture failed: ${raw}`);
-  } finally {
-    if (needsSwitch && currentActive?.id != null) {
-      const prevId = currentActive.id;
-      setTimeout(() => {
-        void chrome.tabs.update(prevId, { active: true }).catch(() => {});
-      }, 300);
-    }
-  }
+  });
 
   return {
     base64: dataUrl.replace(/^data:image\/\w+;base64,/, ''),
