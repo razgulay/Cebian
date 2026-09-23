@@ -19,6 +19,7 @@ import type {
   InboundMessage,
   OutboundAction,
   OutboundActionResult,
+  TelegramCallback,
 } from './types';
 
 export interface WorkerClientOptions {
@@ -38,6 +39,11 @@ export interface WorkerClientOptions {
 export interface WorkerClientHandle {
   /** Subscribe to inbound messages. Returns unsubscribe. */
   onMessage(cb: (msg: InboundMessage) => void): () => void;
+  /** Subscribe to inbound inline-keyboard callbacks（`/tabs` 命令生成的
+   *  keyboard 按钮点击）。Gateway 在转发本 frame 前已 answerCallbackQuery
+   *  —— extension 不得再次 answer（Telegram 对同一 callback_query_id 只
+   *  允许一次 answer）；所有反馈走 editMessage。 */
+  onTelegramCallback(cb: (msg: TelegramCallback) => void): () => void;
   /** Subscribe to connection-status transitions. Returns unsubscribe. */
   onStatus(cb: (status: ConnectionStatus) => void): () => void;
   /** Send an action to the Worker. Resolves with the matched
@@ -69,12 +75,14 @@ export function createWorkerClient(opts: WorkerClientOptions): WorkerClientHandl
   let status: ConnectionStatus = 'connecting';
   let closed = false;
   let currentBackoff = initialBackoff;
+  let lastPongAt = Date.now();
   /** Per-WS lifecycle token — incremented every (re)open. Stale callbacks from a
    *  previous attempt that arrive after a reconnect must be ignored (avoid stale
    *  listeners firing on the wrong instance). */
   let attemptToken = 0;
 
   const messageListeners = new Set<(msg: InboundMessage) => void>();
+  const telegramCallbackListeners = new Set<(msg: TelegramCallback) => void>();
   const statusListeners = new Set<(s: ConnectionStatus) => void>();
   /** request_id → resolver/rejecter for outstanding outbound. */
   const pendingAcks = new Map<string, { resolve: (r: OutboundActionResult) => void; reject: (e: Error) => void }>();
@@ -153,17 +161,31 @@ export function createWorkerClient(opts: WorkerClientOptions): WorkerClientHandl
       currentBackoff = initialBackoff; // reset on successful connect
       emitStatus('connected');
       flushQueue();
-      // 应用层 keepalive：每 25 秒发一个空格字符（最小 payload），Worker 端
-      // JSON.parse('') 失败 → 自然忽略。目的：防止 NAT/router（默认 TCP idle
-      // timeout 几分钟后切断 WS）让连接无声地死掉。Browser WS 本身不会自动
-      // 发心跳——必须靠应用层灌流量。
+      // 应用层 heartbeat：每 15 秒发 {kind:'ping'} — gateway 回 {kind:'pong'}。
+      // **双向** heartbeat 解决 TCP half-open 问题：之前是 1- chiều（extension
+      // 发 space，gateway 不 respond）→ gateway→extension 方向死了 extension
+      // 也不知道。现在 track lastPongAt —— >45s（3 个心跳间隔）没 pong 就
+      // 判定连接死亡 → force close + reconnect。15s 间隔也是为了 MV3 SW
+      // idle timeout（~30s）之前反复唤醒 SW。
+      lastPongAt = Date.now();
       const ping = setInterval(() => {
         if (myToken !== attemptToken || !ws || ws.readyState !== WS_OPEN) {
           clearInterval(ping);
           return;
         }
-        try { ws.send(' '); } catch { /* socket died mid-tick — close handler will clean up */ }
-      }, 25_000);
+        try {
+          ws.send(JSON.stringify({ kind: 'ping', ts: Date.now() }));
+        } catch {
+          /* socket died mid-tick — close handler will clean up */
+          return;
+        }
+        // 半开检测：send 成功不保证 gateway 真的收到。pong 超时 → 强制断线重连。
+        if (Date.now() - lastPongAt > 45_000) {
+          console.warn('[telegram-gateway] heartbeat: no pong for >45s — forcing reconnect');
+          try { ws.close(); } catch { /* ignore */ }
+          clearInterval(ping);
+        }
+      }, 15_000);
       sock.addEventListener('close', () => clearInterval(ping), { once: true });
       sock.addEventListener('error', () => clearInterval(ping), { once: true });
     });
@@ -173,9 +195,25 @@ export function createWorkerClient(opts: WorkerClientOptions): WorkerClientHandl
       try { data = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch { return; }
       if (!data || typeof data !== 'object') return;
       const m = data as { kind?: string } & Record<string, unknown>;
+      if (m.kind === 'pong') {
+        lastPongAt = Date.now();
+        return;
+      }
       if (m.kind === 'telegram_message') {
         for (const cb of messageListeners) {
           try { cb(m as unknown as InboundMessage); } catch { /* ignore */ }
+        }
+      } else if (m.kind === 'telegram_callback') {
+        // /tabs 诊断：log frame 入口 + reply-correlate，方便在 `chrome://extensions`
+        // → Service Worker → Console 看 capture flow 死在哪一步。
+        try {
+          console.log('[worker-client] telegram_callback received', {
+            cb_id: (m as { callback_query_id?: string }).callback_query_id,
+            data: (m as { data?: string }).data,
+          });
+        } catch { /* ignore logging errors */ }
+        for (const cb of telegramCallbackListeners) {
+          try { cb(m as unknown as TelegramCallback); } catch { /* ignore */ }
         }
       } else if (m.kind === 'sendMessage_result' || m.kind === 'gateway_result') {
         const pending = pendingAcks.get(m.request_id as string);
@@ -252,6 +290,10 @@ export function createWorkerClient(opts: WorkerClientOptions): WorkerClientHandl
     onMessage(cb) {
       messageListeners.add(cb);
       return () => { messageListeners.delete(cb); };
+    },
+    onTelegramCallback(cb) {
+      telegramCallbackListeners.add(cb);
+      return () => { telegramCallbackListeners.delete(cb); };
     },
     onStatus(cb) {
       statusListeners.add(cb);

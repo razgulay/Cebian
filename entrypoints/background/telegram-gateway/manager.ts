@@ -47,7 +47,11 @@ import {
   bootstrapTelegramGateway,
   type BootstrapHandle,
 } from '@/lib/telegram-gateway/bootstrap';
-import type { InboundMessage } from '@/lib/telegram-gateway/types';
+import type {
+  InboundMessage,
+  InlineKeyboardMarkup,
+  TelegramCallback,
+} from '@/lib/telegram-gateway/types';
 import { TELEGRAM_TITLE_PREFIX } from '@/lib/telegram-gateway/session-title';
 
 let handle: BootstrapHandle | null = null;
@@ -207,6 +211,10 @@ async function syncGateway(): Promise<void> {
   // listener 跑 session 隔离路由（两个订阅互不干扰，Set 结构天然共存）。
   // 返回 turn Promise 供测试 await（worker-client 忽略返回值）。
   handle.client.onMessage((msg) => dispatchInbound(msg));
+  // `/tabs` keyboard callback —— gateway 已 answer 过（Telegram 拒绝对同一
+  // callback_query_id 的第二次 answer），这里只处理 content；worker-client
+  // 忽略返回值。
+  handle.client.onTelegramCallback((msg) => dispatchTabsCallback(msg));
 }
 
 function scheduleSync(): void {
@@ -238,6 +246,12 @@ function lastAssistantText(messages: readonly unknown[]): string | null {
  * 测试则 await 它获得确定性时序。
  */
 async function dispatchInbound(msg: InboundMessage): Promise<void> {
+  // `/tabs` 是用户显式命令 — 直接处理，不走 LLM，也不受 interactiveMode
+  // gate（显式命令不走 LLM 路由：OFF interactive 时 utility command 依然可用；想让它
+  // 也吃 gate 的话把下面两行移到 `if (!interactiveMode)` 之后即可）。
+  if (/^\/tabs(@\S+)?\s*$/.test(msg.text.trim())) {
+    return dispatchTabsCommand(msg);
+  }
   if (!interactiveMode) return;
   if (!handle) {
     console.warn('[telegram-gateway] WS not connected — inbound dropped');
@@ -256,6 +270,222 @@ async function dispatchInbound(msg: InboundMessage): Promise<void> {
     if (sessionQueues.get(sessionId) === job) sessionQueues.delete(sessionId);
   });
   return job;
+}
+
+// ─── `/tabs` command：inline keyboard → capture → sendPhoto ────────────────
+// 流程见 plan「Flow 总体」。关键约束：gateway 在 forward telegram_callback
+// 之前已经 answerCallbackQuery（Telegram 拒绝对同一个
+// callback_query_id 的第二次 answer），所以本 cluster 里**没有任何 answer
+// 调用**；全部用户反馈走 editMessageText。
+
+/** `/tabs` keyboard 的一行输入 — 结构最小化，测试不需要 chrome types。
+ *  字段 optional 以兼容 `chrome.tabs.Tab`（exactOptionalPropertyTypes 下
+ *  `Tab.id?` 不能赋给必填的 `id: number | undefined`）。 */
+export interface TabsKeyboardInput {
+  id?: number | undefined;
+  title?: string | null | undefined;
+}
+
+/** 纯函数：构建 inline keyboard（1 tab/row，最多 `max` 行，title 截断到
+ *  ~48 chars 防止手机上溢出）。返回被截掉的 tab 数让调用者追加提示行。 */
+export function buildTabsKeyboard(
+  tabs: TabsKeyboardInput[],
+  max = 10,
+): { keyboard: InlineKeyboardMarkup['inline_keyboard']; overflow: number } {
+  const usable = tabs.filter((t): t is TabsKeyboardInput & { id: number } => typeof t.id === 'number');
+  const rows = usable.slice(0, max).map((t) => {
+    const title = (t.title ?? '').trim() || '(untitled)';
+    const clipped = title.length > 48 ? `${title.slice(0, 47)}…` : title;
+    return [{ text: clipped, callback_data: `cap_${t.id}` }];
+  });
+  return { keyboard: rows, overflow: Math.max(0, usable.length - max) };
+}
+
+/** 纯函数：`cap_12345` → 12345；其它（旧 keyboard 残留 / 未知 payload）→ null。 */
+export function parseTabCallbackData(data: string): number | null {
+  if (!data.startsWith('cap_')) return null;
+  const rest = data.slice(4);
+  if (!/^\d+$/.test(rest)) return null;
+  const id = Number(rest);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+/** `/tabs` 命令处理：query 所有 tab → inline keyboard 发回同一个 chat。
+ *  0 tab / query 失败都有兜底文案；keyboard 只在≥1 tab 时附带。 */
+async function dispatchTabsCommand(msg: InboundMessage): Promise<void> {
+  const gateway = handle;
+  if (!gateway) {
+    console.warn('[telegram-gateway] /tabs dropped — WS not connected');
+    return;
+  }
+  let tabs: chrome.tabs.Tab[] = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await gateway.client
+      .sendOutbound({
+        kind: 'sendMessage',
+        request_id: crypto.randomUUID(),
+        chat_id: msg.chat_id,
+        text: `⚠️ Không đọc được danh sách tab: ${message}`,
+      })
+      .catch((sendErr) => console.warn('[telegram-gateway] /tabs error sendMessage failed:', sendErr));
+    return;
+  }
+
+  const { keyboard, overflow } = buildTabsKeyboard(tabs);
+  let text = '🗂 Chọn tab để chụp màn hình:';
+  if (keyboard.length === 0) {
+    text = '🗂 Không có tab nào đang mở.';
+  } else if (overflow > 0) {
+    text = `🗂 Chọn tab để chụp màn hình (…và ${overflow} tab khác không hiển thị):`;
+  }
+
+  await gateway.client
+    .sendOutbound({
+      kind: 'sendMessage',
+      request_id: crypto.randomUUID(),
+      chat_id: msg.chat_id,
+      text,
+      reply_markup: keyboard.length > 0 ? { inline_keyboard: keyboard } : undefined,
+    })
+    .catch((err) => console.warn('[telegram-gateway] /tabs sendMessage failed:', err));
+}
+
+/** Inline-keyboard callback（`cap_<tabId>`）：capture → sendPhoto →
+ *  editMessage 结果 + 清 keyboard。所有失败路径都收敛到 editMessage 错误
+ *  文案 —— 没有任何 answer 路径（gateway 已代为 answer，extension 不可重复调用）。 */
+async function dispatchTabsCallback(cb: TelegramCallback): Promise<void> {
+  console.log('[telegram-gateway] /tabs callback received', {
+    cb_id: cb.callback_query_id,
+    chat_id: cb.chat_id,
+    message_id: cb.message_id,
+    data: cb.data,
+  });
+  const tabId = parseTabCallbackData(cb.data);
+  if (tabId === null) {
+    // 未知 callback payload —— gateway 已经 answer 过，这里静默丢弃即可。
+    console.warn('[telegram-gateway] unsupported callback data:', cb.data);
+    return;
+  }
+  const gateway = handle;
+  if (!gateway) {
+    console.warn('[telegram-gateway] /tabs callback dropped — WS gone (handle null)');
+    return;
+  }
+
+  const editKeyboardMessage = async (text: string): Promise<void> => {
+    await gateway.client
+      .sendOutbound({
+        kind: 'editMessage',
+        request_id: crypto.randomUUID(),
+        chat_id: cb.chat_id,
+        message_id: cb.message_id,
+        text,
+        reply_markup: { inline_keyboard: [] },
+      })
+      .catch((err) => console.warn('[telegram-gateway] callback editMessage failed:', err));
+  };
+
+  try {
+    console.log('[telegram-gateway] /tabs capture start', { tabId });
+    const { base64, title } = await captureTabForTelegram(tabId);
+    console.log('[telegram-gateway] /tabs capture ok', { tabId, title, bytes: base64.length });
+    const photo = await gateway.client.sendOutbound({
+      kind: 'sendPhoto',
+      request_id: crypto.randomUUID(),
+      chat_id: cb.chat_id,
+      image_base64: base64,
+      caption: title || undefined,
+      message_id: cb.message_id,
+    });
+    console.log('[telegram-gateway] /tabs sendPhoto reply', photo);
+    if (photo.kind === 'gateway_result' && !photo.ok) {
+      await editKeyboardMessage(`⚠️ Gửi ảnh thất bại: ${photo.error ?? 'unknown'}`);
+      return;
+    }
+    await editKeyboardMessage(`✅ Đã chụp: ${title || `tab ${tabId}`}`);
+  } catch (err) {
+    console.warn('[telegram-gateway] /tabs capture failed (likely Extension context invalidated or captureVisibleTab throw):', err);
+    await editKeyboardMessage(`⚠️ ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Capture 任一 tab（包括后台 tab）：switch → capture → restore。约束：
+ *  - active tab 以**目标 tab 的 windowId** scope（SW 里
+ *    `currentWindow` 无意义，不 scope 会拿错 window 的 active tab）；
+ *  - captureVisibleTab 在 window minimized / 屏幕锁定时会直接 throw
+ *    —— map 成友好文案向上抛，绝不让 unhandled rejection
+ *    落到 SW；
+ *  - restore 在 finally 里用 setTimeout(300ms) 调度且吞掉自身错误 ——
+ *    慢一步是为了 capture 的 framebuffer 稳定，吞错是为了不遮蔽 capture
+ *    结果、不拖慢 sendPhoto。 */
+async function captureTabForTelegram(
+  tabId: number,
+): Promise<{ base64: string; title: string }> {
+  let targetTab: chrome.tabs.Tab;
+  try {
+    targetTab = await chrome.tabs.get(tabId);
+  } catch (err) {
+    console.warn('[telegram-gateway] /tabs capture: tabs.get failed', { tabId, err });
+    throw new Error('Tab đã bị đóng hoặc không tồn tại');
+  }
+  if (targetTab.windowId === undefined) {
+    throw new Error('Tab không thuộc window nào (discarded/prerender?)');
+  }
+
+  const [currentActive] = await chrome.tabs.query({
+    active: true,
+    windowId: targetTab.windowId,
+  });
+  const needsSwitch = currentActive?.id !== targetTab.id;
+  console.log('[telegram-gateway] /tabs capture: switch decision', {
+    tabId,
+    windowId: targetTab.windowId,
+    currentActiveId: currentActive?.id,
+    needsSwitch,
+  });
+  if (needsSwitch) {
+    await chrome.tabs.update(tabId, { active: true });
+    // 等 render —— captureVisibleTab 拍 framebuffer，切完立即拍可能拿到
+    // 白屏/黑屏帧；250ms 是实测安全的下限。
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  let dataUrl: string;
+  try {
+    console.log('[telegram-gateway] /tabs capture: captureVisibleTab start', {
+      tabId, windowId: targetTab.windowId,
+    });
+    dataUrl = await chrome.tabs.captureVisibleTab(targetTab.windowId, {
+      format: 'jpeg',
+      quality: 60,
+    });
+    console.log('[telegram-gateway] /tabs capture: captureVisibleTab ok', {
+      tabId, jpegBytes: Math.round(dataUrl.length * 3 / 4),
+    });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const lower = raw.toLowerCase();
+    console.warn('[telegram-gateway] /tabs capture: captureVisibleTab threw', { tabId, raw });
+    if (lower.includes('minimize') || lower.includes('lock') || lower.includes('not visible')) {
+      throw new Error('Chrome đang bị thu nhỏ hoặc màn hình khoá — mở Chrome lên rồi thử lại');
+    }
+    throw new Error(`Capture failed: ${raw}`);
+  } finally {
+    if (needsSwitch && currentActive?.id != null) {
+      const prevId = currentActive.id;
+      setTimeout(() => {
+        void chrome.tabs.update(prevId, { active: true }).catch(() => {});
+      }, 300);
+    }
+  }
+
+  return {
+    base64: dataUrl.replace(/^data:image\/\w+;base64,/, ''),
+    title: targetTab.title ?? '',
+  };
 }
 
 /**
@@ -471,11 +701,21 @@ function scheduleStatusEdit(state: TelegramTurnState, text: string): void {
  * 零打扰，finalize 每块仅 1-2 次调用。
  */
 async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage[]): Promise<void> {
+  console.log('[telegram-gateway] finalizeTurn start', {
+    sessionId: state.sessionId,
+    chatId: state.chatId,
+    messagesCount: messages.length,
+    lastRole: messages[messages.length - 1]?.role,
+    lastStopReason: (messages[messages.length - 1] as { stopReason?: string })?.stopReason,
+  });
   clearTurnTimers(state);
   activeTurns.delete(state.sessionId);
 
   const gateway = handle;
-  if (!gateway) return;
+  if (!gateway) {
+    console.warn('[telegram-gateway] finalizeTurn: gateway handle null — WS gone?');
+    return;
+  }
 
   // run 失败（合成 assistant 带 stopReason error/aborted）→ reaction 换 ❌，
   // 不回退发旧文本（避免重复回复）。
@@ -499,9 +739,18 @@ async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage
   if (failed) return;
 
   const text = lastAssistantText(messages);
-  if (!text) return;
+  console.log('[telegram-gateway] finalizeTurn: assistant text', {
+    hasText: !!text,
+    textLen: text?.length ?? 0,
+    textPreview: text ? text.slice(0, 80) : null,
+  });
+  if (!text) {
+    console.warn('[telegram-gateway] finalizeTurn: no assistant text — agent produced empty reply');
+    return;
+  }
 
   const blocks = splitReply(text);
+  console.log('[telegram-gateway] finalizeTurn: sending blocks', { count: blocks.length });
   const sendBlock = async (
     chunk: string,
     opts: { replyTo?: boolean; useMarkdown: boolean },
@@ -535,6 +784,7 @@ async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage
         await sendBlock(block, { useMarkdown: false });
       }
     }
+    console.log('[telegram-gateway] finalizeTurn: all blocks sent OK');
   } catch (err) {
     console.warn('[telegram-gateway] finalize failed:', err);
   }
@@ -563,6 +813,10 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       ? activeTurns.get(msg.sessionId)
       : undefined;
   if (!state) return;
+  console.log('[telegram-gateway] turn broadcast', {
+    type: msg.type,
+    sessionId: 'sessionId' in msg ? msg.sessionId : null,
+  });
   switch (msg.type) {
     case 'agent_end':
       void finalizeTurn(state, msg.messages);

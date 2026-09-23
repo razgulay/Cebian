@@ -24,6 +24,13 @@ export interface InboundMessage {
   from: { id: number; username?: string } | null;
 }
 
+/** Telegram inline keyboard — Bot API `reply_markup` 的子集，本仓只用到这一块。
+ *  仅服务 `/tabs` 命令：每个按钮对应一个 tab，`callback_data` 打包 tabId
+ *  （Telegram 上限 64 bytes —— `cap_<tabId>` 恒满足）。 */
+export interface InlineKeyboardMarkup {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+}
+
 /** Outbound wire message — extension → Worker → Telegram Bot API.
  *  `request_id` correlates with the reply (`OutboundResult` / `GatewayResult`)
  *  so the extension can match response to in-flight request.
@@ -53,11 +60,39 @@ export type OutboundAction =
       reply_to_message_id?: number;
       disable_notification?: boolean;
       disable_link_preview?: boolean;
+      /** Inline keyboard（`/tabs` 命令用）。Gateway 原样透传 Bot API。清除
+       *  keyboard = 通过 editMessage 发送 `{inline_keyboard: []}`。 */
+      reply_markup?: InlineKeyboardMarkup;
     }
   | { kind: 'sendChatAction'; request_id: string; chat_id: number; action: 'typing' }
-  | { kind: 'editMessage'; request_id: string; chat_id: number; message_id: number; text: string; parse_mode?: 'Markdown' }
+  | {
+      kind: 'editMessage';
+      request_id: string;
+      chat_id: number;
+      message_id: number;
+      text: string;
+      parse_mode?: 'Markdown';
+      /** 附带 `{inline_keyboard: []}` 时清除该 message 的 keyboard
+       *  （防止处理完成后旧 keyboard 上的重复点击）。 */
+      reply_markup?: InlineKeyboardMarkup;
+    }
   | { kind: 'setMessageReaction'; request_id: string; chat_id: number; message_id: number; emoji?: string }
-  | { kind: 'deleteMessage'; request_id: string; chat_id: number; message_id: number };
+  | { kind: 'deleteMessage'; request_id: string; chat_id: number; message_id: number }
+  | {
+      /** 把截图发回 chat。Gateway 把 base64 解码成 multipart `sendPhoto`
+       *  （Telegram Bot API 不接受 data-URL）。回复 `gateway_result` ——
+       *  Telegram 返回 photo 数组时 `ok:true`。 */
+      kind: 'sendPhoto';
+      request_id: string;
+      chat_id: number;
+      /** JPEG base64，**不带** `data:image/…;base64,` 前缀 —— extension 发送
+       *  前自行 strip。 */
+      image_base64: string;
+      caption?: string;
+      /** 拥有 inline keyboard 的 message（来自 telegram_callback）—— gateway
+       *  用它取消 5s watchdog；capture 非键盘来源时省略。 */
+      message_id?: number;
+    };
 
 /** Outbound wire reply — Worker → extension (cho `sendMessage`). */
 export type OutboundResult =
@@ -118,5 +153,22 @@ export interface TelegramGatewaySecret {
   wsAuthToken: string;
 }
 
-export type WorkerClientMessage = InboundMessage | OutboundResult | GatewayResult;
+/** Inbound wire — Worker → extension。Telegram inline-keyboard callback
+ *  （用户点击 `/tabs` 命令生成的 keyboard 按钮）。
+ *
+ *  ⚠️ Gateway 在转发本 frame **之前**已经 `answerCallbackQuery`
+ *  （Telegram 对同一 callback_query_id 只允许一次 answer）—— extension
+ *  不得再次 answer；所有反馈走 `message_id` 上的 `editMessage`。 */
+export interface TelegramCallback {
+  kind: 'telegram_callback';
+  callback_query_id: string;
+  /** 被点击按钮的 payload —— capture flow 的约定是 `cap_<tabId>`。 */
+  data: string;
+  chat_id: number;
+  /** 拥有 inline keyboard 的 message（用于 edit / 清除 keyboard）。 */
+  message_id: number;
+  from: { id: number; username?: string } | null;
+}
+
+export type WorkerClientMessage = InboundMessage | OutboundResult | GatewayResult | TelegramCallback;
 export type WorkerClientAction = OutboundAction;

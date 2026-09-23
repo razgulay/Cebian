@@ -142,6 +142,7 @@ beforeEach(async () => {
     teardown: vi.fn(),
     client: {
       onMessage: vi.fn(),
+      onTelegramCallback: vi.fn(),
       sendOutbound: vi.fn(async () => ({
         kind: 'sendMessage_result' as const,
         request_id: 'x',
