@@ -15,6 +15,7 @@ import type {
   RagContextAttachment,
   SkillMentionAttachment,
 } from '@/lib/agent/attachments';
+import type { WorkerRole } from '@/lib/persistence/storage';
 
 /** Top-K chunks to retrieve per RAG mention. Tuned to keep a single
  *  mention's prompt contribution under ~4 KB of context (assuming
@@ -47,7 +48,12 @@ export type MentionChip =
   | { kind: 'skill'; id: string; name: string; filePath: string; body: string; isBuiltIn: boolean }
   | { kind: 'vfs-dir'; id: string; path: string; label: string }
   | { kind: 'vfs-file'; id: string; path: string; label: string; size?: number }
-  | { kind: 'rag-collection'; id: string; collection: string };
+  | { kind: 'rag-collection'; id: string; collection: string }
+  /** 把当前消息显式指派给某个 worker 角色（main agent 据此选 dispatch_task role=
+   *  <role>）。resolver 不产 attachment——directive 注入由 ChatInput 在 handleSend
+   *  阶段处理（与 slash command / quote 同一管线），text 中的 @<role> token 保留
+   *  （选项 B：UI 可见 + 指令并存）。 */
+  | { kind: 'worker-role'; id: string; role: WorkerRole };
 
 /** "Pin" an item so its content rides along on every outgoing message of
  *  the chat. Pin lifetime depends on the chip kind:
@@ -157,6 +163,14 @@ export async function resolveMentionToAttachment(
   opts?: { minScore?: number; pinned?: boolean },
 ): Promise<ResolvedMentionAttachment | null> {
   try {
+    if (chip.kind === 'worker-role') {
+      // 不产 attachment——directive 由 ChatInput 在 handleSend 阶段按
+      // DIRECTIVE 形态注入（与 slash command / quote 一致），此处直接丢弃。
+      // 让 mention chip 与普通 mention 的"失败 → 弹警告"行为脱钩：
+      // worker-role chip 总是"成功"的（生成 directive）。
+      return null;
+    }
+
     if (chip.kind === 'prompt') {
       const filePath = `${CEBIAN_PROMPTS_DIR}/${chip.fileName}`;
       const raw = await withRetry(() => readUtf8(filePath));

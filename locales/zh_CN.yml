@@ -962,6 +962,14 @@ chat:
     mentionAdd: 添加上下文
     removeMentionChip: 移除上下文
     mentionChips: 已引用的上下文
+    workerRoleMention:
+      popoverTitle: 提派一个 worker 角色
+      disabledHint: 先打开 Worker Team
+      noMatches: 无匹配项
+      nav: 浏览
+      select: 选择
+      closeHint: 关闭
+      close: 关闭
     sectionSkills: 技能
     sectionPrompts: 提示词
     sectionFolders: 文件夹

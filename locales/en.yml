@@ -934,6 +934,14 @@ chat:
     mentionAdd: Add context
     removeMentionChip: Remove mention
     mentionChips: Mentions
+    workerRoleMention:
+      popoverTitle: Mention a worker role
+      disabledHint: Enable Worker Team first
+      noMatches: No matches
+      nav: navigate
+      select: select
+      closeHint: close
+      close: close
     sectionSkills: Skills
     sectionPrompts: Prompts
     sectionFolders: Folders

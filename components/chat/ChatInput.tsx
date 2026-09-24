@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useImperativeHandle, forwardRef, type KeyboardEvent } from 'react';
-import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle } from 'lucide-react';
+import { Send, Square, MousePointer2, Camera, Paperclip, Smartphone, Crosshair, FileText, X, FileType, Film, HardDrive, Quote as QuoteIcon, Crop, Sparkles, Folder, Pin, Database, AlertTriangle, UserSquare } from 'lucide-react';
 import { showDialog } from '@/lib/ui/dialog';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -11,9 +11,14 @@ import { ThinkingLevelSelector } from '@/components/chat/ThinkingLevelSelector';
 import { RecordButton } from '@/components/chat/RecordButton';
 import { MicButton } from '@/components/chat/MicButton';
 import { MentionPopover } from '@/components/chat/MentionPopover';
+import { WORKER_ROLE_KEYS } from '@/lib/agent/worker-roles';
 import { WorkerTeamChip } from '@/components/chat/WorkerTeamChip';
 import { PersonaChip } from '@/components/chat/PersonaChip';
 import { SkillsChip } from '@/components/chat/SkillsChip';
+import {
+  WorkerRoleMentionPopover,
+  type WorkerRoleOption,
+} from '@/components/chat/WorkerRoleMentionPopover';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
@@ -27,6 +32,7 @@ import type { SlashPrompt } from '@/lib/ai-config/slash-prompt';
 import { vfs } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import { CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
+import { workerTeamEnabled } from '@/lib/persistence/storage';
 import {
   MAX_ATTACHMENT_COUNT, MAX_IMAGE_SIZE, MAX_TEXT_FILE_SIZE, MAX_PDF_SIZE,
   RECORDING_MIME,
@@ -53,6 +59,24 @@ import { useResolvedModel } from '@/components/chat/context/useResolvedModel';
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
 // resolve loop share one implementation.
+/** 从 caret 位置向前扫——boundary 必须是「行首」或「空白字符」，且紧贴 boundary
+ *  必须是 `@`。匹配则返回 token（不含 @）+ [start, end) 区间。不满足 → null。
+ * 防止 user@host 这类 email 误触发。Token 字符集 `[a-zA-Z0-9_-]`（与 WORKER_ROLES
+ * registry 的 4 个 role id 完全匹配）。 */
+function detectAtToken(
+  value: string,
+  caret: number,
+): { query: string; start: number; end: number } | null {
+  if (caret <= 0 || caret > value.length) return null;
+  let i = caret - 1;
+  while (i > 0 && !/\s/.test(value[i - 1]!)) i--;
+  // 此时 i==0（到头）或 value[i-1] 是空白。i 就是 token 起点（@ 所在位置）
+  if (value[i] !== '@') return null;
+  let end = i + 1;
+  while (end < caret && /[a-zA-Z0-9_-]/.test(value[end]!)) end++;
+  return { query: value.slice(i + 1, end).toLowerCase(), start: i, end };
+}
+
 function pinLabel(item: PinnedMention): string {
   switch (item.kind) {
     case 'prompt':         return item.name;
@@ -60,6 +84,7 @@ function pinLabel(item: PinnedMention): string {
     case 'rag-collection': return item.collection;
     case 'vfs-dir':        return item.label;
     case 'vfs-file':       return item.label;
+    case 'worker-role':    return `@${item.role}`;
   }
 }
 
@@ -206,6 +231,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // ref to avoid a stale state read after async attachment building.
   const mentionsRef = useRef<MentionChip[]>(mentions);
 
+  // 只在 WorkerTeam chip 打开时才允许触发；未开 → `@` 触发被压制（提示用户去
+  // 启用 WorkerTeam chip）。这样 directive 不指向一个无效工具。
+  const [teamOn] = useStorageItem(workerTeamEnabled, false);
+  // `@` 触发 worker-role 选择器状态。`open=false` 时组件不渲染；`open=true` 时
+  // 焦点保持在 textarea（不在 popover 内），由 onKeyDown 拦截方向键 + Enter/Esc。
+  // `tokenStart`/`tokenEnd` 记录 textarea 里 @-token 边界——pick 时整段替换为
+  // ` @<role> `，避免 ` @@reviewer` 重复符号。
+  const [workerRolePicker, setWorkerRolePicker] = useState<{
+    open: boolean;
+    query: string;
+    activeIndex: number;
+    tokenStart: number;
+    tokenEnd: number;
+  }>({ open: false, query: '', activeIndex: 0, tokenStart: 0, tokenEnd: 0 });
+
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
   const [isExpandInline] = useStorageItem(expandPromptsInline, false);
@@ -256,6 +296,26 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       return prev.filter((a) => a.type !== 'image');
     });
   }, [supportsImage]);
+
+  // 点击 textarea / popover 之外的区域关闭 popover——onMouseDown 而非 onClick，
+  // 避免点击 popover 内部 button 后触发 click 事件冒泡导致 popover 立刻关闭、
+  // 然后 button 的 onClick 触发不到（mousedown preventDefault 已吞了 focus），
+  // 保证 onMouseDown 内 preventDefault 的「不抢焦点」约定依然成立。
+  useEffect(() => {
+    if (!workerRolePicker.open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (textareaRef.current?.contains(target)) return;
+      // popover 内部的点击由 onMouseDown preventDefault 吞掉，这里用 querySelector
+      // 检查 [data-worker-role-popover]（组件根标记）作为外部命中测试。
+      const popoverEl = (target as Element).closest?.('[data-worker-role-popover="root"]');
+      if (popoverEl) return;
+      setWorkerRolePicker({ open: false, query: '', activeIndex: 0, tokenStart: 0, tokenEnd: 0 });
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [workerRolePicker.open]);
 
   const handleModelSelect = useCallback((provider: string, modelId: string) => {
     onModelChange({ provider, modelId });
@@ -708,6 +768,24 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         text = text.length > 0 ? `${quoteDirective}\n\n---\n\n${text}` : quoteDirective;
       }
 
+      // Worker-team role mention（@<role> token 已在用户 text 里保留——选项 B）：
+      // 解析 mention chip 把每条 worker-role 渲染成同形状的 DIRECTIVE，让主代理
+      // 据此选 dispatch_task role=<role>。与 quote / slash-command 同一管线——
+      // bubble parser 通过 [DIRECTIVE — ...] 形态剥离，UI 显示只剩 @<role> token
+      // + chip，多名 worker role 也按同一行的 directive body 拼接（id 标记防丢）。
+      const roleDirectives: string[] = [];
+      for (const m of mentionsRef.current) {
+        if (m.kind === 'worker-role') {
+          roleDirectives.push(
+            `[DIRECTIVE — ATTACHED ROUTE: "${m.role}" (id=${m.id})]`,
+          );
+        }
+      }
+      if (roleDirectives.length > 0) {
+        const roleBlock = roleDirectives.join('\n') + '\n\n[END DIRECTIVE]';
+        text = text.length > 0 ? `${roleBlock}\n\n---\n\n${text}` : roleBlock;
+      }
+
       // Resolve mention chips (prompt/skill/dir) into attachments. Each chip
       // is a self-contained reference; the resolver reads the VFS file (or
       // uses the built-in body for starter skills) and produces a typed
@@ -730,11 +808,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           const outcome = settled[i];
           if (outcome.status === 'rejected' || outcome.value.r.length === 0) {
             const chip = mentionChips[i];
-            const failedName = chip.kind === 'vfs-dir' || chip.kind === 'vfs-file'
-              ? chip.label
-              : chip.kind === 'rag-collection'
-                ? chip.collection
-                : chip.name;
+            const failedName =
+              chip.kind === 'vfs-dir' || chip.kind === 'vfs-file'
+                ? chip.label
+                : chip.kind === 'rag-collection'
+                  ? chip.collection
+                  : chip.kind === 'worker-role'
+                    ? chip.role
+                    : chip.name;
             failedNames.push(failedName);
           } else {
             resolvedMentions.push(outcome.value.r[0]);
@@ -1161,6 +1242,28 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     setShowSlash(lastToken.startsWith('/'));
     // Manual edits exit history mode — the new content becomes the draft.
     if (historyIndex !== null) setHistoryIndex(null);
+
+    // `@` 触发 worker-role 选择器——boundary 检查严格：只允许 @ 紧跟
+    // 行首 / 空白后，避免 user@host 这类 email 误触发。WorkerTeam chip 关闭
+    // 时整个 directive 失效，压制 popover（让用户去开 chip）。
+    if (!teamOn) {
+      if (workerRolePicker.open) setWorkerRolePicker((p) => ({ ...p, open: false }));
+    } else {
+      const ta = textareaRef.current;
+      const caret = ta?.selectionStart ?? val.length;
+      const tok = detectAtToken(val, caret);
+      if (tok) {
+        setWorkerRolePicker({
+          open: true,
+          query: tok.query,
+          activeIndex: 0,
+          tokenStart: tok.start,
+          tokenEnd: tok.end,
+        });
+      } else if (workerRolePicker.open) {
+        setWorkerRolePicker((p) => ({ ...p, open: false }));
+      }
+    }
   };
 
   /** 聚焦输入框并把光标移到末尾。value 是受控的，得等这一次提交渲染完再设光标。 */
@@ -1261,6 +1364,67 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       return next;
     });
   }, []);
+
+  /** 把当前 @-token 替换为 ` @<role> `（前后各 1 个空格），加 mention chip，关闭
+   *  popover，让光标停在 role token 之后。 */
+  const pickWorkerRole = useCallback((role: typeof WORKER_ROLE_KEYS[number]) => {
+    const { tokenStart, tokenEnd } = workerRolePicker;
+    const next = value.slice(0, tokenStart) + ` @${role} ` + value.slice(tokenEnd);
+    setValue(next);
+    addMention({ kind: 'worker-role', id: crypto.randomUUID(), role });
+    setWorkerRolePicker({ open: false, query: '', activeIndex: 0, tokenStart: 0, tokenEnd: 0 });
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const caret = tokenStart + 3 + role.length; // place after ` @<role> ` (one past the trailing space)
+      el.setSelectionRange(caret, caret);
+    });
+  }, [value, workerRolePicker, addMention]);
+
+  /** 按 query 过滤 worker 角色（来自 WORKER_ROLES registry 单一事实源）。
+   *  WorkerTeam 关闭时强制空列表——pick 路径被入口 gate 压制。hint 复用
+   *  `chat.workerTeamRoster.role.<role>`（单一事实源：'Content' / 'Coder' /
+   *  'Reviewer' / 'Researcher'）——避免维护两套并行翻译。 */
+  const workerRoleOptions = useMemo<WorkerRoleOption[]>(() => {
+    if (!teamOn) return [];
+    const q = workerRolePicker.query;
+    return WORKER_ROLE_KEYS
+      .filter((role) => !q || role.includes(q))
+      .map<WorkerRoleOption>((role) => ({
+        role,
+        label: role,
+        hint: t(`chat.workerTeamRoster.role.${role}`),
+      }));
+  }, [teamOn, workerRolePicker.query]);
+
+  /** Textarea 键盘拦截——popover 打开时把方向键 + Enter + Esc 全部交给
+   *  popover（preventDefault），不抢 textarea 光标 / 不触发 form 提交。IME 合成
+   *  期间直接跳过——否则中文/日文 IME 的 Enter 会误触发 pickWorkerRole。 */
+  const handleWorkerRoleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // 复刻 handleKeyDown 的 IME guard——composition 期间不抢键盘事件。
+      if (e.nativeEvent.isComposing) return;
+      if (!workerRolePicker.open || workerRoleOptions.length === 0) return;
+      const { activeIndex } = workerRolePicker;
+      const last = workerRoleOptions.length - 1;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setWorkerRolePicker((p) => ({ ...p, activeIndex: p.activeIndex >= last ? 0 : p.activeIndex + 1 }));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setWorkerRolePicker((p) => ({ ...p, activeIndex: p.activeIndex <= 0 ? last : p.activeIndex - 1 }));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const opt = workerRoleOptions[activeIndex];
+        if (opt) pickWorkerRole(opt.role);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setWorkerRolePicker({ open: false, query: '', activeIndex: 0, tokenStart: 0, tokenEnd: 0 });
+      }
+    },
+    [workerRolePicker, workerRoleOptions, pickWorkerRole],
+  );
 
   const removeMention = useCallback((id: string) => {
     setMentions((prev) => {
@@ -2010,6 +2174,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 p.kind === 'prompt' ? `/${p.name}` :
                 p.kind === 'vfs-dir' || p.kind === 'vfs-file' ? p.label :
                 p.kind === 'rag-collection' ? p.collection :
+                p.kind === 'worker-role' ? `@${p.role}` :
                 p.name;
               const failTooltip = isFailed
                 ? t('chat.composer.pinReadFailed', [label])
@@ -2073,7 +2238,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                         ? 'bg-emerald-400/5 border-emerald-400/20 text-emerald-400'
                         : m.kind === 'rag-collection'
                           ? 'bg-violet-400/5 border-violet-400/20 text-violet-400'
-                          : 'bg-blue-400/5 border-blue-400/20 text-blue-400')
+                          : m.kind === 'worker-role'
+                            ? 'bg-indigo-400/5 border-indigo-400/20 text-indigo-400'
+                            : 'bg-blue-400/5 border-blue-400/20 text-blue-400')
                 }
               >
                 {m.kind === 'prompt' && <FileText size={11} className="shrink-0 opacity-70" />}
@@ -2081,8 +2248,19 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 {m.kind === 'vfs-dir' && <Folder size={11} className="shrink-0 opacity-70" />}
                 {m.kind === 'vfs-file' && <FileText size={11} className="shrink-0 opacity-70" />}
                 {m.kind === 'rag-collection' && <Database size={11} className="shrink-0 opacity-70" />}
+                {m.kind === 'worker-role' && <UserSquare size={11} className="shrink-0 opacity-70" />}
                 <span className="truncate max-w-32">
-                  {m.kind === 'prompt' ? `/${m.name}` : m.kind === 'vfs-file' ? m.label : m.kind === 'vfs-dir' ? m.label : m.kind === 'rag-collection' ? m.collection : m.name}
+                  {m.kind === 'prompt'
+                    ? `/${m.name}`
+                    : m.kind === 'vfs-file'
+                      ? m.label
+                      : m.kind === 'vfs-dir'
+                        ? m.label
+                        : m.kind === 'rag-collection'
+                          ? m.collection
+                          : m.kind === 'worker-role'
+                            ? `@${m.role}`
+                            : m.name}
                 </span>
                 <button
                   type="button"
@@ -2331,7 +2509,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             rows={1}
             value={value}
             onChange={(e) => handleInput(e.target.value)}
-            onKeyDown={(e) => { handleKeyDown(e); if (e.key === 'Escape' && onCancelEdit) { e.preventDefault(); onCancelEdit(); } }}
+            onKeyDown={(e) => {
+              handleKeyDown(e);
+              if (e.key === 'Escape' && onCancelEdit) {
+                e.preventDefault();
+                onCancelEdit();
+              }
+              handleWorkerRoleKeyDown(e);
+            }}
             onPaste={handlePaste}
             onScroll={syncSlashPillOffset}
             placeholder={t('chat.composer.placeholder')}
@@ -2428,6 +2613,20 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
         </div>
       </div>
+
+      {/* `@` triggers the worker-role picker — fixed positioning, focus stays on
+          the textarea; keyboard nav (arrows + Enter + Esc) is intercepted in
+          onKeyDown so the caret doesn't jump and the form doesn't submit. */}
+      <WorkerRoleMentionPopover
+        open={workerRolePicker.open && workerRoleOptions.length > 0}
+        options={workerRoleOptions}
+        activeIndex={workerRolePicker.activeIndex}
+        anchorRef={textareaRef}
+        onSelect={(role) => pickWorkerRole(role)}
+        onClose={() =>
+          setWorkerRolePicker({ open: false, query: '', activeIndex: 0, tokenStart: 0, tokenEnd: 0 })
+        }
+      />
     </footer>
   );
 });

@@ -114,3 +114,19 @@ describe('resolveMentionToAttachment — pinned RAG path', () => {
     expect(retrieveMock).not.toHaveBeenCalled();
   });
 });
+
+describe('resolveMentionToAttachment — worker-role path', () => {
+  it('worker-role chip → 不产 attachment（null，directive 由 ChatInput 单独注入）', async () => {
+    const { resolveMentionToAttachment } = await import('./mention-resolver');
+    const chip = {
+      kind: 'worker-role' as const,
+      id: 'r1',
+      role: 'reviewer' as const,
+    };
+    const out = await resolveMentionToAttachment(chip);
+    expect(out).toBeNull();
+    // 关键：worker-role 路径不查 VFS、不查 grants、不查 RAG——只是 directive
+    // 注入的事，由 ChatInput.handleSend 单独处理。
+    expect(retrieveMock).not.toHaveBeenCalled();
+  });
+});

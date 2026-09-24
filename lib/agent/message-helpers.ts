@@ -136,12 +136,14 @@ export interface InlineDirective {
   pinned: boolean;
 }
 
+// Header suffix tolerates optional `(id=<uuid>)` (worker-role directive carries it
+// so the BG can join multi-chip mentions back to their pick sequence).
 const INLINE_DIRECTIVE_OPEN_RE =
-  /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND|QUOTE):\s+"([^"]*)"(\s+pinned="true")?\]/g;
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(PROMPT|SKILL|COMMAND|QUOTE|ROUTE):\s+"([^"]*)"(?:\s+\([^)"]*\))?(\s+pinned="true")?\]/g;
 
 // 匹配完整的指令块（开头行 + 中间任意字符 + 关闭标记）
 const INLINE_DIRECTIVE_BLOCK_RE =
-  /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND|QUOTE):\s+"[^"]*"(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
+  /\[DIRECTIVE\s+—\s+ATTACHED\s+(?:PROMPT|SKILL|COMMAND|QUOTE|ROUTE):\s+"[^"]*"(?:\s+\([^)"]*\))?(?:\s+pinned="true")?\][\s\S]*?\[END\s+DIRECTIVE\]/g;
 
 /** 从用户消息文本里抽取出所有内联指令的开头元信息（按出现顺序） */
 export function extractInlineDirectives(text: string): InlineDirective[] {
