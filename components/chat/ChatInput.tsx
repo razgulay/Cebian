@@ -13,6 +13,7 @@ import { MicButton } from '@/components/chat/MicButton';
 import { MentionPopover } from '@/components/chat/MentionPopover';
 import { WorkerTeamChip } from '@/components/chat/WorkerTeamChip';
 import { PersonaChip } from '@/components/chat/PersonaChip';
+import { SkillsChip } from '@/components/chat/SkillsChip';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
@@ -2349,6 +2350,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         <div className="flex items-center gap-1.5 px-2.5 pb-0.5">
           {!hideTeamControls && <WorkerTeamChip />}
           <PersonaChip />
+          <SkillsChip />
           <span className="flex-1" />
         </div>
 

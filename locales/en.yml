@@ -924,6 +924,10 @@ chat:
       normal: Normal
       openclaw: OpenClaw
       toggleHint: Switch between Normal Mode (default Cebian) and OpenClaw Mode (custom persona copy + identity)
+    skillAutoToggle:
+      auto: Auto
+      manual: Manual
+      toggleHint: Auto-approve skill permissions while on — grants are not persisted, so turning off returns to manual approval
     quoteChips: Quoted excerpts
     removeQuoteChip: Remove quoted excerpt
     loadMore: Show $1 more

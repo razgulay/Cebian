@@ -932,6 +932,10 @@ chat:
       normal: 普通
       openclaw: OpenClaw
       toggleHint: 切换普通模式（默认 Cebian）与 OpenClaw 模式（自定义人设 + 身份信息）
+    skillAutoToggle:
+      auto: 自动
+      manual: 手动
+      toggleHint: 打开期间自动放行 skill 权限询问——不写入永久授权，关闭后立即恢复手动询问
     maxAttachments: 最多添加 $1 个附件
     truncatedFiles: 仅添加前 $1 个文件，已达上限
     fileTooLarge: $1 超过 $2 限制

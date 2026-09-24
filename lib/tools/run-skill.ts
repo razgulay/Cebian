@@ -6,6 +6,7 @@ import { vfs, normalizePath } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
 import { getSkillGrants, setSkillGrant, permissionsMatch } from '@/lib/ai-config/skill-grants';
 import { validateSkillName } from '@/lib/ai-config/skill-validator';
+import { chatSkillAuto } from '@/lib/persistence/storage';
 import { t } from '@/lib/i18n';
 import type { ToolGate, PermissionRequestDetails } from '@/lib/agent/tool-permissions';
 import { runInSandbox } from './sandbox-rpc';
@@ -184,6 +185,12 @@ export const runSkillGate: ToolGate = {
   async check(args): Promise<{ needsGrant: boolean; request?: PermissionRequestDetails }> {
     const { skill, script } = args as Static<typeof RunSkillParameters>;
 
+    // ChatInput toolbar 的 Skills chip—— toggle ON 时跳过 permission card 且
+    // **不持久化 grant**：toggle off 即时恢复询问，零残留、零干扰。读缓存
+    // 模块级（见本文件底部 in-memory 缓存初始化块），避免热路径每次 run_skill
+    // 都打 disk I/O。
+    if (chatSkillAutoCached) return { needsGrant: false };
+
     let permissions: string[];
     try {
       ({ permissions } = await resolveSkillPermissions(skill));
@@ -220,3 +227,26 @@ export const runSkillGate: ToolGate = {
     }
   },
 };
+
+// ─── Skills chip 的 in-memory 缓存（避免 hot path 每次 read storage）───
+// ChatInput toolbar 的 SkillsChip 通过 useStorageItem 翻转 `local:chatSkillAuto`；
+// runSkillGate.check() 跑在每个 run_skill 调用前的热路径上，每次去读 disk I/O
+// 得不偿失。初始化时同步读一次 + watch() 双向同步，跨 chip ↔ gate 一致。
+let chatSkillAutoCached = false;
+void chatSkillAuto
+  .getValue()
+  .then((v) => {
+    chatSkillAutoCached = v;
+  })
+  .catch((err) => {
+    console.warn('[run-skill] failed to read initial chatSkillAuto:', err);
+  });
+chatSkillAuto.watch((v) => {
+  chatSkillAutoCached = v;
+});
+
+/** 测试钩子：直接翻转缓存（绕过 storage watch 时序）。仅供单测，生产代码永远走
+ *  watch 同步。 */
+export function _setChatSkillAutoCachedForTest(v: boolean): void {
+  chatSkillAutoCached = v;
+}

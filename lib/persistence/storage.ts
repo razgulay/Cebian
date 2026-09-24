@@ -244,6 +244,14 @@ export const workerTeamEnabled = defineLoggedItem<boolean>(
   { fallback: false },
 );
 
+/** ChatInput toolbar 的 Skills chip：跳过 run_skill permission card（auto-approve）
+ *  —— **不持久化 grant**（toggle off → 立即恢复询问，零残留、零干扰）。
+ *  与 WorkerTeam / Persona chip 同 pattern：global、useStorageItem 双向同步。 */
+export const chatSkillAuto = defineLoggedItem<boolean>(
+  'local:chatSkillAuto',
+  { fallback: false },
+);
+
 /** Per-role 超时覆盖（ms）。每个 role 的 runner ceiling 用户可手动调——典型
  *  用途是给 frontend_coder 提到 5–10 分钟（写 3–5K LOC），给 reviewer / researcher
  *  收到 60s（他们跑得快）。`undefined` = 该 role 用 registry 默认（见

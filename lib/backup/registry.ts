@@ -46,6 +46,7 @@ import {
   composerPinnedContexts,
   workerModels,
   workerTeamEnabled,
+  chatSkillAuto,
   workerRoleTimeouts,
   scheduledTasks,
   canvasPanelOpen,
@@ -401,6 +402,7 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
   // 备份里——恢复后无需重新点击 chip。无密钥、无 fillMissing（merge 下保留
   // 本地偏好，避免恢复旧备份意外覆盖用户当前选择）。
   entry({ item: workerTeamEnabled, storageClass: 'settings' }),
+  entry({ item: chatSkillAuto, storageClass: 'settings' }),
   // Persona layer: SOUL copy + identity fields + OpenClaw-mode master switch.
   // 用户偏好 / 内容并存，恢复后用户能看到原本的人设副本。下面 3 条都声明
   // fillMissing 走 merge「默认视为空、用备份值覆盖」语义：personaEnabled OFF
