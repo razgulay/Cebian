@@ -94,6 +94,27 @@ describe('rewriteLastUserMessage', () => {
     expect((out[0] as any).content[0]).toBe((messages[0] as any).content[0]);
   });
 
+  it('preserves ATTACHED ROUTE directive (worker-role mention) — replaces only the user-typed suffix (regression)', () => {
+    // Subtask 3 of the worker-role mention feature: ChatInput.handleSend
+    // prepends `[DIRECTIVE — ATTACHED ROUTE: "<role>" (id=<uuid>)]` for each
+    // worker-role chip. The BG eventually broadcasts a session_state update;
+    // rewriteLastUserMessage must recognize this directive and preserve it
+    // while replacing only the user-typed suffix (otherwise the role
+    // instruction silently disappears on the next broadcast).
+    const text =
+      '[DIRECTIVE — ATTACHED ROUTE: "reviewer" (id=abc-123)]\n\n[END DIRECTIVE]\n\n---\n\nplz review my code';
+    const messages = asAgentMessages([
+      { role: 'user', content: [{ type: 'text', text }], timestamp: 1 },
+    ]);
+    const out = rewriteLastUserMessage(messages, 'plz review my code');
+    const newText = (out[0] as any).content[0].text;
+    expect(newText).toContain('[DIRECTIVE — ATTACHED ROUTE: "reviewer" (id=abc-123)]');
+    expect(newText).toContain('[END DIRECTIVE]');
+    expect(newText).toContain('plz review my code');
+    // 没被错误地按 "no directive" 整个清空。
+    expect(newText).not.toBe('plz review my code');
+  });
+
   it('preserves </user-request> close when the BG wrapper carries an inner skill-body placeholder (regression)', () => {
     // Repro of the live-bubble regression. The BG wrapper contains a skill
     // body that itself uses `<user-request>...</user-request>` as a

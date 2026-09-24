@@ -19,6 +19,7 @@ import {
   WorkerRoleMentionPopover,
   type WorkerRoleOption,
 } from '@/components/chat/WorkerRoleMentionPopover';
+import { detectAtToken } from '@/components/chat/detect-at-token';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
@@ -59,24 +60,6 @@ import { useResolvedModel } from '@/components/chat/context/useResolvedModel';
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
 // resolve loop share one implementation.
-/** 从 caret 位置向前扫——boundary 必须是「行首」或「空白字符」，且紧贴 boundary
- *  必须是 `@`。匹配则返回 token（不含 @）+ [start, end) 区间。不满足 → null。
- * 防止 user@host 这类 email 误触发。Token 字符集 `[a-zA-Z0-9_-]`（与 WORKER_ROLES
- * registry 的 4 个 role id 完全匹配）。 */
-function detectAtToken(
-  value: string,
-  caret: number,
-): { query: string; start: number; end: number } | null {
-  if (caret <= 0 || caret > value.length) return null;
-  let i = caret - 1;
-  while (i > 0 && !/\s/.test(value[i - 1]!)) i--;
-  // 此时 i==0（到头）或 value[i-1] 是空白。i 就是 token 起点（@ 所在位置）
-  if (value[i] !== '@') return null;
-  let end = i + 1;
-  while (end < caret && /[a-zA-Z0-9_-]/.test(value[end]!)) end++;
-  return { query: value.slice(i + 1, end).toLowerCase(), start: i, end };
-}
-
 function pinLabel(item: PinnedMention): string {
   switch (item.kind) {
     case 'prompt':         return item.name;
