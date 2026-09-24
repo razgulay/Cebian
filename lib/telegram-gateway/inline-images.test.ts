@@ -60,8 +60,36 @@ describe('extractInlineImages — 提取 + 剥离 markdown 内联图片', () => 
     expect(nested.cleanText).toBe('Ok  end');
   });
 
-  it('URL 段含中文 / 编码字符照常提取；非 http(s) 协议不匹配', () => {
-    const out = extractInlineImages('![vn](https://x.test/ảnh%20dep.jpg) ![no](javascript:alert(1))');
+  it('wsrv.nl proxy → unwrap về direct original URL (Telegram không fetch được WebP)', () => {
+    const original = 'https://upload.wikimedia.org/wikipedia/commons/a/b.jpg';
+    const proxied = `https://wsrv.nl/?url=${encodeURIComponent(original)}&w=600&output=webp&q=80`;
+    const out = extractInlineImages(`![seal](${proxied})`);
+    expect(out.images).toHaveLength(1);
+    // Unwrap: trả direct original URL (JPEG) — Telegram fetch trực tiếp từ nguồn
+    expect(out.images[0]!.url).toBe(original);
+  });
+
+  it('images.weserv.nl (domain cũ) unwrap tương tự', () => {
+    const original = 'https://x.test/photo.png';
+    const proxied = `https://images.weserv.nl/?url=${encodeURIComponent(original)}&output=webp`;
+    const out = extractInlineImages(`![y](${proxied})`);
+    expect(out.images[0]!.url).toBe(original);
+  });
+
+  it('unwrap fail (url param không decode được) → fallback về stripWebpParams', () => {
+    const proxied = 'https://wsrv.nl/?w=600&output=webp&q=80';
+    const out = extractInlineImages(`![z](${proxied})`);
+    // Không unwrap được → giữ proxy URL nhưng strip webp params
+    expect(out.images[0]!.url).toBe('https://wsrv.nl/?w=600');
+  });
+
+  it('không phải proxy → URL nguyên vẹn', () => {
+    const direct = 'https://cdn.test/photo.jpg?output=webp&q=90';
+    const out = extractInlineImages(`![d](${direct})`);
+    expect(out.images[0]!.url).toBe('https://cdn.test/photo.jpg?output=webp&q=90');
+  });
+
+  it('URL 段含中文 / 编码字符照常提取；非 http(s) 协议不匹配', () => {    const out = extractInlineImages('![vn](https://x.test/ảnh%20dep.jpg) ![no](javascript:alert(1))');
     expect(out.images).toEqual([{ url: 'https://x.test/ảnh%20dep.jpg', alt: 'vn' }]);
     expect(out.cleanText).toContain('![no](javascript:alert(1))');
   });

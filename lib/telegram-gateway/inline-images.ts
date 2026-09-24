@@ -28,6 +28,51 @@ export interface ExtractedInlineImages {
 const INLINE_IMAGE_RE = /!\[(.*?)\]\(\s*(https?:\/\/[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)\s*\)/g;
 
 /**
+ * Unwrap image-proxy URL → direct original URL.
+ *
+ * Wikimedia / Wikipedia search results thường đi qua wsrv.nl (trước là
+ * images.weserv.nl) proxy: `https://wsrv.nl/?url=<encoded-original>&w=600&output=webp&q=80`.
+ * Proxy này mặc định output WebP — Telegram `sendPhoto` URL-fetch **không hỗ trợ
+ * WebP** (chỉ JPG / PNG / GIF) → sendPhoto 400 → fallback sang `🖼 <url>` text.
+ *
+ * Cách xử lý tận gốc: tách param `url` (percent-encoded) → decode → trả về direct
+ * original URL (`.jpg` / `.png` nguyên bản) — Telegram fetch trực tiếp từ nguồn,
+ * không qua proxy, không gặp lỗi format. Fallback: nếu `url` param không decode
+ * được (proxy variant khác) → trả về proxy URL đã strip `output=webp` + `q=`
+ * (Telegram vẫn fetch được JPEG từ proxy).
+ *
+ * Áp dụng cho cả wsrv.nl (domain mới) lẫn images.weserv.nl (domain cũ) — cùng
+ * một chuẩn proxy, chỉ khác hostname.
+ */
+function unwrapProxyUrl(url: string): string {
+  if (!url.includes('wsrv.nl') && !url.includes('images.weserv.nl')) return url;
+  // Tách param `url` từ query string (percent-encoded original URL).
+  const qIdx = url.indexOf('?');
+  if (qIdx < 0) return stripWebpParams(url);
+  const params = new URLSearchParams(url.slice(qIdx + 1));
+  const original = params.get('url');
+  if (original && /^https?:\/\//i.test(original)) return original;
+  // Không unwrap được → strip webp params khỏi proxy URL (Telegram vẫn fetch
+  // được JPEG từ proxy, chỉ là đi vòng 1 lớp).
+  return stripWebpParams(url);
+}
+
+/**
+ * Wikimedia 的 wsrv.nl 图片代理默认 `output=webp`——但 Telegram `sendPhoto`
+ * URL-fetch 只认 JPG / PNG / GIF（WebP 仅在上传文件时支持，URL 拉取不支持）。
+ * 剥掉 `output=webp` + `q=` 参数让代理回落默认 JPEG 格式，Telegram 即可拉取。
+ * 其他域名的 URL 原样返回（不误伤）。
+ */
+function stripWebpParams(url: string): string {
+  if (!url.includes('wsrv.nl') && !url.includes('images.weserv.nl')) return url;
+  return url
+    .replace(/([?&])output=webp[^&]*/gi, '$1')
+    .replace(/([?&])q=\d+[^&]*/gi, '$1')
+    .replace(/\?&+/, '?')
+    .replace(/[?&]+$/, '');
+}
+
+/**
  * 从回复文本提取全部 web 内联图片并从原文剥离。
  *
  * - 同一 URL 出现多次只保留首次（Telegram 重复发同图没有意义），但**每次出现都
@@ -39,10 +84,10 @@ export function extractInlineImages(text: string): ExtractedInlineImages {
   const images: InlineImage[] = [];
   const seen = new Set<string>();
   const clean = text.replace(INLINE_IMAGE_RE, (_match, alt: string, url: string) => {
-    const trimmedUrl = url.trim();
-    if (!seen.has(trimmedUrl)) {
-      seen.add(trimmedUrl);
-      images.push({ url: trimmedUrl, alt: alt.trim() });
+    const strippedUrl = unwrapProxyUrl(url.trim());
+    if (!seen.has(strippedUrl)) {
+      seen.add(strippedUrl);
+      images.push({ url: strippedUrl, alt: alt.trim() });
     }
     return '';
   });
