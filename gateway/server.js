@@ -47,7 +47,10 @@ function safeEqual(a, b) {
   return mismatch === 0;
 }
 
-/** CSV → Set<string> chat id. env rỗng → tập rỗng = từ chối tất cả (fail-closed). */
+/** CSV → Set<string> chat id. env rỗng → tập rỗng = từ chối tất cả (fail-closed).
+ *  Chỉ parse MỘT LẦN ở module level — env tĩnh theo lifetime container (Koyeb
+ *  đổi env = restart), không cần invalidation; nhờ đó isChatAllowed trên hot
+ *  path (mỗi webhook message / callback / outbound action) là O(1) thuần túy. */
 function parseAllowedChatIds(raw) {
   const set = new Set();
   for (const piece of String(raw ?? '').split(',')) {
@@ -57,8 +60,10 @@ function parseAllowedChatIds(raw) {
   return set;
 }
 
+const ALLOWED_CHATS_SET = parseAllowedChatIds(env.ALLOWED_CHAT_IDS);
+
 function isChatAllowed(chatId) {
-  return parseAllowedChatIds(env.ALLOWED_CHAT_IDS).has(String(chatId));
+  return ALLOWED_CHATS_SET.has(String(chatId));
 }
 
 /** Gọi Telegram Bot API sendMessage; chuẩn hoá kết quả thành reply shape.
@@ -509,9 +514,10 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  // fail-closed：chưa set WS_AUTH_TOKEN → từ chối mọi upgrade。
+  // fail-closed：chưa set WS_AUTH_TOKEN → từ chối mọi upgrade。So sánh constant-time
+  // bằng safeEqual — nhất quán với webhook secret ở trên (chống timing side-channel).
   const token = url.searchParams.get('token');
-  if (!env.WS_AUTH_TOKEN || token !== env.WS_AUTH_TOKEN) {
+  if (!env.WS_AUTH_TOKEN || !safeEqual(token ?? '', env.WS_AUTH_TOKEN)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
