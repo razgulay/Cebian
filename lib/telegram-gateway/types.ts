@@ -79,19 +79,44 @@ export type OutboundAction =
   | { kind: 'setMessageReaction'; request_id: string; chat_id: number; message_id: number; emoji?: string }
   | { kind: 'deleteMessage'; request_id: string; chat_id: number; message_id: number }
   | {
-      /** 把截图发回 chat。Gateway 把 base64 解码成 multipart `sendPhoto`
-       *  （Telegram Bot API 不接受 data-URL）。回复 `gateway_result` ——
-       *  Telegram 返回 photo 数组时 `ok:true`。 */
+      /** 把截图 / web 图片发回 chat。两种来源二选一：
+       *  - `image_url`：web 直链——gateway 走 JSON POST，Telegram 服务端自行
+       *    拉取（≤10MB、jpg/png/gif；可达性 Telegram 侧判定，失败 caller 兜底）。
+       *  - `image_base64`：JPEG 截图——gateway 解码成 multipart 上传（Telegram
+       *    Bot API 不接受 data-URL）。
+       *  回复 `gateway_result` —— Telegram 返回 photo 数组时 `ok:true`。 */
       kind: 'sendPhoto';
       request_id: string;
       chat_id: number;
+      /** web 图片直链（截图流程不带该字段）。 */
+      image_url?: string;
       /** JPEG base64，**不带** `data:image/…;base64,` 前缀 —— extension 发送
-       *  前自行 strip。 */
-      image_base64: string;
+       *  前自行 strip。与 `image_url` 二选一。 */
+      image_base64?: string;
       caption?: string;
+      /** caption 的解析模式（AI 图片说明用；截图流程不带）。 */
+      parse_mode?: 'Markdown';
+      /** AI 图片路径把 photo 回链用户消息（gateway 映射为 `reply_parameters`，
+       *  Bot API 7+；截图流程不带）。 */
+      reply_to_message_id?: number;
       /** 拥有 inline keyboard 的 message（来自 telegram_callback）—— gateway
        *  用它取消 5s watchdog；capture 非键盘来源时省略。 */
       message_id?: number;
+    }
+  | {
+      /** 把 AI 回复解析出的多张 web 图按 Telegram 原生相册发回。gateway 直接
+       *  JSON POST Bot API `sendMediaGroup`；`reply_to_message_id` 映射为
+       *  `reply_parameters`（Bot API 7+）。caption 语义与 Telegram 一致：只有
+       *  `media[0].caption` 生效、整组 ≤1024 字符——caller 侧负责截断。回复
+       *  `gateway_result`（ok = Telegram 返回消息数组）。 */
+      kind: 'sendMediaGroup';
+      request_id: string;
+      chat_id: number;
+      media: Array<{ type: 'photo'; media: string; caption?: string }>;
+      /** Bot API 的 sendMediaGroup 无 top-level parse_mode——gateway 负责把它
+       *  译到带 caption 的 InputMedia 上（见 callSendMediaGroup）。 */
+      parse_mode?: 'Markdown';
+      reply_to_message_id?: number;
     };
 
 /** Outbound wire reply — Worker → extension (cho `sendMessage`). */

@@ -42,6 +42,7 @@ import { onBroadcastTap } from '../chat/viewers';
 import { onPortConnect, post } from '../ipc/port-registry';
 import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
 import { splitReply } from '@/lib/telegram-gateway/message-split';
+import { extractInlineImages } from '@/lib/telegram-gateway/inline-images';
 import { getToolLabel } from '@/lib/tools/labels';
 import {
   bootstrapTelegramGateway,
@@ -62,6 +63,29 @@ let interactiveMode = false;
 const sessionQueues = new Map<string, Promise<void>>();
 /** 每 Telegram session 的 turn 計數——sliding window 的觸發依據。 */
 const telegramTurnCounts = new Map<string, number>();
+
+// ─── Inline-image 媒体分发常量 ───
+
+/** Telegram 媒体 caption 硬限（Bot API：caption ≠ 文本消息的 4096 上限）。 */
+const TELEGRAM_CAPTION_LIMIT = 1024;
+/** sendMediaGroup 单组张数硬限（Bot API：2–10）。超出丢弃——单轮 >10 图本就异常。 */
+const MEDIA_GROUP_MAX = 10;
+/** 媒体发送（sendPhoto URL / sendMediaGroup）的回执上限。旧 relay 不认识新 action
+ *  kind 时**静默丢弃**（不回任何 frame）→ pending promise 永不 resolve；超时把
+ *  「永远挂着」变成「降级文本路径」。若 relay 实际已发出而回执迟到，会出现媒体 +
+ *  fallback 文本并存的罕见重复——有界可接受（与 relay 竞态同类的已知取舍）。 */
+const MEDIA_SEND_TIMEOUT_MS = 8_000;
+
+/** 给一段 promise 套超时（manager 侧仅媒体回执使用；超时不取消底层发送）。 */
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 // ─── Inbound turn 的 UX 生命周期状态（reaction + typing keepalive）───
 
@@ -746,21 +770,126 @@ async function finalizeTurn(state: TelegramTurnState, messages: BroadcastMessage
     return result.kind === 'sendMessage_result' && result.ok;
   };
 
-  try {
-    // Block 1：reply_to 用户消息，三级兜底保证送达（Markdown → plain → 无 reply）
-    const first = blocks[0]!;
-    if (!(await sendBlock(first, { replyTo: true, useMarkdown: true }))) {
-      if (!(await sendBlock(first, { replyTo: true, useMarkdown: false }))) {
+  // 块发送统一收口：`anchorFirst` = 首块走三级兜底（reply+MD → reply+plain → 无
+  // reply）回链用户消息；其余块静默补发（MD → plain）。0 图路径与媒体 fallback
+  // 共用同一条收口，保证降级后的送达语义与既有行为逐字节一致。
+  const sendAllBlocks = async (chunks: string[], anchorFirst: boolean): Promise<void> => {
+    const first = chunks[0];
+    if (first !== undefined) {
+      if (anchorFirst) {
+        if (!(await sendBlock(first, { replyTo: true, useMarkdown: true }))) {
+          if (!(await sendBlock(first, { replyTo: true, useMarkdown: false }))) {
+            await sendBlock(first, { useMarkdown: false });
+          }
+        }
+      } else if (!(await sendBlock(first, { useMarkdown: true }))) {
         await sendBlock(first, { useMarkdown: false });
       }
     }
-    // Block 2+：静默补发，Markdown 失败退 plain
-    for (const block of blocks.slice(1)) {
+    for (const block of chunks.slice(1)) {
       if (!(await sendBlock(block, { useMarkdown: true }))) {
         await sendBlock(block, { useMarkdown: false });
       }
     }
-    console.log('[telegram-gateway] finalizeTurn: all blocks sent OK');
+  };
+
+  // ─── 内联图片路由 ───
+  // web 图片按 Telegram 原生 photo 发送（sendPhoto / sendMediaGroup），其余文本
+  // 照旧走块路径。VFS 图（#/...）不匹配 http(s)、extractInlineImages 不提取。
+  // 整段 try/catch 沿袭既有行为：sendOutbound 在 WS 中途断开时会 reject（close
+  // 广播给全部 pending），finalize 是广播 tap 的 fire-and-forget 尾巴，绝不能把
+  // rejection 漏成 unhandled。
+  try {
+    const { images, cleanText } = extractInlineImages(text);
+    if (images.length === 0) {
+      await sendAllBlocks(blocks, true);
+      console.log('[telegram-gateway] finalizeTurn: all blocks sent OK');
+      return;
+    }
+
+    const textBlocks = cleanText ? splitReply(cleanText) : [];
+    // caption 候选 = 第一个文本块，且不超 Telegram caption 硬限；超限则不挂 caption
+    //（不在媒体上截断半个 markdown 块），整块照常走后续文本路径。
+    const caption = textBlocks[0] !== undefined && textBlocks[0].length <= TELEGRAM_CAPTION_LIMIT
+      ? textBlocks[0]
+      : undefined;
+    const remaining = caption !== undefined ? textBlocks.slice(1) : textBlocks;
+
+    const sendMedia = async (): Promise<boolean> => {
+      try {
+        if (images.length === 1) {
+          const img = images[0]!;
+          console.log('[telegram-gateway] finalizeTurn: sendPhoto', {
+            url: img.url,
+            captioned: caption !== undefined,
+          });
+          const result = await withTimeout(
+            gateway.client.sendOutbound({
+              kind: 'sendPhoto',
+              request_id: crypto.randomUUID(),
+              chat_id: state.chatId,
+              image_url: img.url,
+              ...(caption !== undefined ? { caption, parse_mode: 'Markdown' as const } : {}),
+              reply_to_message_id: state.userMessageId,
+            }),
+            MEDIA_SEND_TIMEOUT_MS,
+            'sendPhoto',
+          );
+          if (!(result.kind === 'gateway_result' && result.ok)) return false;
+        } else {
+          // 单组上限 10 张（Bot API 硬限）；溢出的图不静默丢弃——发送成功后以
+          // 🖼 链接块补在文本后面（与 fallback 的链接块同形态，内容零丢失）。
+          // caption 语义与 Telegram 一致：只有 media[0].caption 生效。
+          const media = images.slice(0, MEDIA_GROUP_MAX).map((img, index) => ({
+            type: 'photo' as const,
+            media: img.url,
+            ...(index === 0 && caption !== undefined ? { caption } : {}),
+          }));
+          console.log('[telegram-gateway] finalizeTurn: sendMediaGroup', {
+            count: media.length,
+            overflow: images.length - media.length,
+            captioned: caption !== undefined,
+          });
+          const result = await withTimeout(
+            gateway.client.sendOutbound({
+              kind: 'sendMediaGroup',
+              request_id: crypto.randomUUID(),
+              chat_id: state.chatId,
+              media,
+              ...(caption !== undefined ? { parse_mode: 'Markdown' as const } : {}),
+              reply_to_message_id: state.userMessageId,
+            }),
+            MEDIA_SEND_TIMEOUT_MS,
+            'sendMediaGroup',
+          );
+          if (!(result.kind === 'gateway_result' && result.ok)) return false;
+        }
+        // 溢出链接块：sendPhoto 路径（单图）恒为空 → 行为不变；sendMediaGroup
+        // 超过 10 张的图在这里以链接补齐，不静默丢失。
+        const overflowLinks = images
+          .slice(MEDIA_GROUP_MAX)
+          .map((img) => `🖼 ${img.url}`)
+          .join('\n');
+        await sendAllBlocks(overflowLinks ? [...remaining, overflowLinks] : remaining, false);
+        return true;
+      } catch (err) {
+        console.warn('[telegram-gateway] finalizeTurn: media dispatch failed, falling back to text:', err);
+        return false;
+      }
+    };
+
+    if (await sendMedia()) {
+      console.log('[telegram-gateway] finalizeTurn: media path done');
+      return;
+    }
+
+    // 文本 fallback：干净文本块（图片 markdown 已剥离）+ 图片 URL 以纯链接补一块。
+    // 不把 `![alt](url)` 残渣直接怼进聊天窗——内容与链接都保住，渲染交给用户点击。
+    const fallbackBlocks = [...textBlocks];
+    const linksBlock = images.map((img) => `🖼 ${img.url}`).join('\n');
+    if (linksBlock) fallbackBlocks.push(linksBlock);
+    await sendAllBlocks(fallbackBlocks, true);
+    console.log('[telegram-gateway] finalizeTurn: text fallback done');
   } catch (err) {
     console.warn('[telegram-gateway] finalize failed:', err);
   }

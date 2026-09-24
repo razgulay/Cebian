@@ -813,4 +813,167 @@ describe('setupTelegramGatewayManager', () => {
 
     expect(mockCompactNow).not.toHaveBeenCalled();
   });
+
+  // ─── Inline-image 媒体分发（finalizeTurn 的 sendPhoto / sendMediaGroup 路由）───
+
+  /** 全部媒体发送（sendPhoto / sendMediaGroup）。 */
+  function mediaSends(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as {
+        kind?: string;
+        image_url?: string;
+        caption?: string;
+        parse_mode?: string;
+        reply_to_message_id?: number;
+        media?: Array<{ type: string; media: string; caption?: string }>;
+      })
+      .filter((m) => m.kind === 'sendPhoto' || m.kind === 'sendMediaGroup');
+  }
+
+  /** 图片路径用例的前置：建 session + 跑 turn + 广播 agent_end（回复文本可带图）。
+   *  `outboundFor` 决定媒体类 action 的回执（默认 ok）。 */
+  async function runImageTurn(
+    assistantText: string,
+    outboundFor?: (kind: string | undefined) => unknown,
+  ): Promise<{ sendOutbound: ReturnType<typeof vi.fn> }> {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    const fields = {
+      id: await telegramSessionId(965822571),
+      title: 'Telegram · @tester',
+      model: 'test-model',
+      provider: 'test',
+      userInstructions: '',
+      thinkingLevel: 'medium' as const,
+    };
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create(fields);
+    await sessionStore.createWithMessages(fields, [
+      { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+      { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
+    ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+    client.sendOutbound.mockImplementation(async (m: unknown) => {
+      const kind = (m as { kind?: string }).kind;
+      if (kind === 'sendPhoto' || kind === 'sendMediaGroup') {
+        return (outboundFor?.(kind) ?? { kind: 'gateway_result', request_id: 'x', ok: true }) as never;
+      }
+      return { kind: 'sendMessage_result', request_id: 'x', ok: true, message_id: 1 } as never;
+    });
+
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+        { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
+      ] as never[],
+    });
+    await flushAsync();
+    return { sendOutbound: client.sendOutbound };
+  }
+
+  it('finalize 回复含 1 图 + 短文本 → sendPhoto(image_url + caption ≤1024 + reply_to)，无文本块', async () => {
+    const { sendOutbound: send } = await runImageTurn(
+      '![a cat](https://cdn.test/cat.jpg) Xin chào!',
+    );
+    const media = mediaSends({ sendOutbound: send });
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({
+      kind: 'sendPhoto',
+      image_url: 'https://cdn.test/cat.jpg',
+      caption: 'Xin chào!',
+      parse_mode: 'Markdown',
+      reply_to_message_id: 1,
+    });
+    // caption 已带图片正文 → 不再有 sendMessage 块。
+    const texts = sentMessages({ sendOutbound: send });
+    expect(texts).toHaveLength(0);
+  });
+
+  it('1 图 + 首块 >1024 → sendPhoto 无 caption；整块文本静默补发', async () => {
+    const long = 'A'.repeat(1500);
+    const { sendOutbound: send } = await runImageTurn(`![img](https://cdn.test/i.jpg)\n\n${long}`);
+    const media = mediaSends({ sendOutbound: send });
+    expect(media[0]!.kind).toBe('sendPhoto');
+    expect(media[0]!.caption).toBeUndefined();
+    // 文本块静默补发（Block 2+ 语义：无 reply_to、disable_notification）。
+    const texts = sentMessages({ sendOutbound: send });
+    expect(texts).toHaveLength(1);
+    expect(texts[0]!.text).toBe(long);
+    expect(texts[0]!.reply_to_message_id).toBeUndefined();
+    expect(texts[0]!.disable_notification).toBe(true);
+  });
+
+  it('2 图 → sendMediaGroup，caption 只挂第一项；reply_to 透传', async () => {
+    const { sendOutbound: send } = await runImageTurn(
+      'Look ![a](https://x.test/1.png) and ![b](https://x.test/2.png)',
+    );
+    const media = mediaSends({ sendOutbound: send });
+    expect(media).toHaveLength(1);
+    expect(media[0]!.kind).toBe('sendMediaGroup');
+    expect(media[0]!.media).toEqual([
+      { type: 'photo', media: 'https://x.test/1.png', caption: 'Look  and' },
+      { type: 'photo', media: 'https://x.test/2.png' },
+    ]);
+    expect(media[0]!.reply_to_message_id).toBe(1);
+  });
+
+  it('sendPhoto 被拒（ok:false）→ fallback 干净文本块 + 🖼 链接块（Block 1 reply_to）', async () => {
+    const { sendOutbound: send } = await runImageTurn(
+      'Nè ![broken](https://cdn.test/dead.jpg) xin chào',
+      () => ({ kind: 'gateway_result', request_id: 'x', ok: false, error: '400: Bad Request' }),
+    );
+    // 媒体重试 1 次后放弃（无重试），转文本。
+    expect(mediaSends({ sendOutbound: send })).toHaveLength(1);
+    const texts = sentMessages({ sendOutbound: send });
+    expect(texts).toHaveLength(2);
+    // Block 1：干净文本（图片标签剥离）+ reply_to + Markdown。
+    expect(texts[0]).toMatchObject({
+      text: 'Nè  xin chào',
+      reply_to_message_id: 1,
+      parse_mode: 'Markdown',
+    });
+    // 尾块：纯链接（无 markdown 图片残渣）、静默。
+    expect(texts[1]!.text).toBe('🖼 https://cdn.test/dead.jpg');
+    expect(texts[1]!.disable_notification).toBe(true);
+  });
+
+  it('sendMediaGroup 上限 10 张：第 11 张以 🖼 链接块补发（不静默丢弃）', async () => {
+    const images = Array.from({ length: 11 }, (_, i) => `![i${i}](https://x.test/${i}.png)`).join(' ');
+    const { sendOutbound: send } = await runImageTurn(images);
+    const media = mediaSends({ sendOutbound: send });
+    expect(media).toHaveLength(1);
+    expect(media[0]!.kind).toBe('sendMediaGroup');
+    expect(media[0]!.media).toHaveLength(10);
+    expect(media[0]!.media![9]!.media).toBe('https://x.test/9.png');
+    // 溢出的第 11 张以链接块补在文本后面。
+    const texts = sentMessages({ sendOutbound: send });
+    expect(texts).toHaveLength(1);
+    expect(texts[0]!.text).toBe('🖼 https://x.test/10.png');
+    expect(texts[0]!.disable_notification).toBe(true);
+  });
+
+  it('sendPhoto 挂起（旧 relay 不回执）→ 8s 超时 → fallback 文本送达', async () => {
+    // outboundFor 返回永不 resolve 的 promise——模拟旧 relay 对未知 kind 静默丢弃。
+    const { sendOutbound: send } = await runImageTurn(
+      '![img](https://cdn.test/i.jpg) hi',
+      () => new Promise(() => {}) as never,
+    );
+    // 推进 9s：超过 8s 超时——fallback 文本路径落地。
+    await vi.advanceTimersByTimeAsync(9_000);
+
+    const texts = sentMessages({ sendOutbound: send });
+    expect(texts).toHaveLength(2);
+    expect(texts[0]!.text).toBe('hi');
+    expect(texts[1]!.text).toBe('🖼 https://cdn.test/i.jpg');
+  });
 });

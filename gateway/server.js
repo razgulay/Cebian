@@ -15,6 +15,11 @@
 //                        { kind: 'editMessage', request_id, chat_id, message_id, text, parse_mode? }
 //                        { kind: 'setMessageReaction', request_id, chat_id, message_id, emoji? }
 //                        { kind: 'deleteMessage', request_id, chat_id, message_id }
+//                        { kind: 'sendPhoto', request_id, chat_id,
+//                          image_url? | image_base64?, caption?, parse_mode?,
+//                          reply_to_message_id?, message_id? (watchdog cancel) }
+//                        { kind: 'sendMediaGroup', request_id, chat_id,
+//                          media: InputMediaPhoto[], reply_to_message_id? }
 //   Worker → extension : { kind: 'sendMessage_result', request_id, ok, message_id?, error? }
 //                        { kind: 'gateway_result', request_id, ok, error? }（后两种 action 用）
 //
@@ -209,6 +214,77 @@ async function callAnswerCallbackQuery(callbackQueryId, text) {
     });
     const json = await res.json().catch(() => ({}));
     if (json.ok) return { ok: true };
+    return {
+      ok: false,
+      error: json.description ? `${res.status}: ${json.description}` : `status ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, error: `telegram api unreachable: ${String(err)}` };
+  }
+}
+
+/** sendPhoto (web URL) — JSON POST, Telegram server-side tự fetch ảnh
+ *  (≤10MB, jpg/png/gif; URL không tải được → Telegram trả 400, caller fallback).
+ *  caption / parse_mode forward thẳng (caption markdown của AI reply);
+ *  replyToMessageId map sang reply_parameters (Bot API 7+). */
+async function callSendPhotoUrl(chatId, photoUrl, caption, parseMode, replyToMessageId) {
+  try {
+    const body = { chat_id: chatId, photo: photoUrl };
+    if (caption) body.caption = caption;
+    if (parseMode) body.parse_mode = parseMode;
+    if (typeof replyToMessageId === 'number') {
+      body.reply_parameters = { message_id: replyToMessageId, allow_sending_without_reply: true };
+    }
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (json.ok && Array.isArray(json.result?.photo) && json.result.photo.length > 0) {
+      return { ok: true };
+    }
+    if (json.ok) {
+      return { ok: false, error: 'telegram response missing photo' };
+    }
+    return {
+      ok: false,
+      error: json.description ? `${res.status}: ${json.description}` : `status ${res.status}`,
+    };
+  } catch (err) {
+    return { ok: false, error: `telegram api unreachable: ${String(err)}` };
+  }
+}
+
+/** sendMediaGroup — JSON POST Bot API sendMediaGroup (native photo album).
+ *  reply_to_message_id map sang reply_parameters (Bot API 7+; allow_sending_
+ *  without_reply để tin gốc bị xoá vẫn gửi được). parse_mode KHÔNG phải param
+ *  cấp top của sendMediaGroup — Bot API yêu cầu parse_mode nằm trên từng
+ *  InputMedia có caption, nên opts.parseMode được dịch xuống media tương ứng
+ *  (hiện chỉ media[0] mang caption). ok = Telegram trả mảng message. */
+async function callSendMediaGroup(chatId, media, opts = {}) {
+  try {
+    const body = {
+      chat_id: chatId,
+      media: media.map((item) =>
+        item.caption && opts.parseMode ? { ...item, parse_mode: opts.parseMode } : item,
+      ),
+    };
+    if (typeof opts.replyToMessageId === 'number') {
+      body.reply_parameters = { message_id: opts.replyToMessageId, allow_sending_without_reply: true };
+    }
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMediaGroup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (json.ok && Array.isArray(json.result) && json.result.length > 0) {
+      return { ok: true };
+    }
+    if (json.ok) {
+      return { ok: false, error: 'telegram response missing messages' };
+    }
     return {
       ok: false,
       error: json.description ? `${res.status}: ${json.description}` : `status ${res.status}`,
@@ -525,15 +601,32 @@ wss.on('connection', (ws) => {
           result = await callDeleteMessage(data.chat_id, data.message_id);
           break;
         case 'sendPhoto':
-          if (typeof data.image_base64 !== 'string' || data.image_base64.length === 0) {
-            result = { ok: false, error: 'image_base64 required' };
-            break;
-          }
           // Huỷ watchdog nếu capture xuất phát từ keyboard (message_id có mặt).
+          // Đặt trước cả hai nhánh — type cho phép image_url + message_id cùng xuất hiện.
           if (typeof data.message_id === 'number') {
             cancelCallbackWatchdog(data.chat_id, data.message_id);
           }
+          // Hai nguồn ảnh: image_url (web — JSON POST, Telegram tự fetch) hoặc
+          // image_base64 (screenshot — multipart upload). Bắt buộc có một.
+          if (typeof data.image_url === 'string' && data.image_url.length > 0) {
+            result = await callSendPhotoUrl(data.chat_id, data.image_url, data.caption, data.parse_mode, data.reply_to_message_id);
+            break;
+          }
+          if (typeof data.image_base64 !== 'string' || data.image_base64.length === 0) {
+            result = { ok: false, error: 'image_url or image_base64 required' };
+            break;
+          }
           result = await callSendPhoto(data.chat_id, data.image_base64, data.caption);
+          break;
+        case 'sendMediaGroup':
+          if (!Array.isArray(data.media) || data.media.length === 0) {
+            result = { ok: false, error: 'media required' };
+            break;
+          }
+          result = await callSendMediaGroup(data.chat_id, data.media, {
+            parseMode: data.parse_mode,
+            replyToMessageId: data.reply_to_message_id,
+          });
           break;
         default:
           return; // 未知 kind——静默忽略
