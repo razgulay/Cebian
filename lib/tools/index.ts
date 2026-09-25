@@ -223,8 +223,9 @@ export async function buildSessionToolArray(
       engineCount: enabledSearchEngines(resolveSearchEnginesConfig(searchConfig)).length,
     }, ctx.sessionId));
   base.push(webSearch);
-  // `schedulerTools`（list / create / delete / run_now）—— LLM 调度定时任务。
-  base.push(...schedulerTools);
+  // `schedulerTools` 不在此处重复 push —— 已随 `sharedTools` 进入 base（见上）；
+  // v1.7.1 曾因两处各 push 一次导致 Vertex AI 报 400 Duplicate function
+  // declaration found: scheduler_list。注册点保持唯一：`sharedTools`。
   return base;
 }
 
