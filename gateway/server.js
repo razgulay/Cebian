@@ -47,6 +47,35 @@ function safeEqual(a, b) {
   return mismatch === 0;
 }
 
+/** Match 1 ảnh Markdown: `![alt](url)`. URL không được chứa `)` hay khoảng
+ *  trắng (Telegram Bot API cũng không nhận các ký tự đó trong URL). Nhóm 1
+ *  = alt, nhóm 2 = url. Tách Markdown image thành phần text-only + 1 mảng
+ *  ảnh để case 'sendMessage' route sang sendPhoto / sendMediaGroup thay vì
+ *  nhét cả `![…](…)` thành chuỗi raw dài ngoằng mà Telegram parser sẽ
+ *  biến thành văn bản hỏng. */
+const MARKDOWN_IMAGE_RE = /!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)/g;
+const TELEGRAM_ALBUM_MAX = 10;
+
+/** Trích tất cả ảnh Markdown khỏi `text`, trả về { cleanText, images }.
+ *  - cleanText:  text đã loại bỏ các thẻ ảnh, có thể kèm dọn khoảng trắng
+ *                thừa (leading/trailing blank lines, nhiều dòng trống liên
+ *                tiếp) — tránh để caption trống khi user chỉ gửi ảnh.
+ *  - images:     mảng { url, alt } theo thứ tự xuất hiện trong text gốc.
+ *  Alt chỉ dùng để debug; Telegram chỉ nhận URL, không có alt text. */
+function extractMarkdownImages(text) {
+  const images = [];
+  // Bảo toàn alt có chứa `]` ở giữa bằng nhóm [^\]\n]* (không cho phép ] xuống dòng).
+  for (const m of text.matchAll(MARKDOWN_IMAGE_RE)) {
+    images.push({ url: m[2], alt: m[1] || '' });
+  }
+  const cleanText = text
+    .replace(MARKDOWN_IMAGE_RE, '')
+    .replace(/[ \t]+\n/g, '\n')        // bỏ trailing space trước newline
+    .replace(/\n{3,}/g, '\n\n')        // gộp 3+ newline liên tiếp
+    .replace(/^\s+|\s+$/g, '');         // trim
+  return { cleanText, images };
+}
+
 /** CSV → Set<string> chat id. env rỗng → tập rỗng = từ chối tất cả (fail-closed).
  *  Chỉ parse MỘT LẦN ở module level — env tĩnh theo lifetime container (Koyeb
  *  đổi env = restart), không cần invalidation; nhờ đó isChatAllowed trên hot
@@ -579,7 +608,64 @@ wss.on('connection', (ws) => {
             result = { ok: false, error: 'text required' };
             break;
           }
-          result = await callSendMessage(data.chat_id, data.text, data);
+          // Tách ảnh Markdown: nếu text chứa `![alt](url)` thì thay vì nhét
+          // cả thẻ vào callSendMessage (Telegram parser sẽ lột `![]` và in
+          // raw URL → link preview bể góc + rác text), tách ra rồi gửi ảnh
+          // native qua sendPhoto (1 ảnh) hoặc sendMediaGroup (2–10 ảnh).
+          // Wire contract: vẫn trả 'sendMessage_result' để extension match
+          // đúng in-flight request, với message_id từ phần tử cuối cùng
+          // gửi thành công (text, 1 photo, hoặc media group).
+          const { cleanText, images } = extractMarkdownImages(data.text);
+          if (images.length === 0) {
+            // Không có ảnh — luồng cũ không đổi
+            result = await callSendMessage(data.chat_id, data.text, data);
+            break;
+          }
+          // Có ảnh: gửi text trước (nếu có nội dung) để dùng reply anchor
+          let sentTextMessageId = null;
+          if (cleanText.length > 0) {
+            const textResult = await callSendMessage(data.chat_id, cleanText, data);
+            if (textResult.ok && typeof textResult.message_id === 'number') {
+              sentTextMessageId = textResult.message_id;
+            } else if (!textResult.ok) {
+              // text gửi fail nhưng ảnh có thể vẫn gửi được — tiếp tục gửi ảnh
+              // để user vẫn nhận được gì đó; vẫn trả lỗi ở result dưới.
+              result = textResult;
+            }
+          }
+          // Nếu ảnh > 10 (giới hạn Bot API) → cắt + log (chỉ giữ 10 đầu).
+          // 11+ ảnh là edge case cực hiếm từ agent; user vẫn nhận album 10 ảnh.
+          const slice = images.slice(0, TELEGRAM_ALBUM_MAX);
+          let mediaResult;
+          if (slice.length === 1) {
+            mediaResult = await callSendPhotoUrl(
+              data.chat_id,
+              slice[0].url,
+              undefined,             // caption đã tách thành cleanText ở trên
+              undefined,             // parse_mode: ảnh đơn không kèm MD
+              sentTextMessageId ?? data.reply_to_message_id,
+            );
+          } else {
+            // sendMediaGroup: mỗi item là InputMediaPhoto có type + media.
+            const media = slice.map((img) => ({ type: 'photo', media: img.url }));
+            mediaResult = await callSendMediaGroup(data.chat_id, media, {
+              replyToMessageId: sentTextMessageId ?? data.reply_to_message_id,
+            });
+          }
+          // Ưu tiên text error (nếu có) > media error; nếu cả hai ok thì gộp
+          // ok=true + lấy message_id text (nếu có) để extension match.
+          if (result && !result.ok) {
+            // text đã fail; media kết quả coi như nỗ lực cuối
+            if (mediaResult && mediaResult.ok) {
+              result = { ok: false, error: `${result.error}; media ok but text failed` };
+            }
+            break;
+          }
+          if (mediaResult && mediaResult.ok) {
+            result = { ok: true, message_id: sentTextMessageId ?? undefined };
+          } else {
+            result = mediaResult ?? { ok: false, error: 'media send failed' };
+          }
           break;
         case 'sendChatAction':
           result = await callSendChatAction(data.chat_id, data.action);

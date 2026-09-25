@@ -302,6 +302,7 @@ export function MentionPopover({ disabled, onSelect, pinned = [], isPinned, onTo
                     p.kind === 'vfs-dir' ? p.label :
                     p.kind === 'vfs-file' ? p.label :
                     p.kind === 'rag-collection' ? p.collection :
+                    p.kind === 'worker-role' ? `@${p.role}` :
                     p.name;
                   const KindIcon =
                     p.kind === 'prompt' ? FileText :
