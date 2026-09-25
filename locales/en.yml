@@ -915,6 +915,12 @@ chat:
     pickRegion: Crop region
     cancelRegionPick: Cancel crop
     regionPickFailed: Failed to capture region
+    cropEditor:
+      insertToChat: Insert into chat
+      draw: Draw
+      text: Text
+      erase: Eraser
+      undo: Undo
     openStorage: Filesystem
     workerTeam:
       fast: Fast

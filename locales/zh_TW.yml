@@ -911,6 +911,12 @@ chat:
     pickRegion: 裁切區域
     cancelRegionPick: 取消裁切
     regionPickFailed: 區域截圖失敗
+    cropEditor:
+      insertToChat: 插入到對話
+      draw: 畫筆
+      text: 文字
+      erase: 橡皮擦
+      undo: 復原
     openStorage: 檔案系統
     screenshot: 螢幕截圖
     uploadFile: 上傳檔案

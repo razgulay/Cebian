@@ -3,6 +3,8 @@ import { executeInTabWithArgs, getActiveTabId } from '@/lib/browser/tab-actions'
 import { ensureOffscreen } from '@/lib/tools/offscreen';
 import type { OffscreenResponse } from '@/entrypoints/offscreen/main';
 import { t } from '@/lib/i18n';
+import { debugLog } from '@/lib/debug/log';
+import { createRegionEditorInPage } from '@/lib/browser/region-editor';
 
 /** crop-image / composite-vertical offscreen responses share the same
  *  `{ result?: string; error?: string }` shape — the picker only cares
@@ -535,7 +537,12 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
       const dx = edgeSpeed(lastCursor.x, window.innerWidth);
       const dy = edgeSpeed(lastCursor.y, window.innerHeight);
       if (dx !== 0 || dy !== 0) {
-        window.scrollBy(dx, dy);
+        // `behavior: 'instant'`——默认 scrollBy 会跟随页面自身的 CSS
+        // `scroll-behavior: smooth` 变成动画。动画不只在拖拽时碍事：
+        // 松手后尾巴还在跑，capture 阶段 probe 读到的 scroll 是半路值，
+        // 拍完页面又挪一格——「crop 整体偏移一条」的经典来源。instant
+        // 让 marquee 与页面逐帧锁死。
+        window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
         // The page scrolled — recompute dragEnd in *document* coords so
         // the marquee stays anchored to where the user is dragging.
         if (dragEnd) {
@@ -639,7 +646,9 @@ function createPickerInPage(iframeEnterHint: string, mode: PickerMode = 'click')
       if (e.deltaMode === 1) { dy *= LINE_PX; dx *= LINE_PX; }
       else if (e.deltaMode === 2) { dy *= PAGE_PX; dx *= PAGE_PX; }
       if (dx !== 0 || dy !== 0) {
-        window.scrollBy(dx, dy);
+        // 与 tickScroll 同理——instant，避免 smooth 页面上 marquee 追不上
+        // cursor、松手后动画尾巴继续挪动页面污染 capture 锚点。
+        window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
         // Update marquee to reflect the new viewport position.
         if (lastCursor) {
           dragEnd = { x: lastCursor.x + window.scrollX, y: lastCursor.y + window.scrollY };
@@ -834,7 +843,11 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
           // 4. 通过 `composite-vertical` 在 offscreen 里把条纵向粘起来。
           // 5. 还原原始 scroll。
           const cssRect = msg.rect as { x: number; y: number; width: number; height: number };
-          cleanup();
+          // 此处**不能**提前 cleanup()——旧流程 stitch 完直接 resolve，无
+          // 需再收消息；新流程 stitch 后注入标注编辑器，`picker-region-
+          // annotated` / `picker-cancel` 都要靠 messageListener 接回来，
+          // tabListener 也要活到编辑器关闭才能兜住导航。cleanup() 挪到各
+          // 终态分支（annotated / cancel / capture 失败 / 注入失败降级）。
           void (async () => {
             try {
               const probe = await executeInTabWithArgs<[], { viewportWidth: number; viewportHeight: number; dpr: number; scrollX: number; scrollY: number }>(
@@ -861,7 +874,8 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
               await ensureOffscreen();
 
               // 滚动-拼接：每个条从顶向下抓一个 viewport 高度的切片，
-              // 不重叠、不留缝（页面按精确的 CSS px 滚动，渲染器会照办）。
+              // 不重叠、不留缝（`behavior: 'instant'` 落定后按读回的
+              // 实际 scroll 对齐锚点——文档底部被 clamp 的情况也覆盖）。
               //
               // 水平 scroll 在整个循环里钉死在 `origScrollX`。最早的做法是
               // 横向 `scrollTo(cssRect.x, y)`，但多数页面无法横向滚动——
@@ -872,6 +886,42 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
               // rect 比 viewport 还宽，超出 `origScrollX + viewportWidth`
               // 那段就抓不到（绝大多数页面横向不滚动，所以这条是
               // 已知的、暂时接受的小限制）。
+              // 截图期间临时隐藏所有 position: fixed / sticky 元素（导航条、
+              // 悬浮球、cookie 横幅…）。captureVisibleTab 拍的是整个
+              // viewport——固定元素会印进每条 strip 顶部 N px：按「图像行 =
+              // 锚点起的文档行」映射裁切时，这 N px 既不是文档内容
+              // （selection 顶部同位置内容被 header 盖住丢失→「上边多一条、
+              // 下边少一条」），又会在拼接图里每条 strip 重复出现一次（用户
+              // 实测 header 被复印进图）。用 visibility:hidden 而非
+              // display:none——sticky 元素占文档流空间，display:none 会引发
+              // reflow、文档高度和锚点全乱。恢复时按 data 标记找回；元素
+              // 自带的内联 visibility 值先存进 data 属性，恢复原样归还，
+              // 不碰没动过的元素。
+              const hiddenFixedCount = await executeInTabWithArgs<[], number>(
+                tabId,
+                () => {
+                  let n = 0;
+                  for (const el of document.querySelectorAll<HTMLElement>('body *')) {
+                    const cs = getComputedStyle(el);
+                    if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+                    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                    el.setAttribute('data-cebian-capture-hide', '1');
+                    // 内联 visibility 原值快照：恢复时原样归还，避免
+                    // removeProperty 抹掉作者显式写的 `visibility: visible`
+                    // （那种写法是为了逃出祖先的 hidden 继承）。
+                    if (el.style.visibility) {
+                      el.setAttribute('data-cebian-capture-hide-prev', el.style.visibility);
+                    }
+                    el.style.setProperty('visibility', 'hidden', 'important');
+                    n++;
+                  }
+                  return n;
+                },
+                [],
+              );
+              debugLog.info('browser', 'picker:region:hidden-fixed', {
+                count: hiddenFixedCount,
+              });
               const strips: { base64: string }[] = [];
               const viewportWidth = Math.max(1, Math.round(probe.viewportWidth));
               const origScrollX = probe.scrollX;
@@ -885,30 +935,16 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
                 // 上一条距今不到 550ms 就等到满再拍。
                 const CAPTURE_MIN_INTERVAL_MS = 550;
                 let lastCaptureAt = 0;
-                let y = cssRect.y;
-                while (y < cssRect.y + cssRect.height) {
-                  // 节流：上一条 capture 距今不足 550ms 就等到满再往下走。
-                  // 第一条 lastCaptureAt=0，跳过。
+                // 节流 + capture 合成一个 helper：stability 重试也会再拍，
+                // 每次都得先满足 550ms 间隔，避免撞
+                // MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota。
+                const throttledCapture = async (): Promise<string> => {
                   if (lastCaptureAt > 0) {
                     const elapsed = Date.now() - lastCaptureAt;
                     if (elapsed < CAPTURE_MIN_INTERVAL_MS) {
                       await new Promise<void>((r) => setTimeout(r, CAPTURE_MIN_INTERVAL_MS - elapsed));
                     }
                   }
-                  const remaining = cssRect.y + cssRect.height - y;
-                  const stripHeight = Math.min(viewportHeight, remaining);
-                  // 只滚竖向。横向保持在用户松手时的 scrollX，rect 在
-                  // viewport 里的左缘从那里算起。
-                  await executeInTabWithArgs<[number, number], void>(
-                    tabId,
-                    (sx, sy) => window.scrollTo(sx, sy),
-                    [origScrollX, Math.max(0, y)],
-                  );
-                  // 等一帧 + 一个小的 idle 窗口让布局稳定（sticky header、
-                  // 懒加载图、scroll snap）。
-                  await new Promise<void>((r) => requestAnimationFrame(() => r()));
-                  await new Promise<void>((r) => setTimeout(r, 40));
-
                   // `chrome.tabs.captureVisibleTab` 的第一个参数是 `windowId`、
                   // 不是 `tabId`——传 tabId 进去 Chrome 去找一个不存在的 window，
                   // 每次都静默失败。picker 在用户当前 active tab 里，松手时
@@ -917,16 +953,119 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
                   // `screenshot.ts` 的 activate-target-tab 模式可以兜底——
                   // 当前常见的「picker 仍在前台」场景用不上。
                   const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 85 });
-                  const fullBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
                   lastCaptureAt = Date.now();
+                  return dataUrl;
+                };
+                let y = cssRect.y;
+                while (y < cssRect.y + cssRect.height) {
+                  const remaining = cssRect.y + cssRect.height - y;
+                  const stripHeight = Math.min(viewportHeight, remaining);
+                  // Fast path：整条 rect 完整落在抓取开始时的 viewport 内
+                  // （最常见的单屏选择）→ **完全不动页面**。静止页面的锚点
+                  // 就是 probe 时的 scrollY；没有 scrollTo 就没有 smooth
+                  // 动画 / mandatory snap 的 re-snap / scroll anchoring
+                  // 这些「滚动之后还会再动」的竞态，像素级精确；顺带去掉
+                  // 了页面凭空跳一下的 UX 噪音。
+                  const fitsCurrentViewport =
+                    cssRect.y >= origScrollY &&
+                    cssRect.y + cssRect.height <= origScrollY + viewportHeight;
+                  if (!fitsCurrentViewport) {
+                    // 只滚竖向。横向保持在用户松手时的 scrollX，rect 在
+                    // viewport 里的左缘从那里算起。`behavior: 'instant'`
+                    // 绕开页面自己的 CSS `scroll-behavior: smooth`——smooth
+                    // 动画要 300ms+ 才落定，等待窗口会拍在半路。strip top
+                    // 超过最大可滚位置（scrollHeight - viewportHeight）时
+                    // Chrome 会静默 clamp，锚点比请求值更靠上——所以锚点
+                    // 必须读回，不能按请求值算。
+                    await executeInTabWithArgs<[number, number], void>(
+                      tabId,
+                      (sx, sy) => window.scrollTo({ left: sx, top: sy, behavior: 'instant' }),
+                      [origScrollX, Math.max(0, y)],
+                    );
+                  }
+                  // 等一帧 + 一个小的 idle 窗口让布局稳定（sticky header、
+                  // 懒加载图、snap 的 re-snap 都发生在 scroll 之后的帧——
+                  // 必须等它们落定）。
+                  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+                  await new Promise<void>((r) => setTimeout(r, 40));
 
-                  // 按本条的 rect↔viewport 交集裁。捕获出来的图像锚定在
-                  // 文档坐标 (origScrollX, y)，尺寸 viewportWidth × stripHeight
-                  // （CSS px），发给 offscreen 的 crop-image 要 IMAGE px，
-                  // 所以乘 DPR。`Math.max(0, ...)` / `Math.max(1, ...)` 是
-                  // 浮点噪声 + 未来重构的安全网，按构造实际上不可达。
-                  const ix0 = Math.max(cssRect.x, origScrollX);
-                  const ix1 = Math.min(cssRect.x + cssRect.width, origScrollX + viewportWidth);
+                  // ── Stability loop：读锚 → 拍 → 再读锚 ──
+                  // 页面在「读锚」与「capture」之间仍可能自己挪动：拖拽期
+                  // edge auto-scroll 的 smooth 尾巴、JS smooth-scroll 库
+                  // （Lenis 之类）逐帧 re-assert scroll、scroll anchoring、
+                  // 懒加载图撑高上方内容。任何一种都会让 crop 窗口整体
+                  // 偏移 Δ——用户实测「上边缺一条、下边多一条」正是 capture
+                  // 瞬间页面还在向下滑。对策：capture 前后各读一次 scroll，
+                  // 不一致（>0.5px）就等页面静止后重拍（上限 3 次）；crop
+                  // 一律用 **capture 之后** 读到的锚——它离被拍下的那帧最近。
+                  const readAnchor = () =>
+                    executeInTabWithArgs<[], { x: number; y: number }>(
+                      tabId,
+                      () => ({ x: window.scrollX, y: window.scrollY }),
+                      [],
+                    );
+                  const MAX_CAPTURE_ATTEMPTS = 3;
+                  let anchor: { x: number; y: number } | null = null;
+                  let fullBase64 = '';
+                  let stable = false;
+                  for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS && !stable; attempt++) {
+                    if (attempt > 1) {
+                      // 上一次不稳定——等动画尾巴走完，并把页面 instant
+                      // 拉回本条目标位（可能已被 smooth 库拖离 strip），
+                      // 再走一遍 settle。
+                      await new Promise<void>((r) => setTimeout(r, 120));
+                      await executeInTabWithArgs<[number, number], void>(
+                        tabId,
+                        (sx, sy) => window.scrollTo({ left: sx, top: sy, behavior: 'instant' }),
+                        [origScrollX, Math.max(0, y)],
+                      );
+                      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+                      await new Promise<void>((r) => setTimeout(r, 40));
+                    }
+                    const pre = await readAnchor();
+                    if (!pre || !Number.isFinite(pre.x) || !Number.isFinite(pre.y)) {
+                      throw new Error('Region capture: scroll probe returned no result');
+                    }
+                    const dataUrl = await throttledCapture();
+                    const post = await readAnchor();
+                    stable =
+                      !!post && Number.isFinite(post.x) && Number.isFinite(post.y) &&
+                      Math.abs(post.x - pre.x) <= 0.5 && Math.abs(post.y - pre.y) <= 0.5;
+                    // post 读距被拍下的那帧最近——无论 stable 与否都以它为准；
+                    // 不 stable 时只是这帧不可信，交给下一轮重拍。
+                    anchor = post && Number.isFinite(post.x) && Number.isFinite(post.y) ? post : pre;
+                    if (!stable) {
+                      debugLog.warn('browser', 'picker:region:unstable-anchor', {
+                        attempt,
+                        stripTop: y,
+                        pre,
+                        post: post ?? null,
+                      });
+                    }
+                    if (stable) {
+                      fullBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
+                    }
+                  }
+                  if (!anchor || !fullBase64) {
+                    throw new Error('Region capture: page kept scrolling during capture (no stable anchor)');
+                  }
+                  // 原样使用读回值，不做 Math.max(0, ...) clamp——RTL 页面
+                  // （dir="rtl"）向左滚时 Chrome 返回**负** scrollX，clamp
+                  // 成 0 会把锚点算错、横向裁偏。
+                  const actualScrollX = anchor.x;
+                  const actualScrollY = anchor.y;
+
+                  // 按本条的 rect↔实际 viewport 交集裁。捕获出来的图像锚定
+                  // 在文档坐标 (actualScrollX, actualScrollY)——上面读回的
+                  // **实际**滚动位置，不是请求值：strip 靠近文档底部时
+                  // scrollTo 被 clamp，按请求值算会把 selection 上方的内容
+                  // 裁进图、底部切掉（v1.7.1 起「crop 不对位」的根因）。
+                  // crop 的 y = strip top 相对实际锚点的偏移。图像尺寸
+                  // viewportWidth × viewportHeight（CSS px），发给 offscreen
+                  // 的 crop-image 要 IMAGE px，所以乘 DPR。`Math.max(0, ...)` /
+                  // `Math.max(1, ...)` 是浮点噪声 + 未来重构的安全网。
+                  const ix0 = Math.max(cssRect.x, actualScrollX);
+                  const ix1 = Math.min(cssRect.x + cssRect.width, actualScrollX + viewportWidth);
                   const cropWidthCss = Math.max(0, ix1 - ix0);
                   if (cropWidthCss <= 0) {
                     // 本条 rect 横向不与 viewport 相交（`scrollX` 锁住后
@@ -938,8 +1077,8 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
                     type: 'crop-image',
                     imageData: fullBase64,
                     crop: {
-                      x: Math.max(0, Math.round((ix0 - origScrollX) * dpr)),
-                      y: 0,
+                      x: Math.max(0, Math.round((ix0 - actualScrollX) * dpr)),
+                      y: Math.max(0, Math.round((y - actualScrollY) * dpr)),
                       width: Math.max(1, Math.round(cropWidthCss * dpr)),
                       height: Math.max(1, Math.round(stripHeight * dpr)),
                     },
@@ -953,10 +1092,31 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
                 }
               } finally {
                 // 不论成功失败都要还原原始 scroll（tab 可能已经导航走了，catch 一下）。
+                // `behavior: 'instant'` 与抓取循环同理——绕开 smooth 动画，
+                // 确保用户视线立刻回到松手时的位置。
                 await executeInTabWithArgs<[number, number], void>(
                   tabId,
-                  (sx, sy) => window.scrollTo(sx, sy),
+                  (sx, sy) => window.scrollTo({ left: sx, top: sy, behavior: 'instant' }),
                   [origScrollX, origScrollY],
+                ).catch(() => { /* tab may have navigated away */ });
+                // 恢复截图期间隐藏的 fixed / sticky 元素（见循环前的 hide 步骤），
+                // 内联 visibility 原值从 data 属性归还。同样 catch——tab 导航
+                // 走时页面上已没有这些标记。
+                await executeInTabWithArgs<[], void>(
+                  tabId,
+                  () => {
+                    for (const el of document.querySelectorAll('[data-cebian-capture-hide]')) {
+                      const prev = el.getAttribute('data-cebian-capture-hide-prev');
+                      el.removeAttribute('data-cebian-capture-hide');
+                      el.removeAttribute('data-cebian-capture-hide-prev');
+                      if (prev != null) {
+                        (el as HTMLElement).style?.setProperty('visibility', prev);
+                      } else {
+                        (el as HTMLElement).style?.removeProperty('visibility');
+                      }
+                    }
+                  },
+                  [],
                 ).catch(() => { /* tab may have navigated away */ });
               }
 
@@ -979,17 +1139,59 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
                     return resp.result;
                   })());
 
-              resolve({
-                status: 'ok',
-                attachment: {
-                  type: 'image',
-                  source: 'region-select',
-                  data: finalBase64,
-                  mimeType: 'image/jpeg',
-                },
+              // Copilot 式流程：裁好的图不直接进 chat，先在页面上弹标注
+              // 编辑器（region-editor.ts），用户画完点 ✓ 才回 sidepanel。
+              // 编辑器复用同一个 message channel：
+              //   `cebian:picker-region-annotated` → 带 PNG base64 resolve ok
+              //   `cebian:picker-cancel`            → resolve cancelled（既有分支）
+              // 外部取消（导航 / 再按一次按钮）走 currentCleanup 的
+              // allFrames 清理，钩子 `__cebianEditorCleanup` 在下方注入。
+              await executeInTabWithArgs<
+                [
+                  string,
+                  string,
+                  { x: number; y: number; width: number; height: number },
+                  {
+                    insertToChat: string;
+                    cancel: string;
+                    draw: string;
+                    text: string;
+                    erase: string;
+                    undo: string;
+                    copy: string;
+                  },
+                ],
+                void
+              >(
+                tabId,
+                createRegionEditorInPage,
+                [finalBase64, 'image/jpeg', cssRect, {
+                  insertToChat: t('chat.composer.cropEditor.insertToChat'),
+                  cancel: t('common.cancel'),
+                  draw: t('chat.composer.cropEditor.draw'),
+                  text: t('chat.composer.cropEditor.text'),
+                  erase: t('chat.composer.cropEditor.erase'),
+                  undo: t('chat.composer.cropEditor.undo'),
+                  copy: t('common.copy'),
+                }],
+              ).catch((err) => {
+                // 编辑器注入失败不能让整次裁剪白做——降级为旧行为（图直
+                // 接进 chat），错误留在 sidepanel console 排查。
+                console.error('[Region Picker] editor injection failed, falling back to direct attach:', err);
+                cleanup();
+                resolve({
+                  status: 'ok',
+                  attachment: {
+                    type: 'image',
+                    source: 'region-select',
+                    data: finalBase64,
+                    mimeType: 'image/jpeg',
+                  },
+                });
               });
             } catch (err) {
               console.error('[Region Picker] capture failed:', err);
+              cleanup();
               resolve({
                 status: 'error',
                 reason: 'injection-failed',
@@ -997,6 +1199,21 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
               });
             }
           })();
+          break;
+        }
+
+        case 'cebian:picker-region-annotated': {
+          // 编辑器 ✓——PNG base64 由 in-page canvas 导出，直接进 chat。
+          cleanup();
+          resolve({
+            status: 'ok',
+            attachment: {
+              type: 'image',
+              source: 'region-select',
+              data: msg.base64 as string,
+              mimeType: (msg.mimeType as string) || 'image/png',
+            },
+          });
           break;
         }
 
@@ -1016,20 +1233,25 @@ export async function startElementPicker(options: StartPickerOptions = {}): Prom
     // Setup: wire up cleanup so external callers can cancel
     currentCleanup = () => {
       cleanup();
-      // Invoke the in-page cleanup hook in every frame so iframe pickers are
-      // also torn down (the user may have entered an iframe before cancelling).
-      // Fallback to removing the host/cursor directly in case the hook is
-      // missing (e.g. previous session crashed before installing it).
+      // Invoke the in-page cleanup hooks in every frame so iframe pickers and
+      // the region annotation editor are also torn down (the user may have
+      // entered an iframe or be mid-annotation before cancelling). Fallback
+      // to removing the hosts/cursor directly in case the hooks are missing
+      // (e.g. previous session crashed before installing them).
       chrome.scripting.executeScript({
         target: { tabId, allFrames: true },
         func: () => {
           const w = window as any;
+          if (typeof w.__cebianEditorCleanup === 'function') {
+            w.__cebianEditorCleanup();
+          }
           if (typeof w.__cebianPickerCleanup === 'function') {
             w.__cebianPickerCleanup();
             return;
           }
           document.getElementById('cebian-picker-host')?.remove();
           document.getElementById('cebian-picker-cursor')?.remove();
+          document.getElementById('cebian-editor-host')?.remove();
         },
       }).catch(() => {});
       resolve({ status: 'cancelled' });

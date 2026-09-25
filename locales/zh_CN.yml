@@ -911,6 +911,12 @@ chat:
     pickRegion: 裁剪区域
     cancelRegionPick: 取消裁剪
     regionPickFailed: 区域截图失败
+    cropEditor:
+      insertToChat: 插入到对话
+      draw: 画笔
+      text: 文字
+      erase: 橡皮擦
+      undo: 撤销
     openStorage: 文件系统
     screenshot: 截图
     uploadFile: 上传文件
