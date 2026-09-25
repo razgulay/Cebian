@@ -55,6 +55,13 @@ export type MentionChip =
    *  （选项 B：UI 可见 + 指令并存）。 */
   | { kind: 'worker-role'; id: string; role: WorkerRole };
 
+/** 会进 resolveMentionToAttachment 解析批次、能产出 attachment 的 chip
+ *  集合。worker-role chip 是 directive-only 的（ChatInput 在 send 阶段自
+ *  行注入 route directive），resolver 对它恒返回 null——若混进解析批次，
+ *  这个必然的 null 会被调用方误判成「读取失败」，每次 @worker 发送都弹
+ *  「Couldn't read mention」假警告。 */
+export type AttachableMentionChip = Exclude<MentionChip, { kind: 'worker-role' }>;
+
 /** "Pin" an item so its content rides along on every outgoing message of
  *  the chat. Pin lifetime depends on the chip kind:
  *    • prompt / skill → global (stored in `local:composerPinnedContexts`,

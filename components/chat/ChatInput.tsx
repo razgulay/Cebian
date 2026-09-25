@@ -41,7 +41,7 @@ import {
   type Attachment,
 } from '@/lib/agent/attachments';
 import { ragSettings as ragSettingsStorage } from '@/lib/rag';
-import { resolveMentions, resolveMentionToAttachment, PIN_AUTO_UNPIN_THRESHOLD, type MentionChip, type PinnedMention, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
+import { resolveMentions, resolveMentionToAttachment, PIN_AUTO_UNPIN_THRESHOLD, type AttachableMentionChip, type MentionChip, type PinnedMention, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { canvasPickChannel } from '@/lib/canvas/pick-channel';
@@ -752,20 +752,33 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
 
       // Worker-team role mention（@<role> token 已在用户 text 里保留——选项 B）：
-      // 解析 mention chip 把每条 worker-role 渲染成同形状的 DIRECTIVE，让主代理
-      // 据此选 dispatch_task role=<role>。与 quote / slash-command 同一管线——
-      // bubble parser 通过 [DIRECTIVE — ...] 形态剥离，UI 显示只剩 @<role> token
-      // + chip，多名 worker role 也按同一行的 directive body 拼接（id 标记防丢）。
+      // 把每条 worker-role 渲染成**带 instruction body** 的完整 DIRECTIVE 块，
+      // 与 COMMAND / PROMPT 同机制——system prompt 把 inline block 当用户指令
+      // 对待，所以 body 本身写明「必须 delegate、不许自己答」。早期版本
+      // header 后没有 body，模型只看到一行 bracket 噪音，按 preamble 的
+      // carve-out（短问答自己做）直接原生工具开答，@mention 形同虚设。
+      // 每块自带 [END DIRECTIVE]（与 quote / slash 同形状，非贪婪 BLOCK_RE
+      // 逐块匹配），多名 role 各自成块。
       const roleDirectives: string[] = [];
       for (const m of mentionsRef.current) {
         if (m.kind === 'worker-role') {
           roleDirectives.push(
-            `[DIRECTIVE — ATTACHED ROUTE: "${m.role}" (id=${m.id})]`,
+            `[DIRECTIVE — ATTACHED ROUTE: "${m.role}" (id=${m.id})]\n\n` +
+              `The user explicitly routed this message to the \`${m.role}\` worker ` +
+              `via the @mention picker (Worker Team). Delegate the user's request to ` +
+              `that worker with delegate_task({ role: "${m.role}", ... }) — pass the ` +
+              `request (the text below the \`---\` separator, with the @${m.role} token ` +
+              `removed) as the task with enough context, and relay the worker's handoff ` +
+              `result back to the user. This routing is explicit: do NOT answer the ` +
+              `request yourself, even when it falls into a carve-out where you would ` +
+              `normally work directly. If the delegate_task tool is unavailable, tell ` +
+              `the user Worker Team is disabled instead of answering silently.` +
+              `\n\n[END DIRECTIVE]`,
           );
         }
       }
       if (roleDirectives.length > 0) {
-        const roleBlock = roleDirectives.join('\n') + '\n\n[END DIRECTIVE]';
+        const roleBlock = roleDirectives.join('\n\n');
         text = text.length > 0 ? `${roleBlock}\n\n---\n\n${text}` : roleBlock;
       }
 
@@ -780,25 +793,29 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       debugLog.info('ui', 'mention:resolve:start', { count: mentionChips.length });
       const resolvedMentions: ResolvedMentionAttachment[] = [];
       const failedNames: string[] = [];
-      if (mentionChips.length > 0) {
+      // worker-role chip 只产 directive（上方 roleDirectives 已注入），
+      // resolver 对它恒返回 null——混进解析批次会被误判成「读取失败」，
+      // 每次 @worker 发送都弹假警告，故过滤出解析批次。
+      const resolvableChips = mentionChips.filter(
+        (c): c is AttachableMentionChip => c.kind !== 'worker-role',
+      );
+      if (resolvableChips.length > 0) {
         const settled = await Promise.allSettled(
           // RAG chips need the outgoing user text as their retrieval query —
           // forward the post-slash-resolved `text` so the embedder sees what
           // the user actually wants, not the raw textarea draft.
-          mentionChips.map((chip) => resolveMentions([chip], text).then((r) => ({ chip, r }))),
+          resolvableChips.map((chip) => resolveMentions([chip], text).then((r) => ({ chip, r }))),
         );
         for (let i = 0; i < settled.length; i++) {
           const outcome = settled[i];
           if (outcome.status === 'rejected' || outcome.value.r.length === 0) {
-            const chip = mentionChips[i];
+            const chip = resolvableChips[i];
             const failedName =
               chip.kind === 'vfs-dir' || chip.kind === 'vfs-file'
                 ? chip.label
                 : chip.kind === 'rag-collection'
                   ? chip.collection
-                  : chip.kind === 'worker-role'
-                    ? chip.role
-                    : chip.name;
+                  : chip.name;
             failedNames.push(failedName);
           } else {
             resolvedMentions.push(outcome.value.r[0]);

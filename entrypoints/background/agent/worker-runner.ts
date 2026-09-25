@@ -54,9 +54,12 @@ import {
   workerRoleTimeouts,
   providerCredentials,
   customProviders,
+  searchEnginesConfig,
+  resolveSearchEnginesConfig,
   type ModelIdentity,
   type WorkerRole,
 } from '@/lib/persistence/storage';
+import { enabledSearchEngines } from '@/lib/search/engines';
 import { SKILL_ENTRY_FILE } from '@/lib/persistence/vfs-paths';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { acquireKeepAlive, releaseKeepAlive } from '../lifecycle/keepalive';
@@ -86,6 +89,7 @@ import { fsReadFileTool } from '@/lib/tools/fs-read-file';
 import { fsListTool } from '@/lib/tools/fs-list';
 import { fsSearchTool } from '@/lib/tools/fs-search';
 import { ragInspectTool } from '@/lib/tools/rag-inspect';
+import { createWebSearchTool } from '@/lib/tools/web-search';
 import { inspectTool } from '@/lib/tools/inspect';
 import { executeJsTool } from '@/lib/tools/execute-js';
 
@@ -2086,9 +2090,17 @@ export async function runWorker(options: RunWorkerOptions): Promise<WorkerHandof
     modelId: model.id,
   });
 
-  // 4. 工具集：role whitelist + tabId 注入
+  // 4. 工具集：role whitelist + tabId 注入。
+  // web_search 是工厂工具（引擎列表跟随用户当前配置，与主会话
+  // buildSessionToolArray 同一构造路径），不能进静态 WORKER_TOOL_UNIVERSE
+  // ——dispatch 时按当前配置现造一份并入池子；非 researcher role 会被
+  // whitelist 自然剥掉。
   const tabId = await getActiveTabId();
-  let tools = filterToolsForRole(WORKER_TOOL_UNIVERSE, role);
+  const searchConfig = await searchEnginesConfig.getValue();
+  const webSearchTool = createWebSearchTool(
+    enabledSearchEngines(resolveSearchEnginesConfig(searchConfig)),
+  );
+  let tools = filterToolsForRole([...WORKER_TOOL_UNIVERSE, webSearchTool], role);
   if (tabId != null) {
     tools = tools.map((t) => withDefaultTabId(t, tabId));
   }

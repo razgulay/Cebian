@@ -111,9 +111,9 @@ function matchUserRequest(raw: string): UserRequestBlock | null {
   return { start, end: trimmed.length, text: trimmed.slice(bodyStart, bodyEnd).trim() };
 }
 
-// ─── 内联指令块（mention chip + slash command + quote）───
+// ─── 内联指令块（mention chip + slash command + quote + worker @mention）───
 // 共享同一个开头格式：
-//   [DIRECTIVE — ATTACHED (PROMPT|SKILL|COMMAND|QUOTE): "name"( pinned="true")?]
+//   [DIRECTIVE — ATTACHED (PROMPT|SKILL|COMMAND|QUOTE|ROUTE): "name"( pinned="true")?]
 //   <body>
 //   [END DIRECTIVE]
 //   ---\n
@@ -128,7 +128,9 @@ function matchUserRequest(raw: string): UserRequestBlock | null {
 // 嵌入 raw `"`，所以 ChatInput 在塞 name 之前把 `"` 替换成全角引号 `＂`，
 // 保证 wire format 始终可解析。
 
-export type InlineDirectiveKind = 'prompt' | 'skill' | 'command' | 'quote';
+// 'route' 由 worker @mention 产生（OPEN_RE 能匹配到它，运行时确实会返回
+// 'route'——bubble 渲染对未知 kind 走默认 chip），类型如实包含。
+export type InlineDirectiveKind = 'prompt' | 'skill' | 'command' | 'quote' | 'route';
 
 export interface InlineDirective {
   kind: InlineDirectiveKind;

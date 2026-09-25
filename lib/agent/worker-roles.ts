@@ -32,6 +32,7 @@ import {
   TOOL_FS_READ_FILE,
   TOOL_FS_SEARCH,
   TOOL_RAG_INSPECT,
+  TOOL_WEB_SEARCH,
 } from '@/lib/tools/names';
 
 // ─── Role config shape ───
@@ -68,6 +69,7 @@ const FS_EDIT = TOOL_FS_EDIT_FILE;
 const FS_LIST = TOOL_FS_LIST;
 const FS_SEARCH = TOOL_FS_SEARCH;
 const RAG_INSPECT = TOOL_RAG_INSPECT;
+const WEB_SEARCH = TOOL_WEB_SEARCH;
 // 引用这两个只为测试断言；运行时 runner 不会再用到。这里「不导出的存在」本身
 // 表达「本模块知道这两个是禁词」。
 const FORBIDDEN_TOOLS = [TOOL_DELEGATE_TASK, TOOL_DELEGATE_DOM] as const;
@@ -258,15 +260,21 @@ export const WORKER_ROLES: Record<WorkerRole, WorkerRoleConfig> = {
   },
 
   // ── researcher ──────────────────────────────────────────────
-  // 信息搜集与综合。读 VFS + 查 RAG collection；产物只走 structured text
-  // reply，不写交付文件（toolWhitelist 没有 fs_create_file / fs_edit_file）。
+  // 信息搜集与综合。读 VFS + 查 RAG collection + web_search 抓新鲜信息
+  // （新闻 / 价格 / 时效性事实——VFS 与 RAG 都答不了的）。产物只走
+  // structured text reply，不写交付文件（toolWhitelist 没有
+  // fs_create_file / fs_edit_file），web_search 本身也是只读工具。
   researcher: {
     systemPrompt:
       'You are a researcher. Find and synthesize information by reading VFS ' +
-      'files (fs_read_file / fs_list / fs_search) and querying RAG collections ' +
-      '(rag_inspect). Output structured text in your reply. You are read-only: ' +
-      'do not claim to create or modify VFS files. Do not invoke browser-side tools.',
-    toolWhitelist: [FS_READ, FS_LIST, FS_SEARCH, RAG_INSPECT],
+      'files (fs_read_file / fs_list / fs_search), querying RAG collections ' +
+      '(rag_inspect), and fetching fresh information from the internet with ' +
+      'web_search({ query }) — use it for news, prices, recent events, or ' +
+      'anything the VFS / RAG cannot answer, and cite the source URL for ' +
+      'web-derived facts. Output structured text in your reply. You are ' +
+      'read-only: do not claim to create or modify VFS files. Do not invoke ' +
+      'browser-side tools.',
+    toolWhitelist: [FS_READ, FS_LIST, FS_SEARCH, RAG_INSPECT, WEB_SEARCH],
     displayName: 'Researcher',
     i18nKey: 'chat.workerTeamRoster.role.researcher',
     timeoutMs: 90_000,

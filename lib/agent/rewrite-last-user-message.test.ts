@@ -95,20 +95,26 @@ describe('rewriteLastUserMessage', () => {
   });
 
   it('preserves ATTACHED ROUTE directive (worker-role mention) — replaces only the user-typed suffix (regression)', () => {
-    // Subtask 3 of the worker-role mention feature: ChatInput.handleSend
-    // prepends `[DIRECTIVE — ATTACHED ROUTE: "<role>" (id=<uuid>)]` for each
-    // worker-role chip. The BG eventually broadcasts a session_state update;
-    // rewriteLastUserMessage must recognize this directive and preserve it
-    // while replacing only the user-typed suffix (otherwise the role
-    // instruction silently disappears on the next broadcast).
+    // ChatInput.handleSend prepends a COMPLETE ROUTE block per worker-role
+    // chip: header + multi-line instruction body (delegate via delegate_task,
+    // do not answer directly) + its own [END DIRECTIVE]. The BG eventually
+    // broadcasts a session_state update; rewriteLastUserMessage must
+    // recognize the directive and preserve it — body included — while
+    // replacing only the user-typed suffix (otherwise the role instruction
+    // silently disappears on the next broadcast).
     const text =
-      '[DIRECTIVE — ATTACHED ROUTE: "reviewer" (id=abc-123)]\n\n[END DIRECTIVE]\n\n---\n\nplz review my code';
+      '[DIRECTIVE — ATTACHED ROUTE: "reviewer" (id=abc-123)]\n\n' +
+      'The user explicitly routed this message to the `reviewer` worker via the @mention picker. ' +
+      "Delegate the user's request to that worker with delegate_task({ role: \"reviewer\", ... }).\n\n" +
+      '[END DIRECTIVE]\n\n---\n\nplz review my code';
     const messages = asAgentMessages([
       { role: 'user', content: [{ type: 'text', text }], timestamp: 1 },
     ]);
     const out = rewriteLastUserMessage(messages, 'plz review my code');
     const newText = (out[0] as any).content[0].text;
     expect(newText).toContain('[DIRECTIVE — ATTACHED ROUTE: "reviewer" (id=abc-123)]');
+    // body 一并保留——丢了它，下一轮 broadcast 后 model 又会自己答。
+    expect(newText).toContain('delegate_task({ role: "reviewer"');
     expect(newText).toContain('[END DIRECTIVE]');
     expect(newText).toContain('plz review my code');
     // 没被错误地按 "no directive" 整个清空。

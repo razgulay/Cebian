@@ -55,6 +55,9 @@ const UNIVERSE: readonly AgentTool<any>[] = [
   stubTool('rag_inspect'),
   stubTool('inspect'),
   stubTool('execute_js'),
+  // web_search 与生产一致进池子：runner dispatch 时由工厂按当前引擎配置
+  // 构造后并入（researcher whitelist 含它，其余 role 被 filter 剥掉）。
+  stubTool('web_search'),
   // 故意混入禁词 —— 测 filterToolsForRole 的「无条件剥」行为
   stubTool('delegate_task'),
   stubTool('delegate_dom'),
@@ -136,9 +139,11 @@ describe('filterToolsForRole', () => {
     expect(names).toEqual(['fs_read_file', 'fs_list']);
   });
 
-  it('researcher 有 fs_读 + rag_inspect，无浏览器工具', () => {
+  it('researcher 有 fs_读 + rag_inspect + web_search，无写工具', () => {
+    // web_search（@researcher 需要抓新闻 / 价格等新鲜信息）只给
+    // researcher；其余 role 的 whitelist 不含它，自然被 filter 剥掉。
     const names = filterToolsForRole(UNIVERSE, 'researcher').map((t) => t.name);
-    expect(names).toEqual(['fs_read_file', 'fs_list', 'fs_search', 'rag_inspect']);
+    expect(names).toEqual(['fs_read_file', 'fs_list', 'fs_search', 'rag_inspect', 'web_search']);
   });
 
   it('无论 whitelist 怎么写，禁词永远被剥（belt-and-suspenders）', () => {

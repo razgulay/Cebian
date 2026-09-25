@@ -330,6 +330,27 @@ describe('stripDirectives', () => {
       '[END DIRECTIVE]\n\n---\n\nxin chào';
     expect(stripDirectives(text)).toBe('xin chào');
   });
+
+  it('剥掉带 instruction body 的 ROUTE 块（worker @mention 生产形状）', () => {
+    // worker-role mention 的完整 wire 形状：header + 多行 instruction body
+    // + 自带 [END DIRECTIVE]。body 里出现 delegate_task / --- 等字样都不
+    // 影响剥离——BLOCK_RE 以 [END DIRECTIVE] 为唯一结束锚，body 在块内被
+    // 一并移除。
+    const text =
+      '[DIRECTIVE — ATTACHED ROUTE: "researcher" (id=abc-123)]\n\n' +
+      'The user explicitly routed this message to the `researcher` worker via the @mention picker.\n' +
+      'Delegate with delegate_task({ role: "researcher" }).\n\n' +
+      '[END DIRECTIVE]\n\n---\n\nphân tích giá vàng hôm nay';
+    expect(stripDirectives(text)).toBe('phân tích giá vàng hôm nay');
+  });
+
+  it('相邻两个 ROUTE 块（多名 role 各自带 body）逐块剥离', () => {
+    const block = (role: string) =>
+      `[DIRECTIVE — ATTACHED ROUTE: "${role}" (id=x-${role})]\n\n` +
+      `route to ${role} via delegate_task.\n\n[END DIRECTIVE]`;
+    const text = `${block('frontend_coder')}\n\n${block('reviewer')}\n\n---\n\ntask`;
+    expect(stripDirectives(text)).toBe('task');
+  });
 });
 
 describe('extractInlineDirectives', () => {
@@ -368,6 +389,17 @@ describe('extractInlineDirectives', () => {
       '[END DIRECTIVE]\n\n---\n\nuser input';
     expect(extractInlineDirectives(text)).toEqual([
       { kind: 'quote', name: 'quote <Trung Quốc> quote', pinned: false },
+    ]);
+  });
+
+  it('ROUTE 类型（worker @mention）— 识别 role name 与 (id=...) 后缀', () => {
+    // worker-role mention 的 header 带 (id=<uuid>) 后缀（OPEN_RE 的可选
+    // 括号段），kind 解析为 'route'——bubble 对未知 kind 走默认 chip。
+    const text =
+      '[DIRECTIVE — ATTACHED ROUTE: "frontend_coder" (id=abc-123)]\n\n' +
+      'route body\n\n[END DIRECTIVE]\n\n---\n\nhi';
+    expect(extractInlineDirectives(text)).toEqual([
+      { kind: 'route', name: 'frontend_coder', pinned: false },
     ]);
   });
 
