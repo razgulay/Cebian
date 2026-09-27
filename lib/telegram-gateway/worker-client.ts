@@ -15,6 +15,7 @@
 // Injectable `WebSocketCtor` for tests — production code passes `globalThis.WebSocket`.
 
 import type {
+  AgentStateFrame,
   ConnectionStatus,
   InboundMessage,
   OutboundAction,
@@ -50,6 +51,11 @@ export interface WorkerClientHandle {
    *  `OutboundActionResult` (or rejects on `close()` / `signal.abort` if the
    *  WS was already gone). */
   sendOutbound(action: OutboundAction): Promise<OutboundActionResult>;
+  /** One-way telemetry（`agent_state`）：fire-and-forget，**无 ack**。WS 未 OPEN
+   *  时静默丢弃——排队旧状态跨重连重放会乱序，下一个 transition 自然带来新状态。
+   *  不要用 `sendOutbound` 发送本 frame：gateway 永不 reply，pendingAcks 会
+   *  永久 pending。 */
+  sendState(frame: AgentStateFrame): void;
   /** Stop reconnect + close any open socket. Idempotent. */
   close(): void;
   /** Sync read of current status (cheap). */
@@ -300,6 +306,15 @@ export function createWorkerClient(opts: WorkerClientOptions): WorkerClientHandl
       return () => { statusListeners.delete(cb); };
     },
     sendOutbound,
+    sendState(frame) {
+      // 未连接 → 丢弃（见接口注释）
+      if (!ws || ws.readyState !== WS_OPEN) return;
+      try {
+        ws.send(JSON.stringify(frame));
+      } catch {
+        /* socket died mid-send — close handler will clean up */
+      }
+    },
     close() {
       if (closed) return;
       closed = true;

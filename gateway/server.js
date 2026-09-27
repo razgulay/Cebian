@@ -20,6 +20,8 @@
 //                          reply_to_message_id?, message_id? (watchdog cancel) }
 //                        { kind: 'sendMediaGroup', request_id, chat_id,
 //                          media: InputMediaPhoto[], reply_to_message_id? }
+//                        { kind: 'agent_state', chat_id, state, tool?, ts }
+//                          （one-way telemetry，无 request_id、不回 ack——/status 读）
 //   Worker → extension : { kind: 'sendMessage_result', request_id, ok, message_id?, error? }
 //                        { kind: 'gateway_result', request_id, ok, error? }（后两种 action 用）
 //
@@ -38,6 +40,70 @@ const PORT = Number(env.PORT || 8000);
 
 // Server-side WebSocket sockets đang sống (set để delete O(1) trên close).
 const clients = new Set();
+
+// ─── Observability state（fail-loud：让"沉默"可读）───
+// Timestamps 均为 epoch ms；null = 从未发生。/health v2 与 /status 消费这些值
+// ——没有时间戳就无法观测（handoff 原则 3）。
+const startedAt = Date.now();
+let lastInboundAt = null;         // webhook 收到 Telegram 消息/回调
+let lastBroadcastAt = null;       // gateway 向 extension 广播 frame
+let lastExtensionActionAt = null; // extension 发起 action（**不含** ping——
+                                  // 算上 ping 的话 15s 心跳会让它永远新鲜，失去诊断意义）
+/** String(chat_id) → { state, tool, at }。extension 经 `agent_state` one-way
+ *  frame 主动申报（不 reply）；waiting_user = ask_user 正在等用户作答。 */
+const agentStates = new Map();
+
+// ─── Stall detector（re-arm + fire-gate）───
+// Timer 语义 = 「距最后一条用户可见 action 已 45s」。extension 在 agent 运行期
+// 间每 ~4s 刷新 typing（sendChatAction），每条 STALL_CLEARING_KINDS frame 都会
+// re-arm——只有活动真正停止 45s 才触发，覆盖 run 中途 Chrome 被杀 / LLM 断连
+// 这类最常见的静默失败。
+// Fire-gate：到点后只有 extension 申报的 agent_state 处于 thinking / tool 才发
+// 警报——无 state（旧 extension 从不发 agent_state）或 idle / waiting_user 一律
+// 抑制：旧行为不回退、turn 已结束或正在等用户作答时沉默是正常的。任何部署组合
+// （gateway 新 + extension 旧 / 反之）都不会误报。
+// timer .unref()（不吊住进程）；socket close 不清理——之后警报依然是正确信号。
+const STALL_MS = 45_000;
+const stallTimers = new Map(); // String(chat_id) → { timer, replyTo }
+
+function armStallWatch(chatId, replyToMessageId = null) {
+  const key = String(chatId);
+  // re-arm 时保留最初那条用户消息作 reply 锚点（只有 webhook 侧带 message_id）
+  const prev = stallTimers.get(key);
+  if (prev) clearTimeout(prev.timer);
+  const replyTo = replyToMessageId ?? prev?.replyTo ?? null;
+  const timer = setTimeout(() => {
+    stallTimers.delete(key);
+    const st = agentStates.get(key);
+    if (!st || st.state === 'idle' || st.state === 'waiting_user') return;
+    void callSendMessage(
+      chatId,
+      `⏳ Agent chưa có phản hồi sau ${STALL_MS / 1000}s — có thể đang kẹt. Gõ /status để kiểm tra.`,
+      { ...(replyTo != null ? { reply_to_message_id: replyTo } : {}) },
+    );
+  }, STALL_MS);
+  timer.unref();
+  stallTimers.set(key, { timer, replyTo });
+}
+
+function clearStallWatch(chatId) {
+  const key = String(chatId);
+  const entry = stallTimers.get(key);
+  if (entry) {
+    clearTimeout(entry.timer);
+    stallTimers.delete(key);
+  }
+}
+
+/** 这些 action 表示 extension 正在产出用户可见的响应 → re-arm 该 chat 的监视
+ *  （45s 从最后一个 action 重新起算，不是第一次 action 就永久解除）。 */
+const STALL_REARM_KINDS = new Set([
+  'sendMessage',
+  'editMessage',
+  'sendChatAction',
+  'sendPhoto',
+  'sendMediaGroup',
+]);
 
 /** Constant-time string compare — so byte cùng độ dài, không lộ timing. */
 function safeEqual(a, b) {
@@ -398,11 +464,25 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
 
   if (url.pathname === '/health') {
+    // Observability v2：每个状态都带时间戳——旧 payload 无时间，健康容器与死了
+    // 3 小时的容器看起来一样。sinceLastPongMs 是核心诊断指标（extension 心跳
+    // 15s，>60s = socket half-open，但 clients.size 仍在数它）。
+    const now = Date.now();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: 'ok',
+      status: clients.size > 0 ? 'ok' : 'degraded',
       clients: clients.size,
-      ts: Date.now(),
+      ts: now,
+      uptimeSec: Math.round((now - startedAt) / 1000),
+      lastInboundAt,
+      lastBroadcastAt,
+      lastExtensionActionAt,
+      clientsDetail: [...clients].map((ws) => ({
+        connectedAt: ws.connectedAt,
+        lastPongAt: ws.lastPongAt,
+        ageMs: now - ws.connectedAt,
+        sinceLastPongMs: now - ws.lastPongAt,
+      })),
       hasToken: Boolean(env.TELEGRAM_BOT_TOKEN),
       hasSecret: Boolean(env.TELEGRAM_WEBHOOK_SECRET),
       hasWsToken: Boolean(env.WS_AUTH_TOKEN),
@@ -451,6 +531,7 @@ const server = http.createServer(async (req, res) => {
     // （问答要等用户读题作答，5s 会把键盘改没），过期清理由 extension 负责，
     // gateway 对 au: 无状态；其余（`cap_*` 等）走原 /tabs 截图流程，行为原状。
     if (update.callback_query) {
+      lastInboundAt = Date.now();
       const cq = update.callback_query;
       const cbData = typeof cq.data === 'string' ? cq.data : '';
       const isAskUser = cbData.startsWith('au:');
@@ -496,6 +577,7 @@ const server = http.createServer(async (req, res) => {
       for (const ws of clients) {
         try { ws.send(payload); } catch { clients.delete(ws); }
       }
+      lastBroadcastAt = Date.now();
       // 仅 /tabs 截图回调 arm 5s watchdog；ask_user 的键盘存活期以分钟计
       // （10 分钟过期由 extension 侧清理），gateway 对 au: 无状态。
       if (!isAskUser) armCallbackWatchdog(chatId, messageId);
@@ -504,6 +586,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Tin thường + edit đều forward (khớp wire contract)。
+    // 先快照再打点——/status 自身也会更新 lastInboundAt，若直接读当前值，
+    // 「Tin cuối từ Telegram」将永远是 0s，诊断意义归零。
+    const prevInboundAt = lastInboundAt;
+    lastInboundAt = Date.now();
     const message = update.message ?? update.edited_message;
     if (!message || typeof message.text !== 'string' || message.text.length === 0) {
       res.writeHead(200).end('OK');
@@ -513,6 +599,42 @@ const server = http.createServer(async (req, res) => {
     // Whitelist fail-closed：ngoài danh sách → 200 OK im lặng (200 để Telegram
     // ngừng retry, không broadcast gì xuống extension)。
     if (!isChatAllowed(message.chat.id)) {
+      res.writeHead(200).end('OK');
+      return;
+    }
+
+    // ─── /status · /ping — gateway TỰ trả lời，不转发 agent ───
+    // 必须排在 clients.size === 0 guard **之前**：extension offline 的时刻——
+    // 正是用户最需要它的时刻——命令不能被吞。顺序：whitelist → /status →
+    // guard → broadcast。@botname 后缀与 /tabs 的 regex 保持一致（群聊）。
+    const cmd = message.text.trim().toLowerCase();
+    if (/^\/(status|ping)(@\S+)?$/.test(cmd)) {
+      const now = Date.now();
+      const ago = (t) => (t ? `${Math.round((now - t) / 1000)}s trước` : 'chưa có');
+      const agent = agentStates.get(String(message.chat.id));
+      const lines = [
+        `🩺 Gateway: ${clients.size > 0 ? 'OK' : 'DEGRADED'}`,
+        `Extension online: ${clients.size}`,
+        `Uptime: ${Math.round((now - startedAt) / 60000)} phút`,
+        `Tin cuối từ Telegram: ${ago(prevInboundAt)}`,
+        `Lệnh cuối từ extension: ${ago(lastExtensionActionAt)}`,
+        `Agent: ${agent ? `${agent.state}${agent.tool ? ` (${agent.tool})` : ''} — ${ago(agent.at)}` : 'không rõ'}`,
+      ];
+      void callSendMessage(message.chat.id, lines.join('\n'), {
+        reply_to_message_id: message.message_id,
+      });
+      res.writeHead(200).end('OK');
+      return;
+    }
+
+    // Fail-loud：没有任何 extension online → 消息会广播进空 Set 然后蒸发。
+    // 直接告知用户，而不是 200 OK 静默吞掉。
+    if (clients.size === 0) {
+      void callSendMessage(
+        message.chat.id,
+        '⚠️ Không có Chrome extension nào online — tin của bạn chưa được xử lý. Mở Chrome rồi gửi lại.',
+        { reply_to_message_id: message.message_id },
+      );
       res.writeHead(200).end('OK');
       return;
     }
@@ -535,6 +657,10 @@ const server = http.createServer(async (req, res) => {
         clients.delete(ws);
       }
     }
+    lastBroadcastAt = Date.now();
+    // 新消息待 extension 处理 → 首次 arm（带 reply 锚点）。此后由 extension 的
+    // 每条用户可见 action re-arm——fire-gate 语义见 armStallWatch 上方的块注释。
+    armStallWatch(message.chat.id, message.message_id);
     res.writeHead(200).end('OK');
     return;
   }
@@ -568,10 +694,13 @@ server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws) => {
   clients.add(ws);
   ws.isAlive = true;
+  ws.connectedAt = Date.now();
+  ws.lastPongAt = Date.now();
   console.log(`[gateway] client connected (total: ${clients.size})`);
 
   ws.on('pong', () => {
     ws.isAlive = true;
+    ws.lastPongAt = Date.now();
   });
 
   ws.on('message', async (raw) => {
@@ -601,8 +730,38 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // 到这里的每个 frame 都是 extension 的真实动作（ping 已被上面拦截）→ 标记
+    // 存活时间戳。
+    lastExtensionActionAt = Date.now();
+
+    // agent_state — one-way telemetry（extension → gateway），与 ping 同层处理：
+    // **不回** gateway_result（extension 用 sendState raw-send 发送，没有
+    // pendingAcks 等待 resolve）。排在 switch 与 token/whitelist gate 之前——
+    // frame 无害：/status 读 agentStates 仍需过 whitelist。
+    if (data.kind === 'agent_state') {
+      // 无 chat_id 的 frame 存进 map 会产生 "undefined" 垃圾 key——直接丢弃。
+      if (data.chat_id == null) return;
+      // 显式解除：turn 结束（idle）或正在等用户作答（waiting_user）时，
+      // 沉默是正常的——不需要 stall 警报。
+      if (data.state === 'idle' || data.state === 'waiting_user') {
+        clearStallWatch(data.chat_id);
+      }
+      agentStates.set(String(data.chat_id), {
+        state: typeof data.state === 'string' ? data.state : 'unknown',
+        tool: typeof data.tool === 'string' && data.tool.length > 0 ? data.tool : null,
+        at: Date.now(),
+      });
+      return;
+    }
+
     if (!data.chat_id) {
       return;
+    }
+
+    // extension 正在产出用户可见的响应 → re-arm 该 chat 的 stall 监视
+    // （45s 从最后一个 action 重新起算；reply 锚点保留最初那条用户消息）。
+    if (STALL_REARM_KINDS.has(data.kind)) {
+      armStallWatch(data.chat_id);
     }
 
     let result;

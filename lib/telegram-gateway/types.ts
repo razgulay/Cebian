@@ -142,6 +142,24 @@ export type GatewayResult =
 /** 所有 reply 都用 request_id correlate——worker-client 按此 union resolve。 */
 export type OutboundActionResult = OutboundResult | GatewayResult;
 
+// ─── One-way telemetry：agent_state（extension → Worker，无 ack）───
+
+export type AgentStateName = 'idle' | 'thinking' | 'tool' | 'waiting_user';
+
+/** agent 状态转变时由 extension 主动申报（**不按 timer**）。gateway 存进
+ *  agentStates 供 `/status` 读取：`waiting_user` = ask_user 正在等用户作答。
+ *  ⚠️ 用 `WorkerClientHandle.sendState()` 发送——**不要**走 `sendOutbound`：
+ *  gateway 对本 frame 永不 reply，`sendOutbound` 注册的 pendingAcks 会永久
+ *  pending。 */
+export interface AgentStateFrame {
+  kind: 'agent_state';
+  chat_id: number;
+  state: AgentStateName;
+  /** `tool` 状态下的工具名（thinking / idle / waiting_user 省略）。 */
+  tool?: string;
+  ts: number;
+}
+
 /** Connection state the extension client emits as it transitions through
  *  reconnect lifecycle. UI uses this to drive the header badge. */
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';

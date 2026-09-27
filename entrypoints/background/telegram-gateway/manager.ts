@@ -52,6 +52,7 @@ import {
 } from '@/lib/telegram-gateway/bootstrap';
 import { createTelegramAskController } from './ask-user';
 import type {
+  AgentStateName,
   InboundMessage,
   InlineKeyboardMarkup,
   TelegramCallback,
@@ -82,6 +83,18 @@ const askController = createTelegramAskController({
   cancelTool: (sessionId) => sessionManager.cancelTool(sessionId, TOOL_ASK_USER),
   getActiveTurnChatId: (sessionId) => activeTurns.get(sessionId)?.chatId ?? null,
 });
+
+/** 发送 agent_state one-way frame（gateway `/status` 的数据源）。只在状态
+ *  **转变**时调用（不按 timer）；WS 未连接时 sendState 静默丢弃。 */
+function emitAgentState(chatId: number, state: AgentStateName, tool?: string): void {
+  handle?.client.sendState({
+    kind: 'agent_state',
+    chat_id: chatId,
+    state,
+    ...(tool !== undefined ? { tool } : {}),
+    ts: Date.now(),
+  });
+}
 
 // ─── Inline-image 媒体分发常量 ───
 
@@ -159,6 +172,7 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
     lastSentStatus: '',
   };
   activeTurns.set(sessionId, state);
+  emitAgentState(msg.chat_id, 'thinking');
   const gateway = handle;
   if (!gateway) return;
   void gateway.client
@@ -614,11 +628,15 @@ function deleteStatusMessage(state: TelegramTurnState): void {
  * Turn 无法继续（无模型 / session 行缺失 / prompt 抛错）：清掉 typing timer，
  * 用户消息上的 reaction 换成 ❌——失败可见、聊天窗依然零打扰（不再发
  * 「⚠️ Agent error」占位文本）。state 留在表里——迟到的 agent_end 广播仍能收尾。
+ * 这条路径**不会**触发 agent_end 广播 → 必须在此显式发 idle：否则 gateway 的
+ * agentStates 永远停在 thinking——45s 后 stall fire-gate 误报一次，且 /status
+ * 对已死的 turn 谎报状态。
  */
 function abortTurnUx(sessionId: string): void {
   const state = activeTurns.get(sessionId);
   if (!state) return;
   clearTurnTimers(state);
+  emitAgentState(state.chatId, 'idle');
   void handle?.client
     .sendOutbound({
       kind: 'setMessageReaction',
@@ -960,6 +978,7 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       // 直接摘订阅、无 transition）——agent_end 兜底清 ask_user 的 Telegram 残留。
       // 幂等（正常路径 advance 前已清 map，此处 no-op）。
       askController.onToolResolved(msg.sessionId);
+      emitAgentState(state.chatId, 'idle');
       void finalizeTurn(state, msg.messages);
       break;
     case 'tool_pending':
@@ -969,6 +988,9 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       // resolved(旧) → pending(新) 的顺序，supersede 不踩 race。
       if (msg.toolName === TOOL_ASK_USER) {
         askController.onAskStart(msg.sessionId, msg.args as AskUserRequest);
+        // 通知 gateway：agent 正在等用户作答（/status 显示 waiting_user，
+        // 同时 stall detector 显式解除——等用户作答时沉默是正常的）。
+        emitAgentState(state.chatId, 'waiting_user');
       }
       break;
     case 'tool_resolved':
@@ -976,6 +998,8 @@ function handleTurnBroadcast(msg: ServerMessage): void {
       // 键盘残留。绝不 resolveTool/cancelTool（外部已收口）。
       if (msg.toolName === TOOL_ASK_USER) {
         askController.onToolResolved(msg.sessionId);
+        // 答案到位 → 回到 thinking（后续 workflow / 收尾继续跑）。
+        emitAgentState(state.chatId, 'thinking');
       }
       break;
     default:
@@ -1004,6 +1028,8 @@ export function setupTelegramGatewayManager(): void {
     const state = activeTurns.get(sessionId);
     if (state) {
       scheduleToolStatus(state, getToolLabel(toolName, args as Record<string, any> | undefined));
+      // agent_state: tool 转变（gateway /status 显示工具名 + re-arm stall watch）。
+      emitAgentState(state.chatId, 'tool', toolName);
     }
   });
   // First-frame push：sidepanel 的 channel 单例初始值是 'disconnected'。若 WS

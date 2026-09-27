@@ -165,6 +165,8 @@ beforeEach(async () => {
         ok: true,
         message_id: 1,
       })),
+      // manager 的 agent_state one-way emit 走这里（gateway 不回 ack）
+      sendState: vi.fn(),
     },
   }));
   ({ setupTelegramGatewayManager, telegramSessionId } = await import('./manager'));
@@ -546,6 +548,11 @@ describe('setupTelegramGatewayManager', () => {
     const countAfterError = client.sendOutbound.mock.calls.length;
     await vi.advanceTimersByTimeAsync(9_000);
     expect(client.sendOutbound.mock.calls.slice(countAfterError)).toHaveLength(0);
+    // abort 路径显式发 idle——gateway agentStates 不能停在 thinking
+    //（否则 stall fire-gate 误报一次，且 /status 对死 turn 谎报状态）。
+    const sendState = (client as unknown as { sendState: ReturnType<typeof vi.fn> }).sendState;
+    const states = sendState.mock.calls.map(([f]) => (f as { state?: string }).state);
+    expect(states).toContain('idle');
   });
 
   it('finalize：末帧 stopReason=error → reaction ❌ 锚到本轮消息，零消息', async () => {
@@ -1050,6 +1057,11 @@ describe('setupTelegramGatewayManager', () => {
       'B',
       '✍️ Nhập tay',
     ]);
+    // agent_state one-way emit：turn 开始 thinking，ask_user pending → waiting_user
+    const states = (client as unknown as { sendState: ReturnType<typeof vi.fn> }).sendState.mock.calls
+      .map(([f]) => f as { state?: string; tool?: string });
+    expect(states[0]).toMatchObject({ kind: 'agent_state', state: 'thinking' });
+    expect(states.at(-1)).toMatchObject({ state: 'waiting_user' });
   });
 
   it('wiring：非本 turn session / 非 ask_user 的 tool_pending → 忽略；其他 tool 状态行照常', async () => {
@@ -1143,6 +1155,12 @@ describe('setupTelegramGatewayManager', () => {
       ] as never[],
     });
     await flushAsync();
+
+    // agent_state: agent_end → idle（只有 agent_end 会发 idle——真正的 turn 终结
+    // 信号；队列 unblock 由下方 mockPrompt 两次的断言证明）
+    const sendState = (client as unknown as { sendState: ReturnType<typeof vi.fn> }).sendState;
+    const states = sendState.mock.calls.map(([f]) => (f as { state?: string }).state);
+    expect(states).toContain('idle');
 
     // 队列 unblock：第 2 条消息作为正常聊天跑 prompt（挂起期间没有被吞）
     expect(mockPrompt).toHaveBeenCalledTimes(2);

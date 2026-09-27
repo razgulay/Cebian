@@ -350,4 +350,40 @@ describe('createWorkerClient', () => {
     await expect(promises[0]).rejects.toThrow(/closed/);
     await expect(promises[1]).rejects.toThrow(/closed/);
   });
+
+  it('sendState: raw one-way send when OPEN (no ack registration)', () => {
+    const { instances, ctor: Ctor } = freshInstances();
+    const client = createWorkerClient({
+      url: 'wss://gw.example.com/ws',
+      token: 'tok',
+      WebSocketCtor: Ctor,
+    });
+    instances[0]!.open();
+
+    client.sendState({ kind: 'agent_state', chat_id: 1, state: 'tool', tool: 'web_search', ts: 42 });
+    expect(instances[0]!.sent).toEqual([
+      JSON.stringify({ kind: 'agent_state', chat_id: 1, state: 'tool', tool: 'web_search', ts: 42 }),
+    ]);
+    // 无 pendingAcks 是构造保证（void 返回、frame 无 request_id）——close() 正常收尾
+    client.close();
+  });
+
+  it('sendState: dropped silently when WS not OPEN (no queue, no stale replay)', () => {
+    const { instances, ctor: Ctor } = freshInstances();
+    const client = createWorkerClient({
+      url: 'wss://gw.example.com/ws',
+      token: 'tok',
+      WebSocketCtor: Ctor,
+    });
+
+    // CONNECTING——state frame 被丢弃而非排队：旧状态跨重连重放会乱序，
+    // 下一个 transition 自然带来新状态。
+    client.sendState({ kind: 'agent_state', chat_id: 1, state: 'thinking', ts: 1 });
+    expect(instances[0]!.sent).toEqual([]);
+
+    instances[0]!.open();
+    expect(instances[0]!.sent).toEqual([]); // open 时也不 flush 出旧 state
+
+    client.close();
+  });
 });
