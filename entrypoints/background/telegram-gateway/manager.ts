@@ -51,6 +51,7 @@ import {
   type BootstrapHandle,
 } from '@/lib/telegram-gateway/bootstrap';
 import { createTelegramAskController } from './ask-user';
+import { captureTabForTelegram } from './capture';
 import type {
   AgentStateName,
   InboundMessage,
@@ -460,6 +461,22 @@ async function dispatchTabsCallback(cb: TelegramCallback): Promise<void> {
       .catch((err) => console.warn('[telegram-gateway] callback editMessage failed:', err));
   };
 
+  // 开拍前先把 keyboard 消息改成「⏳ Đang chụp tab…」——一举三得：
+  //  1. gateway 的 editMessage 分支会 **cancel 5s callback watchdog**——capture
+  //     再慢（discarded tab 唤醒要 reload）也不会再出现「⚠️ Hết giờ chụp +
+  //     照片随后才到」的自相矛盾组合（bug 3 的 root cause）；
+  //  2. 不带 reply_markup → Bot API 保留原键盘；
+  //  3. 用户即时看到「在拍了」，慢路径不再是黑洞。
+  await gateway.client
+    .sendOutbound({
+      kind: 'editMessage',
+      request_id: crypto.randomUUID(),
+      chat_id: cb.chat_id,
+      message_id: cb.message_id,
+      text: '⏳ Đang chụp tab…',
+    })
+    .catch((err) => console.warn('[telegram-gateway] capture-start edit failed:', err));
+
   try {
     console.log('[telegram-gateway] /tabs capture start', { tabId });
     const { base64, title } = await captureTabForTelegram(tabId);
@@ -479,60 +496,14 @@ async function dispatchTabsCallback(cb: TelegramCallback): Promise<void> {
     }
     await editKeyboardMessage(`✅ Đã chụp: ${title || `tab ${tabId}`}`);
   } catch (err) {
-    console.warn('[telegram-gateway] /tabs capture failed (likely Extension context invalidated or captureVisibleTab throw):', err);
+    console.warn('[telegram-gateway] /tabs capture failed (likely Extension context invalidated or capture throw):', err);
     await editKeyboardMessage(`⚠️ ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-/** Capture 任一 tab（包括后台 tab）：switch → capture。被点击的 tab
- *  **保持 active**（不 restore 回旧 tab —— user 意图是一步到位）。约束：
- *  - active tab 以**目标 tab 的 windowId** scope（SW 里
- *    `currentWindow` 无意义，不 scope 会拿错 window 的 active tab）；
- *  - captureVisibleTab 在 window minimized / 屏幕锁定时会直接 throw
- *    —— map 成友好文案向上抛，绝不让 unhandled rejection
- *    落到 SW。 */
-async function captureTabForTelegram(
-  tabId: number,
-): Promise<{ base64: string; title: string }> {
-  let targetTab: chrome.tabs.Tab;
-  try {
-    targetTab = await chrome.tabs.get(tabId);
-  } catch (err) {
-    console.warn('[telegram-gateway] /tabs capture: tabs.get failed', { tabId, err });
-    throw new Error('Tab đã bị đóng hoặc không tồn tại');
-  }
-  if (targetTab.windowId === undefined) {
-    throw new Error('Tab không thuộc window nào (discarded/prerender?)');
-  }
-
-  const [currentActive] = await chrome.tabs.query({
-    active: true,
-    windowId: targetTab.windowId,
-  });
-  if (currentActive?.id !== targetTab.id) {
-    await chrome.tabs.update(tabId, { active: true });
-    // 等 render —— captureVisibleTab 拍 framebuffer，切完立即拍可能拿到
-    // 白屏/黑屏帧；250ms 是实测安全的下限。
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  const dataUrl = await chrome.tabs.captureVisibleTab(targetTab.windowId, {
-    format: 'jpeg',
-    quality: 60,
-  }).catch((err) => {
-    const raw = err instanceof Error ? err.message : String(err);
-    const lower = raw.toLowerCase();
-    if (lower.includes('minimize') || lower.includes('lock') || lower.includes('not visible')) {
-      throw new Error('Chrome đang bị thu nhỏ hoặc màn hình khoá — mở Chrome lên rồi thử lại');
-    }
-    throw new Error(`Capture failed: ${raw}`);
-  });
-
-  return {
-    base64: dataUrl.replace(/^data:image\/\w+;base64,/, ''),
-    title: targetTab.title ?? '',
-  };
-}
+/** Capture 任一 tab（含后台 / discarded）的实现已搬到 `./capture`（CDP
+ *  `Page.captureScreenshot`——offscreen、不 activate、不抢焦点；旧
+ *  captureVisibleTab 版本的完整约束注释随实现一并迁移）。 */
 
 /**
  * 一个完整的 Telegram turn：确保 session 行 → 跑 agent。回复的发送不再在此——
