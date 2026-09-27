@@ -445,8 +445,15 @@ const server = http.createServer(async (req, res) => {
     // callback_query_id — extension không bao giờ answer, mọi feedback của
     // extension đi qua editMessage). Không extension nào online → tự edit
     // message báo lỗi thay vì để user nhìn spinner treo.
+    //
+    // callback_data 按前缀分流：`au:` = ask_user 的问答键盘（extension 侧
+    // ask-user.ts 生成）——不弹「Đang chụp tab」toast、不 arm 5s watchdog
+    // （问答要等用户读题作答，5s 会把键盘改没），过期清理由 extension 负责，
+    // gateway 对 au: 无状态；其余（`cap_*` 等）走原 /tabs 截图流程，行为原状。
     if (update.callback_query) {
       const cq = update.callback_query;
+      const cbData = typeof cq.data === 'string' ? cq.data : '';
+      const isAskUser = cbData.startsWith('au:');
       const chatId = cq.message?.chat?.id;
       const messageId = cq.message?.message_id;
       console.log('[gateway] callback_query received', {
@@ -466,7 +473,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       console.log('[gateway] callback_query accepted — answering + broadcasting to', clients.size, 'clients');
-      void callAnswerCallbackQuery(cq.id, '⏳ Đang chụp tab…');
+      void callAnswerCallbackQuery(cq.id, isAskUser ? undefined : '⏳ Đang chụp tab…');
       if (clients.size === 0) {
         void callEditMessage(
           chatId,
@@ -481,7 +488,7 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.stringify({
         kind: 'telegram_callback',
         callback_query_id: cq.id,
-        data: typeof cq.data === 'string' ? cq.data : '',
+        data: cbData,
         chat_id: chatId,
         message_id: messageId,
         from: cq.from ? { id: cq.from.id, username: cq.from.username } : null,
@@ -489,7 +496,9 @@ const server = http.createServer(async (req, res) => {
       for (const ws of clients) {
         try { ws.send(payload); } catch { clients.delete(ws); }
       }
-      armCallbackWatchdog(chatId, messageId);
+      // 仅 /tabs 截图回调 arm 5s watchdog；ask_user 的键盘存活期以分钟计
+      // （10 分钟过期由 extension 侧清理），gateway 对 au: 无状态。
+      if (!isAskUser) armCallbackWatchdog(chatId, messageId);
       res.writeHead(200).end('OK');
       return;
     }

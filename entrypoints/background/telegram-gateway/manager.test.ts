@@ -12,13 +12,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import type { InboundMessage } from '@/lib/telegram-gateway/types';
+import type { InboundMessage, TelegramCallback } from '@/lib/telegram-gateway/types';
 
-const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockSessions, broadcastTaps, mockToolLabel, toolExecutionCbs } = vi.hoisted(() => ({
+const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockResolveTool, mockCancelTool, mockSessions, broadcastTaps, mockToolLabel, toolExecutionCbs } = vi.hoisted(() => ({
   mockBootstrap: vi.fn(),
   mockPublishStatus: vi.fn(),
   mockPrompt: vi.fn(),
   mockCompactNow: vi.fn(async () => {}),
+  mockResolveTool: vi.fn(),
+  mockCancelTool: vi.fn(),
   mockSessions: new Map<string, { record: Record<string, unknown>; messages: unknown[] }>(),
   broadcastTaps: new Set<(msg: unknown) => void>(),
   mockToolLabel: vi.fn(() => 'Browsing web'),
@@ -39,6 +41,8 @@ vi.mock('../chat/session-manager', () => ({
   sessionManager: {
     prompt: mockPrompt,
     compactNow: mockCompactNow,
+    resolveTool: mockResolveTool,
+    cancelTool: mockCancelTool,
     onToolExecution: vi.fn((cb: (sessionId: string, toolName: string, args: unknown) => void) => {
       toolExecutionCbs.add(cb);
       return () => {
@@ -117,6 +121,16 @@ function inboundCallback(attempt = 0): (msg: InboundMessage) => Promise<void> {
   return cb;
 }
 
+/** 取 manager 注册到 client 上的 telegram_callback 回调（au: / cap_ 路由入口）。 */
+function telegramCallback(attempt = 0): (msg: TelegramCallback) => Promise<void> {
+  const result = mockBootstrap.mock.results[attempt]!.value as {
+    client: { onTelegramCallback: ReturnType<typeof vi.fn> };
+  };
+  const cb = result.client.onTelegramCallback.mock.calls[0]?.[0];
+  if (!cb) throw new Error('manager did not register a callback listener');
+  return cb;
+}
+
 /** 模擬 agent 開始執行一個 tool（sessionManager.onToolExecution tap）。 */
 function fireToolExecution(sessionId: string, toolName = 'web_search'): void {
   for (const cb of [...toolExecutionCbs]) cb(sessionId, toolName, {});
@@ -135,6 +149,8 @@ beforeEach(async () => {
   mockPublishStatus.mockReset();
   mockPrompt.mockReset();
   mockCompactNow.mockReset();
+  mockResolveTool.mockReset();
+  mockCancelTool.mockReset();
   mockSessions.clear();
   broadcastTaps.clear();
   toolExecutionCbs.clear();
@@ -975,5 +991,161 @@ describe('setupTelegramGatewayManager', () => {
     expect(texts).toHaveLength(2);
     expect(texts[0]!.text).toBe('hi');
     expect(texts[1]!.text).toBe('🖼 https://cdn.test/i.jpg');
+  });
+
+  // ─── ask_user → inline keyboard（au: 路由 + dismiss 后串行队列继续跑）───
+
+  const ASK_ARGS = {
+    questions: [{ id: 'q1', question: 'Chọn?', options: [{ label: 'A' }, { label: 'B' }] }],
+  };
+
+  /** 起 turn（prompt 挂起、release 手动放行）→ fire tool_pending(ask_user) →
+   *  返回 session id 与发出的 keyboard token。 */
+  async function startAskHarness(client: { sendOutbound: ReturnType<typeof vi.fn> }): Promise<{
+    sessionId: string;
+    token: string;
+    release: () => void;
+  }> {
+    let release!: () => void;
+    mockPrompt.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    void inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+    const sessionId = await telegramSessionId(965822571);
+    fireBroadcast({
+      type: 'tool_pending',
+      sessionId,
+      toolName: 'ask_user',
+      toolCallId: 'tc1',
+      args: ASK_ARGS,
+    });
+    await flushAsync();
+    const askSend = client.sendOutbound.mock.calls
+      .map(([m]) => m as {
+        kind?: string;
+        text?: string;
+        reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+      })
+      .find((m) => m.kind === 'sendMessage' && m.text?.startsWith('❓'));
+    if (!askSend?.reply_markup) throw new Error('ask keyboard was not sent');
+    const token = askSend.reply_markup.inline_keyboard[0]![0]!.callback_data.split(':')[1]!;
+    return { sessionId, token, release };
+  }
+
+  /** 全部含 ❓ 的 sendMessage（ask 键盘题面）。 */
+  function askSends(client: { sendOutbound: ReturnType<typeof vi.fn> }) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; text?: string })
+      .filter((m) => m.kind === 'sendMessage' && m.text?.startsWith('❓'));
+  }
+
+  it('wiring：tool_pending(ask_user) → 键盘题面发出（❓ + reply_markup，一 option 一行）', async () => {
+    const client = await startTurnHarness();
+    await startAskHarness(client);
+    expect(askSends(client)).toHaveLength(1);
+    const send = askSends(client)[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
+    };
+    expect(send.reply_markup!.inline_keyboard.map((row) => row[0]!.text)).toEqual([
+      'A',
+      'B',
+      '✍️ Nhập tay',
+    ]);
+  });
+
+  it('wiring：非本 turn session / 非 ask_user 的 tool_pending → 忽略；其他 tool 状态行照常', async () => {
+    const client = await startTurnHarness();
+    let release!: () => void;
+    mockPrompt.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    void inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+    const sessionId = await telegramSessionId(965822571);
+
+    fireBroadcast({ type: 'tool_pending', sessionId: 'no-such-turn', toolName: 'ask_user', toolCallId: 'tc', args: ASK_ARGS });
+    fireBroadcast({ type: 'tool_pending', sessionId, toolName: 'web_search', toolCallId: 't2', args: {} });
+    await flushAsync();
+    expect(askSends(client)).toHaveLength(0);
+
+    // 其他 tool 的 🔧 状态行不受 ask_user skip 影响（回归）
+    fireToolExecution(sessionId, 'web_search');
+    await flushAsync();
+    expect(
+      client.sendOutbound.mock.calls.some(([m]) => (m as { text?: string }).text === '🔧 Browsing web...'),
+    ).toBe(true);
+    release();
+    await flushAsync();
+  });
+
+  it('au: callback → 路由适配层 → resolveTool 收到 answers；cap_ 仍走 /tabs 流程', async () => {
+    const client = await startTurnHarness();
+    const { sessionId, token, release } = await startAskHarness(client);
+
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'c1',
+      data: `au:${token}:1`,
+      chat_id: 965822571,
+      message_id: 1,
+      from: null,
+    });
+    expect(mockResolveTool).toHaveBeenCalledTimes(1);
+    expect(mockResolveTool).toHaveBeenCalledWith(sessionId, 'ask_user', {
+      answers: { q1: { selected: ['B'], free_text: '', skipped: false } },
+    });
+
+    // cap_ 回归：走 /tabs 截图流程（fakeBrowser 无 tab 999 → capture 抛错 →
+    // dispatchTabsCallback 兜底 ⚠️ edit）。snapshot 前后 call 数必须增长 ——
+    // 若 cap_ 被误路由进适配层（parse 返回 null 静默吞），这里不会有新 call。
+    const callsBeforeCap = client.sendOutbound.mock.calls.length;
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'c2',
+      data: 'cap_999',
+      chat_id: 965822571,
+      message_id: 1,
+      from: null,
+    });
+    await flushAsync();
+    expect(mockResolveTool).toHaveBeenCalledTimes(1); // cap_ 不进适配层
+    expect(client.sendOutbound.mock.calls.length).toBeGreaterThan(callsBeforeCap);
+    release();
+    await flushAsync();
+  });
+
+  it('ask pending → 普通文本 dismiss（cancelTool）→ agent_end 后队列继续跑下一条', async () => {
+    const client = await startTurnHarness();
+    const { sessionId, token, release } = await startAskHarness(client);
+    // 先注册 pending（startAskHarness 内），后注册第 2 条的 resolve —— Once 按
+    // 注册顺序消费，顺序不能反。
+    mockPrompt.mockImplementationOnce(() => Promise.resolve()); // 第 2 条消息的 turn
+
+    // 不按 ✍️、keyboard 挂着：普通文本 → dismiss（cancelTool）+ 消息照常排队
+    void inboundCallback(0)({ ...TEST_INBOUND, update_id: 2, message_id: 2, text: 'thôi cứ làm đi' });
+    await flushAsync();
+    expect(mockCancelTool).toHaveBeenCalledTimes(1);
+    expect(mockCancelTool).toHaveBeenCalledWith(sessionId, 'ask_user');
+    expect(mockResolveTool).not.toHaveBeenCalled(); // dismiss 走 cancel 不走 resolve
+    expect(
+      client.sendOutbound.mock.calls.some(
+        ([m]) => (m as { kind?: string; text?: string }).kind === 'editMessage'
+          && (m as { text?: string }).text === '⏭ Đã bỏ qua câu hỏi.',
+      ),
+    ).toBe(true);
+    // turn 1 的 prompt 仍挂着 → 第 2 条还在排队（没有并发抢跑）
+    expect(mockPrompt).toHaveBeenCalledTimes(1);
+
+    release(); // turn 1 收口（bridge 已被 dismiss 取消，run 正常落位）
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello from telegram' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      ] as never[],
+    });
+    await flushAsync();
+
+    // 队列 unblock：第 2 条消息作为正常聊天跑 prompt（挂起期间没有被吞）
+    expect(mockPrompt).toHaveBeenCalledTimes(2);
+    expect(mockPrompt).toHaveBeenNthCalledWith(2, sessionId, 'thôi cứ làm đi');
   });
 });

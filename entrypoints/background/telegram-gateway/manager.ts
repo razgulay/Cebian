@@ -44,10 +44,13 @@ import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
 import { splitReply } from '@/lib/telegram-gateway/message-split';
 import { extractInlineImages } from '@/lib/telegram-gateway/inline-images';
 import { getToolLabel } from '@/lib/tools/labels';
+import { TOOL_ASK_USER } from '@/lib/tools/names';
+import type { AskUserRequest } from '@/lib/tools/ask-user';
 import {
   bootstrapTelegramGateway,
   type BootstrapHandle,
 } from '@/lib/telegram-gateway/bootstrap';
+import { createTelegramAskController } from './ask-user';
 import type {
   InboundMessage,
   InlineKeyboardMarkup,
@@ -63,6 +66,22 @@ let interactiveMode = false;
 const sessionQueues = new Map<string, Promise<void>>();
 /** 每 Telegram session 的 turn 計數——sliding window 的觸發依據。 */
 const telegramTurnCounts = new Map<string, number>();
+
+// ─── ask_user → inline keyboard 频道适配（模块细节见 ./ask-user 头注释）───
+// deps 包装：send 永不 reject（无 handle / WS reject 一律 resolve null ——
+// AskDeps 的契约）；resolve/cancel 直通 sessionManager 公开接口；activeTurns
+// 只含 Telegram session 进行中的 turn —— 自动隔离非 Telegram session（它们的
+// ask_user 仍走 sidepanel 表单）。
+const askController = createTelegramAskController({
+  send: (action) =>
+    handle
+      ? handle.client.sendOutbound(action).catch(() => null)
+      : Promise.resolve(null),
+  resolveTool: (sessionId, response) =>
+    sessionManager.resolveTool(sessionId, TOOL_ASK_USER, response),
+  cancelTool: (sessionId) => sessionManager.cancelTool(sessionId, TOOL_ASK_USER),
+  getActiveTurnChatId: (sessionId) => activeTurns.get(sessionId)?.chatId ?? null,
+});
 
 // ─── Inline-image 媒体分发常量 ───
 
@@ -215,6 +234,9 @@ async function syncGateway(): Promise<void> {
     // 拆线后立刻把状态归位——旧客户端的事件不再来，徽章不该停在旧状态。
     telegramGatewayChannel.publishStatus('disconnected');
   }
+  // gateway 拆除 → ask_user 问答一并清场 + cancelTool（防 bridge 在 gateway
+  // 关掉后永久悬挂；细节见 ask-user.ts 的 teardown 注释）。
+  askController.teardown();
   // gateway 拆除 → 进行中 turn 的 timer（typing 续发）一并清理；👀 reaction
   // 留在用户消息上成为静默残留（Telegram client 行为，API 无法回收）。turn
   // 状态一并丢弃——agent_end 晚到也无人收尾。sliding window 計數也歸零。
@@ -237,8 +259,12 @@ async function syncGateway(): Promise<void> {
   handle.client.onMessage((msg) => dispatchInbound(msg));
   // `/tabs` keyboard callback —— gateway 已 answer 过（Telegram 拒绝对同一
   // callback_query_id 的第二次 answer），这里只处理 content；worker-client
-  // 忽略返回值。
-  handle.client.onTelegramCallback((msg) => dispatchTabsCallback(msg));
+  // 忽略返回值。`au:` 前缀 = ask_user 问答键盘 → 适配层；其余（`cap_*`）走
+  // /tabs 截图流程（行为原状）。
+  handle.client.onTelegramCallback((msg) => {
+    if (msg.data.startsWith('au:')) return askController.onCallback(msg);
+    return dispatchTabsCallback(msg);
+  });
 }
 
 function scheduleSync(): void {
@@ -278,6 +304,12 @@ async function dispatchInbound(msg: InboundMessage): Promise<void> {
   if (/^\/(tabs|t)(@\S+)?\s*$/.test(msg.text.trim())) {
     return dispatchTabsCommand(msg);
   }
+  // ask_user 问答拦截：✍️ 文本答案就地消费（true = 不往 agent 转发）；
+  // keyboard pending 时的普通文本 = dismiss form（ask-user.ts 里 cancelTool
+  // + ⏭ 确认），消息照常往下走。位置约束：在 /tabs 之后（命令不吃拦截）、
+  // interactiveMode gate 之前（ask pending 期间即使刚关掉 interactive，
+  // 在途答案仍须被消费——teardown 竞态窗口内 map 可能还活着）。
+  if (await askController.interceptInbound(msg)) return;
   if (!interactiveMode) return;
   if (!handle) {
     console.warn('[telegram-gateway] WS not connected — inbound dropped');
@@ -924,7 +956,27 @@ function handleTurnBroadcast(msg: ServerMessage): void {
   });
   switch (msg.type) {
     case 'agent_end':
+      // Backstop：session destroy / cancel 不 fire tool_resolved（toolCtx.dispose
+      // 直接摘订阅、无 transition）——agent_end 兜底清 ask_user 的 Telegram 残留。
+      // 幂等（正常路径 advance 前已清 map，此处 no-op）。
+      askController.onToolResolved(msg.sessionId);
       void finalizeTurn(state, msg.messages);
+      break;
+    case 'tool_pending':
+      // ask_user pending → 渲染 inline keyboard（键盘消息本身就是进行中指示，
+      // 不再叠加 🔧 状态行 —— 见下方 onToolExecution tap 的 skip）。start 信号
+      // 用 tool_pending 而非 tool_execution_start：bridge 单槽 transition 保证
+      // resolved(旧) → pending(新) 的顺序，supersede 不踩 race。
+      if (msg.toolName === TOOL_ASK_USER) {
+        askController.onAskStart(msg.sessionId, msg.args as AskUserRequest);
+      }
+      break;
+    case 'tool_resolved':
+      // ask_user 从别处收口（sidepanel 提交 / cancelAll / destroy）→ 清 Telegram
+      // 键盘残留。绝不 resolveTool/cancelTool（外部已收口）。
+      if (msg.toolName === TOOL_ASK_USER) {
+        askController.onToolResolved(msg.sessionId);
+      }
       break;
     default:
       // stream_ops / agent_start / message_end / session_* —— UX 不需要
@@ -946,6 +998,9 @@ export function setupTelegramGatewayManager(): void {
   onBroadcastTap((msg) => handleTurnBroadcast(msg));
   // 工具狀態行：Telegram session 的 agent 每開始執行一個 tool 就更新
   sessionManager.onToolExecution((sessionId, toolName, args) => {
+    // ask_user 走 tool_pending 广播渲染键盘（键盘消息即进行中指示）——
+    // 这里跳过，不再叠加 🔧 状态行。
+    if (toolName === TOOL_ASK_USER) return;
     const state = activeTurns.get(sessionId);
     if (state) {
       scheduleToolStatus(state, getToolLabel(toolName, args as Record<string, any> | undefined));
