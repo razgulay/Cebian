@@ -725,10 +725,41 @@ export function ChatPage({
               // one per intermediate model call. The closing message is
               // also the only one whose timing represents the whole turn.
               const turnEnded = !isLast || !isAgentRunning;
-              const isTurnClosing =
+              let isTurnClosing =
                 turnEnded && assistantMsg.stopReason !== 'toolUse';
               const plainText = getAssistantText(assistantMsg).trim();
               const copyText = isTurnClosing && plainText.length > 0 ? plainText : undefined;
+
+              // Bug-fix safety net (issue: 单 tool 回合多余 footer)
+              // ──────────────────────────────────────────────────
+              // Tool-only 回合（只有 toolCall、没有面向用户的正文）本就是 agent
+              // 在执行链中的一环，不该被视为收尾回复——它的 stopReason 经常因
+              // 网关/provider 差异被报为 'stop'（而非 'toolUse'），导致旧逻辑
+              // 给它渲染 model + token + retry footer，紧跟其后的 text 回合又
+              // 会渲染自己的 footer，于是同一条 turn 出现两个 footer 互相重叠。
+              // 正常情况下这条 assistant 会被 groupToolRuns 收进 ToolRunBlock
+              // （footer 在那里集中渲染一次）；万一分组漏掉，单 tool 回合又有
+              // 后续 closing message 时，这里也把它压下来，让后续消息独自背
+              // footer。Turn 末尾真的只有一个 tool 时不受影响（hasFollowingClosing=false）。
+              const isToolOnlyMessage =
+                toolCalls.length > 0 && plainText.length === 0;
+              if (isToolOnlyMessage) {
+                for (let j = idx + 1; j < messages.length; j++) {
+                  const nxt = messages[j];
+                  if (
+                    nxt.role === 'user' ||
+                    isPermissionRequest(nxt) ||
+                    isCompactionSummary(nxt)
+                  ) {
+                    break;
+                  }
+                  if (nxt.role === 'assistant') {
+                    isTurnClosing = false;
+                    break;
+                  }
+                  // toolResult / 空 assistant → 跳过
+                }
+              }
 
               // Aggregate usage across all assistant messages of this turn
               // (walk back to the most recent user message). Each tool round
