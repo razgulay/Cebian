@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ChevronRight, Loader2, Check, X, Ban } from 'lucide-react';
 import { t } from '@/lib/i18n';
+import { getToolLabel } from '@/lib/tools/labels';
+import type { ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
 
 interface ToolCardImage {
   data: string;
@@ -83,5 +85,51 @@ export function ToolCard({ label, status, args, result, images }: ToolCardProps)
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Generic tool result card ───
+// 把 ChatPage 里 generic tool 渲染路径（非交互式 / 非 delegate / 非 MCP App）抽出来，
+// 供 ToolRunBlock 与 ChatPage 复用——避免两处各写一份 ~25 行的 status/label/result 拼装。
+// 这里的 card 始终是普通工具：interactive / delegate / MCP App 在调用方已先行分流。
+
+export interface GenericToolResultCardProps {
+  /** assistant 回合里的工具调用（带 name / arguments / id）。 */
+  tc: ToolCall;
+  /** 对应的 toolResult（可能尚在跑中 / 被取消）。 */
+  toolResult?: ToolResultMessage;
+  /** 该回合是否被用户中止（stopReason 'aborted'）—— 决定 running→cancelled 配色。 */
+  isAborted?: boolean;
+}
+
+/**
+ * 渲染单个普通工具调用的 ToolCard：status 从 toolResult / isAborted 推出，
+ * label 用 `getToolLabel`，args 用 JSON.stringify(…, null, 2)，result 取首段文本 +
+ * image content block。与 ChatPage 原路径行为一致，只是抽成可复用组件。
+ */
+export function GenericToolResultCard({ tc, toolResult, isAborted }: GenericToolResultCardProps) {
+  const status = toolResult
+    ? (toolResult.isError ? 'error' : 'done')
+    : (isAborted ? 'cancelled' : 'running');
+  const label = getToolLabel(tc.name, tc.arguments);
+  const argsStr = JSON.stringify(tc.arguments, null, 2);
+  const resultText = toolResult
+    ? toolResult.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n') || undefined
+    : undefined;
+  const resultImages = toolResult
+    ? toolResult.content
+        .filter((b): b is { type: 'image'; data: string; mimeType: string } => b.type === 'image')
+    : undefined;
+  return (
+    <ToolCard
+      label={label}
+      status={status}
+      args={argsStr}
+      result={resultText}
+      images={resultImages}
+    />
   );
 }

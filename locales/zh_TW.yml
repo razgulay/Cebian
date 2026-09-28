@@ -1138,6 +1138,11 @@ chat:
   tool:
     args: 參數
     result: 結果
+  toolRun:
+    # $1 = tool call count
+    summary:
+      1: 呼叫了 1 個工具
+      n: 呼叫了 $1 個工具
   mcpApp:
     loading: 載入互動檢視中…
     retry: 重試

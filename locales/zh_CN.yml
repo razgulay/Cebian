@@ -1139,6 +1139,11 @@ chat:
   tool:
     args: 参数
     result: 结果
+  toolRun:
+    # $1 = tool call count
+    summary:
+      1: 调用了 1 个工具
+      n: 调用了 $1 个工具
   mcpApp:
     loading: 加载交互视图中…
     retry: 重试

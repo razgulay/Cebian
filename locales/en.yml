@@ -1198,6 +1198,11 @@ chat:
   tool:
     args: Arguments
     result: Result
+  toolRun:
+    # $1 = tool call count
+    summary:
+      1: Used 1 tool
+      n: Used $1 tools
   mcpApp:
     loading: Loading interactive view…
     retry: Retry

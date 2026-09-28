@@ -31,8 +31,10 @@ import {
   CompactionPlaceholder,
   PermissionRequestBlock,
 } from '@/components/chat/Message';
-import { ToolCard } from '@/components/chat/ToolCard';
+import { GenericToolResultCard } from '@/components/chat/ToolCard';
 import { ToolCardWithUI } from '@/components/chat/ToolCardWithUI';
+import { ToolRunBlock } from '@/components/chat/ToolRunBlock';
+import { groupToolRuns, indexToolRunGroups, isMessageTransparentToGroup } from '@/components/chat/tool-run-groups';
 import { DelegationCard, type DelegationStatus, type BatchSummary, type DelegationCardItemProps, type ChecklistItem } from '@/components/chat/DelegationCard';
 import { isMcpAppResult } from '@/lib/tools/mcp-tool';
 import { TOOL_DELEGATE_TASK } from '@/lib/tools/names';
@@ -357,6 +359,15 @@ export function ChatPage({
     return -1;
   }, [messages]);
 
+  // 连续 tool-only assistant 回合分组：把 N 个只含工具调用 / thinking 的中间回合
+  // 收成一个可折叠 ToolRunBlock（presentation-only；state machine 不变）。
+  // 重算依赖 messages 引用——streaming 中每个 delta 触发一次重算，O(n²) 在
+  // 典型会话规模下可接受（reviewer 已确认并建议此处用 useMemo 避免每帧重算）。
+  const toolRunGroupMap = useMemo(
+    () => indexToolRunGroups(groupToolRuns(messages)),
+    [messages],
+  );
+
   // Token incremented each time the user sends a new prompt. Drives the
   // Gemini-style "snap to top on send" effect below. Using a counter (rather
   // than a boolean flag) makes the effect robust to rapid double-sends
@@ -602,6 +613,94 @@ export function ChatPage({
               // `commitRetryCancel` appends the same shape manually). One
               // rendering rule covers both paths.
               const isAborted = assistantMsg.stopReason === 'aborted';
+
+              // 连续 tool-only 回合分组：本条若属于某个 ToolRunGroup，只在 anchor
+              // 处渲染整组 ToolRunBlock，非 anchor 成员直接跳过——避免 N 个中间
+              // 回合各 render 一个独立 AgentMessage + footer。
+              const toolRunGroup = toolRunGroupMap.get(idx);
+              if (toolRunGroup) {
+                if (toolRunGroup.anchor !== idx) {
+                  // 非 anchor 成员：整组由 anchor 处的 ToolRunBlock 统一渲染
+                  return null;
+                }
+                // anchor：
+                // 1. 直播信号——只要组内最后一个成员是 messages 末尾，就视为
+                //    「正在直播」（不是仅看 anchor；anchor 跑完后后续成员陆续
+                //    接入，最后成员仍在 stream → 整个组仍应展开）。
+                // 2. footer 资格——向后扫，跳过透明消息（toolResult / 空
+                //    assistant），遇到下一个非透明边界：user / compaction /
+                //    permission / bubble-result → 组收尾本轮；普通 assistant
+                //    回复 → 组不收尾（footer 由该回复承载）。与 helper 的
+                //    isRunBoundary 规则保持一致，避免 footer 在流式中闪烁。
+                const lastMemberIdx = toolRunGroup.members[toolRunGroup.members.length - 1];
+                const isGroupStreaming =
+                  lastMemberIdx === messages.length - 1 &&
+                  effectiveRunning &&
+                  !isCompacting;
+                let groupClosesTurn = true;
+                for (let j = lastMemberIdx + 1; j < messages.length; j++) {
+                  if (isMessageTransparentToGroup(messages[j], messages)) continue;
+                  if (messages[j].role === 'assistant') {
+                    groupClosesTurn = false;
+                    break;
+                  }
+                  // user / compactionSummary / permissionRequest / bubble-result
+                  break;
+                }
+                // group 的 footer 上展示的 retry：复用 ChatPage 的 turnUserEntryId
+                // 扫描逻辑（从 lastMember 起向前找最近的 user 消息），找不到则
+                // 不出 retry 按钮；entryId 缺则同。
+                let groupTurnUserEntryId: string | undefined;
+                for (let j = lastMemberIdx - 1; j >= 0; j--) {
+                  const prev = messages[j];
+                  if (prev.role === 'user') {
+                    groupTurnUserEntryId = prev.entryId;
+                    break;
+                  }
+                  if (prev.role === 'toolResult') {
+                    const tr = prev as ToolResultMessage;
+                    const info = uiToolRegistry.get(tr.toolName);
+                    if (info?.renderResultAsUserBubble && !tr.details?.cancelled) break;
+                    continue;
+                  }
+                  break;
+                }
+                const groupCanRetry =
+                  groupClosesTurn &&
+                  !isAgentRunning &&
+                  (lastMemberIdx === messages.length - 1 || groupTurnUserEntryId !== undefined);
+                const groupOnRetry = groupCanRetry
+                  ? () => handleRetry(lastMemberIdx === messages.length - 1 ? undefined : groupTurnUserEntryId)
+                  : undefined;
+                const groupBranch = msg.entryId ? branchInfo[msg.entryId] : undefined;
+                return (
+                  <div
+                    key={`asst-wrap-${msg.entryId ?? idx}`}
+                    className={isGroupStreaming ? 'min-h-[calc(100vh-80px)]' : undefined}
+                  >
+                    <ToolRunBlock
+                      messages={messages}
+                      group={toolRunGroup}
+                      isStreaming={isGroupStreaming}
+                      showFooter={groupClosesTurn && !isAgentRunning}
+                      onRetry={groupOnRetry}
+                      branch={groupBranch
+                        ? {
+                          index: groupBranch.index,
+                          count: groupBranch.count,
+                          disabled: isAgentRunning,
+                          onPrev: groupBranch.index > 0
+                            ? () => handleSwitchBranch(groupBranch.siblings[groupBranch.index - 1])
+                            : undefined,
+                          onNext: groupBranch.index < groupBranch.count - 1
+                            ? () => handleSwitchBranch(groupBranch.siblings[groupBranch.index + 1])
+                            : undefined,
+                        }
+                        : undefined}
+                    />
+                  </div>
+                );
+              }
 
               // Show header only for the first assistant message in a consecutive group
               let showHeader = true;
@@ -1034,29 +1133,12 @@ export function ChatPage({
                       );
                     }
 
-                    const status = toolResult
-                      ? (toolResult.isError ? 'error' : 'done')
-                      : (isAborted ? 'cancelled' : 'running');
-                    const label = getToolLabel(tc.name, tc.arguments);
-                    const argsStr = JSON.stringify(tc.arguments, null, 2);
-                    const resultText = toolResult
-                      ? toolResult.content
-                          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-                          .map(b => b.text)
-                          .join('\n') || undefined
-                      : undefined;
-                    const resultImages = toolResult
-                      ? toolResult.content
-                          .filter((b): b is { type: 'image'; data: string; mimeType: string } => b.type === 'image')
-                      : undefined;
                     return (
-                      <ToolCard
+                      <GenericToolResultCard
                         key={`tool-${tc.id}`}
-                        label={label}
-                        status={status}
-                        args={argsStr}
-                        result={resultText}
-                        images={resultImages}
+                        tc={tc}
+                        toolResult={toolResult}
+                        isAborted={isAborted}
                       />
                     );
                   })}
