@@ -1692,6 +1692,13 @@ class SessionManager {
           agentSession.agent.state.model = resolved.model;
           agentSession.modelKey = nextKey;
           agentSession.modelIdentity = { provider: resolved.provider, modelId: resolved.modelId };
+          // 解析成功 = 兜底状态就此解除。必须显式清——prompt 的 clearedFallback
+          // 只在「本轮带 turn」时才触发（session-manager 的 turnKey != null 分支），
+          // 而 Telegram 是无 turn 的入口，光靠它清不掉：会话行的模型已换成可用的
+          // 新值、活 agent 也 swap 了，唯独标记留着 → 之后每条消息都撞
+          // `errors.modelUnavailable` 直到 SW 重启。/model 正是用户遇到那个 ❌ 时
+          // 会按的按钮，它必须能真正救回来。
+          agentSession.modelFallback = false;
         }
       }
     }

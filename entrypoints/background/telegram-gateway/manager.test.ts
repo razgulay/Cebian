@@ -14,17 +14,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { InboundMessage, TelegramCallback } from '@/lib/telegram-gateway/types';
 
-const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockResolveTool, mockCancelTool, mockSessions, broadcastTaps, mockToolLabel, toolExecutionCbs } = vi.hoisted(() => ({
+const { mockBootstrap, mockPublishStatus, mockPrompt, mockCompactNow, mockResolveTool, mockCancelTool, mockRefreshSessionConfig, mockListUsableModelGroups, mockBroadcastAll, mockSessions, broadcastTaps, mockToolLabel, toolExecutionCbs, updateSettingsCalls } = vi.hoisted(() => ({
   mockBootstrap: vi.fn(),
   mockPublishStatus: vi.fn(),
   mockPrompt: vi.fn(),
   mockCompactNow: vi.fn(async () => {}),
   mockResolveTool: vi.fn(),
   mockCancelTool: vi.fn(),
+  mockRefreshSessionConfig: vi.fn(async () => {}),
+  mockListUsableModelGroups: vi.fn(() => [] as unknown[]),
+  mockBroadcastAll: vi.fn(),
   mockSessions: new Map<string, { record: Record<string, unknown>; messages: unknown[] }>(),
   broadcastTaps: new Set<(msg: unknown) => void>(),
   mockToolLabel: vi.fn(() => 'Browsing web'),
   toolExecutionCbs: new Set<(sessionId: string, toolName: string, args: unknown) => void>(),
+  updateSettingsCalls: [] as Array<{
+    id: string;
+    settings: { provider?: string; model?: string; thinkingLevel?: string };
+    opts: { touchUpdatedAt?: boolean };
+  }>,
 }));
 vi.mock('@/lib/telegram-gateway/bootstrap', () => ({
   bootstrapTelegramGateway: mockBootstrap,
@@ -37,12 +45,18 @@ vi.mock('@/lib/telegram-gateway/channel', () => ({
 vi.mock('@/lib/tools/labels', () => ({
   getToolLabel: mockToolLabel,
 }));
+// `/model` 的可用模型来源——真实实现依赖 pi-ai 内置 catalog + 凭据推导，单测
+// 只关心 manager 的接线（分组内容由 model-command.test.ts 覆盖）。
+vi.mock('@/lib/providers/usable-models', () => ({
+  listUsableModelGroups: mockListUsableModelGroups,
+}));
 vi.mock('../chat/session-manager', () => ({
   sessionManager: {
     prompt: mockPrompt,
     compactNow: mockCompactNow,
     resolveTool: mockResolveTool,
     cancelTool: mockCancelTool,
+    refreshSessionConfig: mockRefreshSessionConfig,
     onToolExecution: vi.fn((cb: (sessionId: string, toolName: string, args: unknown) => void) => {
       toolExecutionCbs.add(cb);
       return () => {
@@ -57,10 +71,24 @@ vi.mock('../chat/viewers', () => ({
     return () => { broadcastTaps.delete(cb); };
   }),
 }));
+// port-registry：只关心 `broadcastAll`（`/model` apply 后广播 session_changed）。
+// `onPortConnect` 保持 no-op —— manager 的 first-frame push 不是本文件焦点。
+vi.mock('../ipc/port-registry', () => ({
+  broadcastAll: mockBroadcastAll,
+  onPortConnect: vi.fn(),
+  post: vi.fn(),
+}));
 vi.mock('../chat/session-store', () => ({
   appendSessionMessage: vi.fn(),
   sessionStore: {
     load: vi.fn(async (id: string) => mockSessions.get(id)?.record ?? null),
+    /** `/model` 读 provider/model 用的轻量路径（不开树、不投影 transcript）。 */
+    loadMeta: vi.fn(async (id: string) => {
+      const s = mockSessions.get(id);
+      if (!s) return undefined;
+      const { messages: _messages, ...meta } = s.record;
+      return meta;
+    }),
     open: vi.fn(async (id: string) => {
       const s = mockSessions.get(id);
       if (!s) return undefined;
@@ -75,6 +103,23 @@ vi.mock('../chat/session-store', () => ({
     createWithMessages: vi.fn(async (fields: { id: string }, messages: unknown[]) => {
       mockSessions.set(fields.id, { record: { ...fields, messages }, messages });
     }),
+    /** `/model` 的落库路径——patch record 上对应字段（真实实现走 Dexie patch）。
+     *  同时断言 `touchUpdatedAt: false` 契约：换模型不该把会话顶到历史列表最前
+     *  （真实实现在 lib/persistence/db.ts 按此 flag 决定是否 patch updatedAt）。 */
+    updateSettings: vi.fn(
+      async (
+        id: string,
+        settings: { provider?: string; model?: string; thinkingLevel?: string },
+        opts: { touchUpdatedAt?: boolean } = {},
+      ) => {
+        updateSettingsCalls.push({ id, settings, opts });
+        const s = mockSessions.get(id);
+        if (!s) return;
+        if (settings.provider !== undefined) s.record.provider = settings.provider;
+        if (settings.model !== undefined) s.record.model = settings.model;
+        if (settings.thinkingLevel !== undefined) s.record.thinkingLevel = settings.thinkingLevel;
+      },
+    ),
   },
 }));
 
@@ -151,6 +196,12 @@ beforeEach(async () => {
   mockCompactNow.mockReset();
   mockResolveTool.mockReset();
   mockCancelTool.mockReset();
+  mockRefreshSessionConfig.mockReset();
+  mockRefreshSessionConfig.mockImplementation(async () => {});
+  mockListUsableModelGroups.mockReset();
+  mockListUsableModelGroups.mockImplementation(() => []);
+  mockBroadcastAll.mockReset();
+  updateSettingsCalls.length = 0;
   mockSessions.clear();
   broadcastTaps.clear();
   toolExecutionCbs.clear();
@@ -1291,5 +1342,366 @@ describe('setupTelegramGatewayManager', () => {
     // 队列 unblock：第 2 条消息作为正常聊天跑 prompt（挂起期间没有被吞）
     expect(mockPrompt).toHaveBeenCalledTimes(2);
     expect(mockPrompt).toHaveBeenNthCalledWith(2, sessionId, 'thôi cứ làm đi');
+  });
+
+  // ─── `/model` 命令（命令路由 + sm: callback 路由 + apply 落库）───
+
+  /** 一组最小 ModelGroup——只填 buildModelKeyboard 会读的字段。 */
+  function modelGroups() {
+    return [
+      {
+        provider: 'anthropic',
+        label: 'anthropic',
+        models: [
+          { id: 'claude-opus-5', name: 'Claude Opus 5' },
+          { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+        ],
+      },
+    ] as unknown[];
+  }
+
+  /** 取全部含指定文本的 sendMessage。 */
+  function sendsWithText(client: { sendOutbound: ReturnType<typeof vi.fn> }, needle: string) {
+    return client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; text?: string })
+      .filter((m) => m.kind === 'sendMessage' && m.text?.includes(needle));
+  }
+
+  it('/model → 发 keyboard，且**不**走 agent（prompt 不调）', async () => {
+    const client = await startTurnHarness();
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+
+    // 命令不转发给 LLM
+    expect(mockPrompt).not.toHaveBeenCalled();
+    // keyboard 已发出
+    const msgs = sendsWithText(client, 'Chọn model');
+    expect(msgs).toHaveLength(1);
+    const kb = (msgs[0] as { reply_markup?: { inline_keyboard: unknown[][] } }).reply_markup;
+    expect(kb!.inline_keyboard).toHaveLength(2);
+  });
+
+  it('/model@botname → 同样识别（Telegram autocomplete 形态）', async () => {
+    const client = await startTurnHarness();
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model@cebian_bot' });
+    await flushAsync();
+
+    expect(mockPrompt).not.toHaveBeenCalled();
+    expect(sendsWithText(client, 'Chọn model')).toHaveLength(1);
+  });
+
+  it('/model 无可用模型 → 发指引文案，不走 agent、不 crash', async () => {
+    const client = await startTurnHarness();
+    mockListUsableModelGroups.mockReturnValue([]);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+
+    expect(mockPrompt).not.toHaveBeenCalled();
+    expect(sendsWithText(client, 'Chưa có model nào khả dụng')).toHaveLength(1);
+  });
+
+  it('/model 不受 interactiveMode gate 影响（显式命令，同 /tabs）', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(false)); // interactive OFF
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+
+    expect(sendsWithText(client, 'Chọn model')).toHaveLength(1);
+    expect(mockPrompt).not.toHaveBeenCalled();
+  });
+
+  it('sm: callback → 落库 + refreshSessionConfig（不走 /tabs 截图流程）', async () => {
+    const client = await startTurnHarness();
+    // 预建会话行，走「已有行」分支
+    const sessionId = await telegramSessionId(965822571);
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create({
+      id: sessionId,
+      title: 'Telegram · @tester',
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      userInstructions: '',
+      thinkingLevel: 'medium',
+    });
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+    // 挂一个永不 resolve 的 turn —— 让串行队列非空。这样「落库+广播」若被放进
+    // 队列（回归），下面的断言就会挂；只在无 turn 时跑的话两种实现都会通过。
+    mockPrompt.mockImplementationOnce(() => new Promise<void>(() => {}));
+    void inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model', update_id: 2, message_id: 2 });
+    await flushAsync();
+
+    // 取第 2 个模型（claude-sonnet-5）的 callback_data
+    const kbMsg = sendsWithText(client, 'Chọn model')[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ callback_data: string }>> };
+    };
+    const data = kbMsg.reply_markup!.inline_keyboard[1]![0]!.callback_data;
+    expect(data).toMatch(/^sm:[0-9a-f]{8}:1$/);
+
+    // 不 await：applyModel 返回的 job 排在挂起 turn 之后，await 会挂到超时。
+    // 我们要断言的正是「落库 + 广播不等队列」，所以只等 microtask 刷完。
+    void telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq1',
+      data,
+      chat_id: 965822571,
+      message_id: 500,
+      from: { id: 42, username: 'tester' },
+    });
+    await flushAsync();
+
+    // turn 仍挂着（队列非空）→ 落库 + 广播必须**已经发生**（不入队）；
+    // 若回归成整段入队，这两条会挂。
+    const call = updateSettingsCalls.find((c) => c.id === sessionId);
+    expect(call).toBeDefined();
+    expect(call!.opts).toEqual({ touchUpdatedAt: false });
+    const broadcast = mockBroadcastAll.mock.calls
+      .map(([m]) => m as { type?: string; session?: Record<string, unknown> })
+      .find((m) => m.type === 'session_changed');
+    expect(broadcast).toBeDefined();
+    expect(broadcast!.session).toMatchObject({
+      id: sessionId,
+      provider: 'anthropic',
+      model: 'claude-sonnet-5',
+    });
+    // canonical shape 的必要字段（SidebarPanel spread 进列表项 / chat 页读它们）
+    expect(broadcast!.session).toHaveProperty('messages');
+    expect(broadcast!.session).toHaveProperty('branchInfo');
+
+    // 对齐活 agent 则在队列里，等 turn 结束才跑
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+
+    // 不走截图流程
+    expect(client.sendOutbound.mock.calls.some(([m]) => (m as { kind?: string }).kind === 'sendPhoto')).toBe(false);
+    // 注：确认 edit 由 onCallback 在 `await applyModel` 之后发出，而 applyModel
+    // 含入队部分 → 本测试（turn 挂起）里它尚未发出。确认文案的断言在
+    // 「无 turn」与「落库抛错」两个用例覆盖。
+  });
+
+  it('sm: callback 在无会话行时 → 写全局种子（等价 sidepanel 新对话换模型）', async () => {
+    const client = await startTurnHarness();
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+    const kbMsg = sendsWithText(client, 'Chọn model')[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ callback_data: string }>> };
+    };
+    const data = kbMsg.reply_markup!.inline_keyboard[0]![0]!.callback_data;
+
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq1',
+      data,
+      chat_id: 965822571,
+      message_id: 500,
+      from: { id: 42, username: 'tester' },
+    });
+    await flushAsync();
+
+    // 无会话行 → 不调 refreshSessionConfig（没 agent 可对齐）、不广播（没有行可推）
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+    expect(mockBroadcastAll).not.toHaveBeenCalled();
+    expect(await lastSelectedModel.getValue()).toEqual({
+      provider: 'anthropic',
+      modelId: 'claude-opus-5',
+    });
+    // 确认 edit + 清 keyboard（无 turn 阻塞 → onCallback 的 await 正常返回）
+    const edits = client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; text?: string; reply_markup?: unknown })
+      .filter((m) => m.kind === 'editMessage');
+    expect(edits.at(-1)!.text).toContain('Đã chọn model');
+    expect(edits.at(-1)!.reply_markup).toEqual({ inline_keyboard: [] });
+  });
+
+  it('/model 在 turn 跑期间 → apply 排进串行队列（不丢，等 turn 完再落）', async () => {
+    const client = await startTurnHarness();
+    let release!: () => void;
+    mockPrompt.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    const sessionId = await telegramSessionId(965822571);
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create({
+      id: sessionId,
+      title: 'Telegram · @tester',
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      userInstructions: '',
+      thinkingLevel: 'medium',
+    });
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    // 起一个挂起的 turn
+    void inboundCallback(0)(TEST_INBOUND);
+    await flushAsync();
+    expect(mockPrompt).toHaveBeenCalledTimes(1);
+
+    // turn 未完成时点 /model
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model', update_id: 2, message_id: 2 });
+    await flushAsync();
+    const kbMsg = sendsWithText(client, 'Chọn model')[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ callback_data: string }>> };
+    };
+    const data = kbMsg.reply_markup!.inline_keyboard[0]![0]!.callback_data;
+    void telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq1',
+      data,
+      chat_id: 965822571,
+      message_id: 500,
+      from: null,
+    });
+    await flushAsync();
+
+    // turn 还挂着 → refreshSessionConfig（对齐活 agent）尚未执行（排在队列里）
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+    // 但落库 + 广播**已经发生**——UI 同步不该等 turn 跑完（这是把 broadcast
+    // 移出队列的目的）。若回归成「整段入队」，这里会挂。
+    const early = mockBroadcastAll.mock.calls
+      .map(([m]) => m as { type?: string; session?: Record<string, unknown> })
+      .find((m) => m.type === 'session_changed');
+    expect(early).toBeDefined();
+    expect(early!.session).toMatchObject({ id: sessionId, model: 'claude-opus-5' });
+
+    // 放行 turn → 对齐随即落位（没被吞）
+    release();
+    await flushAsync();
+    expect(mockRefreshSessionConfig).toHaveBeenCalledWith(sessionId, {
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+    });
+  });
+
+  it('会话行在 /model 之后被删 → 不写全局种子（只 no-op）', async () => {
+    const client = await startTurnHarness();
+    const sessionId = await telegramSessionId(965822571);
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create({
+      id: sessionId,
+      title: 'Telegram · @tester',
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      userInstructions: '',
+      thinkingLevel: 'medium',
+    });
+    // 全局种子先设一个已知值，便于断言「没被改写」
+    await lastSelectedModel.setValue({ provider: 'seed', modelId: 'seed-model' });
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+    const kbMsg = sendsWithText(client, 'Chọn model')[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ callback_data: string }>> };
+    };
+    const data = kbMsg.reply_markup!.inline_keyboard[0]![0]!.callback_data;
+
+    // 模拟用户在这之后于 History 删掉了本会话（apply 尚未跑）
+    mockSessions.delete(sessionId);
+
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq1',
+      data,
+      chat_id: 965822571,
+      message_id: 500,
+      from: null,
+    });
+    await flushAsync();
+
+    // 不落库、不对齐、**不污染全局默认**、**不广播**（广播会给每个已打开的
+    // 侧边栏推一条已删会话的幽灵行）
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+    expect(mockBroadcastAll).not.toHaveBeenCalled();
+    expect(await lastSelectedModel.getValue()).toEqual({ provider: 'seed', modelId: 'seed-model' });
+  });
+
+  it('落库抛错 → 错误冒泡到 controller（edit 报错文案），且不对齐 agent', async () => {
+    const client = await startTurnHarness();
+    const sessionId = await telegramSessionId(965822571);
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create({
+      id: sessionId,
+      title: 'Telegram · @tester',
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      userInstructions: '',
+      thinkingLevel: 'medium',
+    });
+    mockListUsableModelGroups.mockReturnValue(modelGroups() as never);
+
+    await inboundCallback(0)({ ...TEST_INBOUND, text: '/model' });
+    await flushAsync();
+    const kbMsg = sendsWithText(client, 'Chọn model')[0] as {
+      reply_markup?: { inline_keyboard: Array<Array<{ callback_data: string }>> };
+    };
+    const data = kbMsg.reply_markup!.inline_keyboard[0]![0]!.callback_data;
+
+    // 落库失败（磁盘满 / DB 异常）
+    (sessionStore.updateSettings as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('disk full'),
+    );
+
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq1',
+      data,
+      chat_id: 965822571,
+      message_id: 500,
+      from: null,
+    });
+    await flushAsync();
+
+    // 行没改成 → 不该对齐 agent（没有新身份可对齐）
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+    expect(mockBroadcastAll).not.toHaveBeenCalled();
+    // 错误必须冒泡到 controller → 用户看到 ⚠️ 而不是静默死掉
+    const edits = client.sendOutbound.mock.calls
+      .map(([m]) => m as { kind?: string; text?: string })
+      .filter((m) => m.kind === 'editMessage');
+    expect(edits.at(-1)!.text).toContain('Đổi model thất bại');
+    expect(edits.at(-1)!.text).toContain('disk full');
+  });
+
+  it('cap_ callback 仍走 /tabs 流程（sm: 路由未误吞截图回调）', async () => {
+    const client = await startTurnHarness();
+    const callsBefore = client.sendOutbound.mock.calls.length;
+
+    await telegramCallback(0)({
+      kind: 'telegram_callback',
+      callback_query_id: 'cq2',
+      data: 'cap_999',
+      chat_id: 965822571,
+      message_id: 600,
+      from: null,
+    });
+    await flushAsync();
+
+    // 截图流程有新的 sendOutbound（⏳ edit / ⚠️ 兜底）；sm: 路径不会有
+    expect(client.sendOutbound.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(mockRefreshSessionConfig).not.toHaveBeenCalled();
+  });
+
+  it('普通文本消息不受影响（仍走 agent）', async () => {
+    const client = await startTurnHarness();
+
+    await inboundCallback(0)(TEST_INBOUND); // 'hello from telegram'
+    await flushAsync();
+
+    expect(mockPrompt).toHaveBeenCalledWith(await telegramSessionId(965822571), 'hello from telegram');
+    expect(sendsWithText(client, 'Chọn model')).toHaveLength(0);
   });
 });

@@ -68,8 +68,12 @@ function cancelGrace(sessionId: string): void {
 // ─── Handlers ───
 
 /** 冷加载的会话行 → `session_loaded` 快照：给 transcript 附上逐位对齐的树 entryId
- *  （消息编辑按它定位）。副本，不改 record 本体。 */
-function toSessionSnapshot(loaded: LoadedSession): SessionSnapshot {
+ *  （消息编辑按它定位）。副本，不改 record 本体。
+ *
+ *  Export 给 telegram-gateway 的 `/model` 用——它改完会话行的模型后要广播同款
+ *  `session_changed`，必须用 canonical shape（SidebarPanel 直接 spread 进列表项、
+ *  chat 页读 provider/model），自造残缺 payload 会让两边 schema 漂移。 */
+export function toSessionSnapshot(loaded: LoadedSession): SessionSnapshot {
   return {
     ...loaded.record,
     messages: loaded.record.messages.map((m, i) => {

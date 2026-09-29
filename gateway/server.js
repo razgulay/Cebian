@@ -527,14 +527,19 @@ const server = http.createServer(async (req, res) => {
     // message báo lỗi thay vì để user nhìn spinner treo.
     //
     // callback_data 按前缀分流：`au:` = ask_user 的问答键盘（extension 侧
-    // ask-user.ts 生成）——不弹「Đang chụp tab」toast、不 arm 5s watchdog
-    // （问答要等用户读题作答，5s 会把键盘改没），过期清理由 extension 负责，
-    // gateway 对 au: 无状态；其余（`cap_*` 等）走原 /tabs 截图流程，行为原状。
+    // ask-user.ts 生成）；`sm:` = /model 的选型键盘（extension 侧
+    // model-command.ts 生成）——两者都是「extension 自己管理的交互键盘」，
+    // 不弹「Đang chụp tab」toast、不 arm 5s watchdog（问答要等用户读题作答，
+    // 选模型要等 extension 排队等 agent idle，5s 都会把键盘改没）；过期清理
+    // 由 extension 负责，gateway 对它们无状态。其余（`cap_*` 等）走原 /tabs
+    // 截图流程，行为原状。
     if (update.callback_query) {
       lastInboundAt = Date.now();
       const cq = update.callback_query;
       const cbData = typeof cq.data === 'string' ? cq.data : '';
-      const isAskUser = cbData.startsWith('au:');
+      // extension 自管的交互键盘：`au:`（ask_user）/ `sm:`（/model）。
+      const isExtensionKeyboard =
+        cbData.startsWith('au:') || cbData.startsWith('sm:');
       const chatId = cq.message?.chat?.id;
       const messageId = cq.message?.message_id;
       console.log('[gateway] callback_query received', {
@@ -554,7 +559,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       console.log('[gateway] callback_query accepted — answering + broadcasting to', clients.size, 'clients');
-      void callAnswerCallbackQuery(cq.id, isAskUser ? undefined : '⏳ Đang chụp tab…');
+      void callAnswerCallbackQuery(cq.id, isExtensionKeyboard ? undefined : '⏳ Đang chụp tab…');
       if (clients.size === 0) {
         void callEditMessage(
           chatId,
@@ -578,9 +583,9 @@ const server = http.createServer(async (req, res) => {
         try { ws.send(payload); } catch { clients.delete(ws); }
       }
       lastBroadcastAt = Date.now();
-      // 仅 /tabs 截图回调 arm 5s watchdog；ask_user 的键盘存活期以分钟计
-      // （10 分钟过期由 extension 侧清理），gateway 对 au: 无状态。
-      if (!isAskUser) armCallbackWatchdog(chatId, messageId);
+      // 仅 /tabs 截图回调 arm 5s watchdog；ask_user / /model 的键盘存活期以分钟计
+      // （10 分钟过期由 extension 侧清理），gateway 对 au: / sm: 无状态。
+      if (!isExtensionKeyboard) armCallbackWatchdog(chatId, messageId);
       res.writeHead(200).end('OK');
       return;
     }

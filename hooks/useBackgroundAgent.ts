@@ -618,6 +618,23 @@ case 'stream_ops':
           sessionListChannel.publishRenamed(msg.sessionId, msg.title);
           break;
 
+        case 'session_changed':
+          // 会话行被改掉（Telegram `/model`、本窗口 / 别的窗口的 session_config_set、
+          // 以及 rename / pin 都会广播）。当前会话的模型 / 思考档同步进本地 turn
+          // 草稿——否则已打开的 sidepanel 会一直显示旧模型（它只在打开会话 / 重新
+          // subscribe 时才从行 seed，行被后台改掉时毫无感知）。
+          // 走 onSessionSettings → seedTurnFromSession，后者自带「用户已手动改过则
+          // 不覆盖」的 guard，所以 rename / pin 这类不涉及模型的广播不会踩掉用户在途
+          // 的选择，也不会产生可见副作用。
+          if (isCurrentSession(msg.session.id)) {
+            callbacksRef.current.onSessionSettings?.(
+              msg.session.provider,
+              msg.session.model,
+              msg.session.thinkingLevel,
+            );
+          }
+          break;
+
         case 'session_list_error':
           sessionListChannel.publishError(msg.error);
           break;

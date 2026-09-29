@@ -28,18 +28,23 @@
 // 幂等——中间态最多多一次快速重连，最终态永远等于落盘配置。
 
 import {
+  customProviders,
   lastSelectedModel,
   lastSelectedThinkingLevel,
+  providerCredentials,
   telegramGatewayConfig,
   telegramGatewaySecrets,
+  type ModelIdentity,
 } from '@/lib/persistence/storage';
 import { getAssistantText } from '@/lib/agent/message-helpers';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { BroadcastMessage, ServerMessage } from '@/lib/ipc/protocol';
+import { listUsableModelGroups } from '@/lib/providers/usable-models';
 import { sessionManager } from '../chat/session-manager';
 import { sessionStore } from '../chat/session-store';
+import { toSessionSnapshot } from '../chat/client-handlers';
 import { onBroadcastTap } from '../chat/viewers';
-import { onPortConnect, post } from '../ipc/port-registry';
+import { onPortConnect, post, broadcastAll } from '../ipc/port-registry';
 import { telegramGatewayChannel } from '@/lib/telegram-gateway/channel';
 import { splitReply } from '@/lib/telegram-gateway/message-split';
 import { extractInlineImages } from '@/lib/telegram-gateway/inline-images';
@@ -51,6 +56,7 @@ import {
   type BootstrapHandle,
 } from '@/lib/telegram-gateway/bootstrap';
 import { createTelegramAskController } from './ask-user';
+import { createTelegramModelController } from './model-command';
 import { captureTabForTelegram } from './capture';
 import type {
   AgentStateName,
@@ -83,6 +89,123 @@ const askController = createTelegramAskController({
     sessionManager.resolveTool(sessionId, TOOL_ASK_USER, response),
   cancelTool: (sessionId) => sessionManager.cancelTool(sessionId, TOOL_ASK_USER),
   getActiveTurnChatId: (sessionId) => activeTurns.get(sessionId)?.chatId ?? null,
+});
+
+// ─── `/model` 命令 → inline keyboard 频道适配（模块细节见 ./model-command）───
+
+/** `getCurrentModelForChat` 的返回：当前模型 + **该 chat 此刻是否已有会话行**。
+ *  `rowExisted` 用于区分「从未建行」（用户第一条消息就是 /model）与「行在
+ *  /model 之后被删」（用户在 History 里删掉了这个 Telegram 会话，而 apply 还排在
+ *  队列里）——后者不该把已删会话选的模型写进**全局**默认（那是会污染所有新对话的
+ *  用户可见设置）。作为返回值传递而非模块级 Set：事实只在一次 /model 生命周期内
+ *  有效，放在返回值里就不会有陈旧条目被误读。 */
+interface ChatModelState {
+  current: ModelIdentity | null;
+  rowExisted: boolean;
+}
+
+/** 该 chat 当前生效的模型身份 + 会话行是否存在。会话行 → 全局种子（新会话还没建行
+ *  时的兜底）。用 `loadMeta` 而非 `load`——只需要 provider/model 两个 meta 字段，
+ *  `load` 会额外打开 Dexie 树、投影 transcript、跑 sanitize，成本高得多。 */
+async function getCurrentModelForChat(chatId: number): Promise<ChatModelState> {
+  const row = await sessionStore.loadMeta(telegramSessionId(chatId));
+  if (row && row.provider && row.model) {
+    return { current: { provider: row.provider, modelId: row.model }, rowExisted: true };
+  }
+  return { current: await lastSelectedModel.getValue(), rowExisted: false };
+}
+
+/** `/model` 的第一步：落库 + 广播。**不入队**——UI 要立刻同步，不该等 turn 跑完。
+ *  返回「是否还需要对齐活 agent」（false = 无会话行 / 行已删，没有 agent 可对齐）。 */
+async function persistModelForChat(
+  sessionId: string,
+  chatId: number,
+  identity: ModelIdentity,
+  rowExisted: boolean,
+): Promise<boolean> {
+  const existing = await sessionStore.loadMeta(sessionId);
+  if (!existing) {
+    if (rowExisted) {
+      // 行在 /model 之后被删（用户在 History 删了本会话）→ no-op。写全局默认
+      // 会污染所有新对话，而用户的本意只是给一个已删会话换模型。
+      console.warn('[telegram-gateway] /model: session row deleted before apply — skipping');
+      return false;
+    }
+    // 从未建行（用户第一条消息就是 /model）→ 写全局种子，等价 sidepanel 的
+    // 「新对话换模型」路径；下一条消息建行时读到的就是这个值。
+    await lastSelectedModel.setValue(identity);
+    return false;
+  }
+  await sessionStore.updateSettings(
+    sessionId,
+    { provider: identity.provider, model: identity.modelId },
+    { touchUpdatedAt: false },
+  );
+  // 广播 canonical `session_changed`（与 sidepanel 的 session_config_set 同款）
+  // ——否则已打开的 sidepanel 不会知道会话行变了：它的模型 chip 读的是本地
+  // turnModel 草稿，只在打开会话 / 重新 subscribe 时才从行 seed，行被后台改掉
+  // 时毫无感知，界面会一直显示旧模型。
+  // 用 open()（非 loadMeta）是因为 toSessionSnapshot 需要 entryIds/branchInfo 才
+  // 能产出 canonical shape——宁可多开一次树，也不给广播发残缺 payload。
+  const current = await sessionStore.open(sessionId);
+  if (current) broadcastAll({ type: 'session_changed', session: toSessionSnapshot(current) });
+  return true;
+}
+
+/** `/model` 的完整落库流程。分两步，**只有第二步入队**：
+ *  ① `persistModelForChat` 立刻发起（不等队列）—— 落库 + 广播，侧边栏即时同步；
+ *  ② `refreshSessionConfig` 排进该 session 的串行队列 —— 它在 `phase !== 'idle'`
+ *     时**静默 skip**，而 Telegram 是无 turn 的 prompt 入口（`getOrCreateAgent`
+ *     原样返回既有条目、prompt 的 modelChanged 分支因 turnKey == null 永不触发），
+ *     一旦被 skip，agent 会带着旧模型一直跑到 SW 重启。排进队列保证 apply 落地时
+ *     该 session 的 turn 已跑完。
+ *
+ *  返回值保留 rejection（controller 据此 edit 错误文案）；但**写回队列的是已
+ *  catch 的尾巴**——队列里的 turn 是 `.catch()` 收口的永不 reject 形态，若把裸
+ *  job 塞回去，一次 apply 失败会让后续排队的 turn 全部连带 reject。 */
+function applyModelForChat(
+  chatId: number,
+  identity: ModelIdentity,
+  rowExisted: boolean,
+): Promise<void> {
+  const sessionId = telegramSessionId(chatId);
+  // ① 立刻发起，不入队。job 跑到 `await persist` 之前若它已 reject，会短暂处于
+  //    「无 handler」状态 → 先挂 no-op 吸收，避免 unhandled rejection 告警；
+  //    真正的错误仍由 job 的 await 抛给调用方。
+  const persist = persistModelForChat(sessionId, chatId, identity, rowExisted);
+  void persist.catch(() => {});
+  // ② 入队。`sessionQueues.set` 必须在调用点**同步**执行，才能与 turn dispatch
+  //    保持同一顺序（异步 append 会让中间到达的用户消息插队）。
+  const prev = sessionQueues.get(sessionId) ?? Promise.resolve();
+  const job = prev.then(async () => {
+    if (!(await persist)) return;
+    await sessionManager.refreshSessionConfig(sessionId, {
+      provider: identity.provider,
+      model: identity.modelId,
+    });
+  });
+  const tail = job.catch(() => {});
+  sessionQueues.set(sessionId, tail);
+  void tail.then(() => {
+    if (sessionQueues.get(sessionId) === tail) sessionQueues.delete(sessionId);
+  });
+  return job;
+}
+
+const modelController = createTelegramModelController({
+  send: (action) =>
+    handle
+      ? handle.client.sendOutbound(action).catch(() => null)
+      : Promise.resolve(null),
+  listGroups: async () => {
+    const [creds, customs] = await Promise.all([
+      providerCredentials.getValue(),
+      customProviders.getValue(),
+    ]);
+    return listUsableModelGroups(creds, customs ?? []);
+  },
+  getCurrentModel: getCurrentModelForChat,
+  applyModel: applyModelForChat,
 });
 
 /** 发送 agent_state one-way frame（gateway `/status` 的数据源）。只在状态
@@ -278,6 +401,8 @@ async function syncGateway(): Promise<void> {
   // gateway 拆除 → ask_user 问答一并清场 + cancelTool（防 bridge 在 gateway
   // 关掉后永久悬挂；细节见 ask-user.ts 的 teardown 注释）。
   askController.teardown();
+  // `/model` 选型键盘一并失效——旧 token 的迟到点击会被 controller 静默吞掉。
+  modelController.teardown();
   // gateway 拆除 → 进行中 turn 的 timer（typing 续发）一并清理；👀 reaction
   // 留在用户消息上成为静默残留（Telegram client 行为，API 无法回收）。turn
   // 状态一并丢弃——agent_end 晚到也无人收尾。sliding window 計數也歸零。
@@ -300,10 +425,11 @@ async function syncGateway(): Promise<void> {
   handle.client.onMessage((msg) => dispatchInbound(msg));
   // `/tabs` keyboard callback —— gateway 已 answer 过（Telegram 拒绝对同一
   // callback_query_id 的第二次 answer），这里只处理 content；worker-client
-  // 忽略返回值。`au:` 前缀 = ask_user 问答键盘 → 适配层；其余（`cap_*`）走
-  // /tabs 截图流程（行为原状）。
+  // 忽略返回值。`au:` 前缀 = ask_user 问答键盘 → 适配层；`sm:` 前缀 =
+  // `/model` 选型键盘 → 适配层；其余（`cap_*`）走 /tabs 截图流程（行为原状）。
   handle.client.onTelegramCallback((msg) => {
     if (msg.data.startsWith('au:')) return askController.onCallback(msg);
+    if (msg.data.startsWith('sm:')) return modelController.onCallback(msg);
     return dispatchTabsCallback(msg);
   });
 }
@@ -344,6 +470,12 @@ async function dispatchInbound(msg: InboundMessage): Promise<void> {
   // 三种形式；空白不匹配。
   if (/^\/(tabs|t)(@\S+)?\s*$/.test(msg.text.trim())) {
     return dispatchTabsCommand(msg);
+  }
+  // `/model` 同 `/tabs`：显式 utility 命令 —— 不走 LLM、不受 interactiveMode
+  // gate。接受 `/model`、`/model@botname` 两种形式（无短别名——`/m` 易与
+  // 其它约定冲突）。
+  if (/^\/model(@\S+)?\s*$/.test(msg.text.trim())) {
+    return modelController.onCommand(msg);
   }
   // ask_user 问答拦截：✍️ 文本答案就地消费（true = 不往 agent 转发）；
   // keyboard pending 时的普通文本 = dismiss form（ask-user.ts 里 cancelTool
