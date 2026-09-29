@@ -3,9 +3,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Cài dependency trước (layer cache — chỉ re-install khi package.json đổi)
-COPY package.json ./
-RUN npm install --omit=dev && npm cache clean --force
+# Cài dependency trước (layer cache — chỉ re-install khi lockfile đổi).
+# `npm ci` (không phải `install`): cài đúng version đã pin trong package-lock.json
+# → deploy reproducible, không tự nâng minor khi upstream ra bản mới. Đổi dependency
+# thì chạy `npm install` ở local để cập nhật lockfile rồi commit cả hai file.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Source
 COPY server.js ./
