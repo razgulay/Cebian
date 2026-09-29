@@ -11,7 +11,7 @@ import { CEBIAN_SKILLS_DIR, CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-pat
 import { encodeRelPath, vfs } from '@/lib/persistence/vfs';
 import { canvasPanelOpen } from '@/lib/persistence/storage';
 import { canvasChannel } from '@/lib/canvas/sidepanel-channel';
-import { ChatSessionIdContext } from '@/components/chat/context/ChatSessionIdContext';
+import { ChatSessionIdContext } from '@/components/chat/ChatSessionIdContext';
 import { isImageMime, mimeFromPath } from '@/lib/content/mime';
 import { formatBytes } from '@/lib/utils';
 import { extensionSettingsUrl } from '@/lib/browser/file-access';

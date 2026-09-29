@@ -61,8 +61,6 @@ import { isPermissionRequest } from '@/lib/agent/tool-permissions';
 import { useBackgroundAgent } from '@/hooks/useBackgroundAgent';
 import { sessionListChannel } from '@/lib/agent/session-list-channel';
 import { isTelegramSessionTitle } from '@/lib/telegram-gateway/session-title';
-import { useContextUsage } from '@/components/chat/context/useContextUsage';
-import { ContextUsageBadge } from '@/components/chat/context/ContextUsageBadge';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
 import { useFileDropZone, type FileDrop } from '@/hooks/useFileDropZone';
@@ -75,7 +73,7 @@ import type { SessionSnapshot } from '@/lib/ipc/protocol';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { startTrace } from '@/lib/debug/trace';
 import { t } from '@/lib/i18n';
-import { ChatSessionIdContext } from '@/components/chat/context/ChatSessionIdContext';
+import { ChatSessionIdContext } from '@/components/chat/ChatSessionIdContext';
 
 // ─── ChatPage ───
 
@@ -231,10 +229,19 @@ export function ChatPage({
 
   const { messages, branchInfo, isAgentRunning, isCompacting, sessionId: activeSessionId, sessionTitle, lastError, contextUsage } = state;
 
-  // Context-usage 共享视图数据——ChatInput 通过 `usage` prop 消费；调用一次，
-  // 整个组件树共享同一份 severity / headroom / compactNow 入口。turnModel 为
-  // null 时（用户尚未选模型）→ unknown = true，pill 自然隐藏。
-  const usage = useContextUsage(agent, turnModel);
+  // 占用环的手动压缩入口：数据全部来自会话状态，不再经 fork 的 useContextUsage。
+  // `canCompact` 沿用旧口径——至少一对 user + assistant，否则切点无效、后台只会
+  // 回一条 compaction_skipped。
+  const compaction = useMemo(
+    () => ({
+      onCompact: () => { compactNow(); },
+      isCompacting,
+      isAgentRunning,
+      hasModel: turnModel !== null,
+      canCompact: messages.length >= 2,
+    }),
+    [compactNow, isCompacting, isAgentRunning, turnModel, messages.length],
+  );
 
   // Mirror activeSessionId into a ref so the subscribe-effect can read the
   // latest value WITHOUT re-running when activeSessionId changes. Putting
@@ -1143,16 +1150,6 @@ export function ChatPage({
         </div>
       </ScrollArea>
 
-        {/* Floating context-usage badge — anchored absolute bottom-right of
-            * the chat scroll container. Lifted out of ChatInput so it sits
-            * with the message content (where the eye is already moving)
-            * instead of competing with the composer toolbar for horizontal
-            * room. `usage` is computed once at the page level via
-            * `useContextUsage(agent, turnModel)`; `onCompact` proxies to
-            * `agent.compactNow`. The badge owns its own popover open state
-            * and compact-button ref — no prop drilling. */}
-        <ContextUsageBadge usage={usage} onCompact={() => { compactNow(); }} />
-
         {!isAtBottom && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1220,6 +1217,7 @@ export function ChatPage({
           onThinkingChange={handleThinkingChange}
           hideTeamControls={isTelegramSession}
           contextUsage={contextUsage}
+          compaction={compaction}
           onDispatchingChange={setComposerDispatching}
         />
 

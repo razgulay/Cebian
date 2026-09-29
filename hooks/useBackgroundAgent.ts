@@ -86,9 +86,10 @@ export interface AgentPortState {
   contextUsage: ContextUsage | null;
   /** Active model's `contextWindow`（来自 pi-ai Model 的同名字段）。caller 在
    *  `currentModel` / provider 列表变化时通过 `setContextWindow` 推过来；初始
-   *  为 null（无模型 / 解析失败时由 `useContextUsage` 在 effect 里设回 null）。
-   *  ContextUsagePill 用它算 percent = tokens / contextWindow——无 window 就
-   *  隐藏整张 pill，不显示「未知」占位。 */
+   *  为 null（无模型 / 解析失败时设回 null）。
+   *
+   *  注意：占用环自 1.8.0 起改用后台的 `context_usage` 帧（见 `contextUsage`），
+   *  不再读这里；本字段目前仅供尚未迁移的消费方使用。 */
   contextWindow: number | null;
   /** 当前消息流的本地 token 估算。`messages` 改变时通过 effect 重算；BG
    *  `compaction_skipped` 广播时会用权威数字覆写（BG 的 `state.messages` 采样

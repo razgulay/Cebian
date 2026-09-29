@@ -20,7 +20,7 @@ import {
   type WorkerRoleOption,
 } from '@/components/chat/WorkerRoleMentionPopover';
 import { detectAtToken } from '@/components/chat/detect-at-token';
-import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator';
+import { ContextUsageIndicator, type CompactionControl } from '@/components/chat/ContextUsageIndicator';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import type { ContextUsage } from '@/lib/ipc/protocol';
@@ -59,7 +59,7 @@ import { downloadFile, formatDuration, formatCompactCount } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { debugLog } from '@/lib/debug/log';
-import { useResolvedModel } from '@/components/chat/context/useResolvedModel';
+import { useResolvedModel } from '@/hooks/useResolvedModel';
 
 // Pick a stable human label per chip kind for debug logs, toasts, and
 // auto-unpin notifications. Module-level so togglePin and the pin
@@ -121,6 +121,8 @@ interface ChatInputProps {
   onCancelEdit?: () => void;
   /** 当前上下文占用；`null`（还没收到后台快照）时不渲染占用环。 */
   contextUsage: ContextUsage | null;
+  /** 手动压缩入口（占用环 popover 里的「立即压缩」）。不传则只读展示。 */
+  compaction?: CompactionControl;
   /** 发送进行中（上锁到派发完成）的起止通知。聊天页据此决定拖放区此刻能不能接收文件。 */
   onDispatchingChange?: (dispatching: boolean) => void;
   /** 聊天页拖放区放下的文件；`folders` 是被排除的文件夹名，只用来提示。 */
@@ -164,6 +166,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     initialValue,
     onCancelEdit,
     contextUsage,
+    compaction,
     onDispatchingChange,
     addFiles,
   },
@@ -2310,24 +2313,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           <span className="flex-1" />
         </div>
 
-        {/* Toolbar — two fixed rows so every action has a stable slot:
-          *
-          *   Row 1: ContextUsagePill + CompactNowButton, left-aligned. The
-          *   status cluster anchors the top of the composer strip — context
-          *   usage is read-mostly (you glance at it, then keep typing), so
-          *   it sits near the textarea where the eye is already moving.
-          *
-          *   Row 2: model selector + thinking selector on the LEFT, mention
-          *   + mic + send on the RIGHT. The model picker owns the left half
-          *   because its dropdown / breadcrumb body is the heaviest
-          *   context-changing control; the primary action tools (mention /
-          *   mic / send) anchor the right half where the user expects to
-          {/* Toolbar: model selector + thinking selector on the LEFT, mention
-          * context-usage pill + Compact Now button have moved out of the
-          * toolbar entirely — they now live as a floating badge anchored
-          * top-right of the chat scroll container (see ContextUsageBadge
-          * rendered inside chat/index.tsx). Single-row layout keeps the
-          * composer compact and avoids any wrap-induced send clipping. */}
+        {/* Toolbar — single row: model selector + thinking selector on the LEFT,
+          * context-usage ring + mention + mic + send on the RIGHT. The model
+          * picker owns the left half because its dropdown / breadcrumb body is
+          * the heaviest context-changing control; the primary action tools
+          * anchor the right half where the user expects them. The context-usage
+          * ring is read-mostly (you glance at it, then keep typing), so it sits
+          * next to those tools rather than claiming its own row. */}
         <div className="flex items-center justify-between gap-1 px-1.5 pb-0.5">
           <div className="flex items-center gap-0.5">
             <ModelSelector
@@ -2348,7 +2340,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
             {/* Context usage ring (1.8.0): the number comes from the background's
                 `context_usage` frame — the same estimate the compaction threshold uses. */}
-            <ContextUsageIndicator usage={contextUsage} />
+            <ContextUsageIndicator usage={contextUsage} compaction={compaction} />
             <MentionPopover
               disabled={isDispatching}
               onSelect={addMention}
