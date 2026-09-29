@@ -135,6 +135,20 @@ const TYPING_INTERVAL_MS = 4_000;
 // 回到短狀態（Telegram 對話保持快速回應）。15 是「短對話不受打擾、長對話仍會收斂」
 // 的折中：門檻太低會讓幾輪閒聊也觸發一次摘要（每次都是額外一次 LLM 呼叫）。
 const TELEGRAM_MAX_TURNS = 15;
+// 工具狀態行動畫：1Hz 旋轉 emoji 前綴，遞歸 setTimeout 確保 tick 後只在
+// 上一個 editMessageText 落定後才排下一個（防止 429 雪崩 + 避免請求堆疊）。
+// cycle 順序：🔧 → ⚙️ → 🛠️ → 🔩。⚙️ (U+2699) 在 Unicode 11.0 之前是
+// text-default codepoint——缺 U+FE0F 時舊系統 / 字型會 fallback 成黑白線稿，
+// 這是必須顯式拼 FE0F 的那個；🛠️ (U+1F6E0) 自 Unicode 7.0 起已是 emoji-default，
+// FE0F 屬防禦性冗餘，保留是為了讓 cycle 內兩個可帶 FE0F 的字形走同一條渲染
+// 路徑、視覺一致。🔧 (U+1F527) / 🔩 (U+1F529) 本身即 emoji-default，不帶 FE0F。
+const TOOL_STATUS_ANIMATION_INTERVAL_MS = 1_000;
+const TOOL_STATUS_EMOJI_CYCLE: readonly string[] = [
+  '🔧',             // U+1F527 WRENCH
+  '⚙️',              // U+2699 GEAR + U+FE0F variation selector
+  '🛠️',              // U+1F6E0 HAMMER AND WRENCH + U+FE0F
+  '🔩',             // U+1F529 NUT AND BOLT
+];
 
 /** 一个进行中的 Telegram turn 的 UX 状态。session 结束 / gateway 拆除时清理。 */
 interface TelegramTurnState {
@@ -153,6 +167,14 @@ interface TelegramTurnState {
   pendingStatusText: string | null;
   /** 狀態行當前文本——label 未變化時跳過 edit（'message is not modified' 預防）。 */
   lastSentStatus: string;
+  // ─── 工具狀態行動畫（旋轉 emoji 前綴，1Hz；遞歸 setTimeout）───
+  /** 動畫遞歸 timer；null = 未在跑。setTimeout 而非 setInterval，確保排隊下一個 tick
+   *  必須等待上一個 sendOutbound().finally() 落定——避免慢網時並行請求堆疊撞 429。 */
+  toolStatusAnimTimer: ReturnType<typeof setTimeout> | null;
+  /** 動畫幀索引（指向 TOOL_STATUS_EMOJI_CYCLE）；label 切換不重置，emoji 連續。 */
+  toolStatusAnimFrame: number;
+  /** 當前 tool label——動畫 tick 用於 build 文本；label 切換時由 scheduleToolStatus 更新。 */
+  currentToolLabel: string;
 }
 
 /** sessionId → 进行中的 turn。agent_end / teardown 时清理。 */
@@ -172,6 +194,9 @@ function startTurnUx(msg: InboundMessage, sessionId: string): void {
     statusThrottleTimer: null,
     pendingStatusText: null,
     lastSentStatus: '',
+    toolStatusAnimTimer: null,
+    toolStatusAnimFrame: 0,
+    currentToolLabel: '',
   };
   activeTurns.set(sessionId, state);
   emitAgentState(msg.chat_id, 'thinking');
@@ -561,7 +586,7 @@ async function runTelegramTurn(sessionId: string, msg: InboundMessage): Promise<
   }
 }
 
-/** 清理 turn 的 timers（typing 续发 / 工具狀態行 edit 節流）。 */
+/** 清理 turn 的 timers（typing 续发 / 工具狀態行 edit 節流 / 動畫 timer）。 */
 function clearTurnTimers(state: TelegramTurnState): void {
   if (state.typingTimer !== null) {
     clearInterval(state.typingTimer);
@@ -571,16 +596,20 @@ function clearTurnTimers(state: TelegramTurnState): void {
     clearTimeout(state.statusThrottleTimer);
     state.statusThrottleTimer = null;
   }
+  stopStatusAnimation(state);
   state.pendingStatusText = null;
 }
 
 /** 刪掉工具狀態行（正式回覆落位 / turn 中止時的收尾——聊天窗不留作業殘渣）。
- *  置 statusDead：遲到的首發回執見此標記會自刪（見 scheduleToolStatus 的 .then）。 */
+ *  置 statusDead：遲到的首發回執見此標記會自刪（見 scheduleToolStatus 的 .then）。
+ *  同時停掉動畫 timer——statusDead 後 runStatusAnimationFrame 不再排隊下一幀，
+ *  此處主動 clearTimeout 雙保險（任何尚未觸發的下一幀回調直接取消）。 */
 function deleteStatusMessage(state: TelegramTurnState): void {
   if (state.statusThrottleTimer !== null) {
     clearTimeout(state.statusThrottleTimer);
     state.statusThrottleTimer = null;
   }
+  stopStatusAnimation(state);
   state.pendingStatusText = null;
   const id = state.statusMessageId;
   state.statusMessageId = null;
@@ -622,16 +651,22 @@ function abortTurnUx(sessionId: string): void {
 }
 
 /**
- * 工具狀態行（Step-Progress）：第一個 tool_pending 到達時發出一條**靜默**狀態
- * 消息（`🔧 <label>...`）——即時確認「系統在做事、在做什麼」；後續 tool 切換以
- * trailing 窗口（TOOL_STATUS_THROTTLE_MS）就地 edit，多步 ReAct 鏈每步有名有姓、
- * 又不刷屏。agent_end / abort 時整行刪除——正式回覆落位後聊天窗乾淨。
+ * 工具狀態行（Step-Progress + 動畫）：第一個 tool_pending 到達時發出一條**靜默**狀態
+ * 消息（emoji 來自 TOOL_STATUS_EMOJI_CYCLE 第 0 幀 + `<label>...`），即時確認
+ * 「系統在做事、在做什麼」；後續 tool 切換以 trailing 窗口（TOOL_STATUS_THROTTLE_MS）
+ * 就地 edit，多步 ReAct 鏈每步有名有姓又不刷屏。狀態行發出後啟動 1Hz 動畫 timer：
+ * emoji 在 🔧 → ⚙️ → 🛠️ → 🔩 → 🔧 ... 循環，每秒一幀、遞歸 setTimeout 保證
+ * 上一幀落定才排下一幀（防 429 + 並行請求覆蓋）。label 變更**不重置** frame 索引
+ * ——emoji 在切換瞬間同字形短暫停在兩個 label 上（「🛠️ Reading file...」→「🛠️ Browsing web...」），
+ * 視覺上像是同一個工具在「換目標」，比 emoji 從 0 重啟自然。agent_end / abort 時
+ * 整行刪除——正式回覆落位後聊天窗乾淨。
  * 首發失敗（relay 舊 / 網路斷）→ statusDead，本輪不再嘗試；finalize 的回覆路徑
  * 與此獨立，照常送達。
  */
 function scheduleToolStatus(state: TelegramTurnState, label: string): void {
   if (state.statusDead) return;
-  const text = `🔧 ${label}...`;
+  state.currentToolLabel = label;
+  const text = statusFrameText(label, state.toolStatusAnimFrame);
   if (state.statusMessageId === null) {
     if (state.statusSendInFlight) {
       // 首發在途：只記最新文本——回執到達後若已變化，補一次節流 edit
@@ -669,6 +704,8 @@ function scheduleToolStatus(state: TelegramTurnState, label: string): void {
           return;
         }
         state.statusMessageId = result.message_id;
+        // 狀態行落地 → 啟動 1Hz emoji 旋轉動畫（遞歸 setTimeout）。
+        ensureStatusAnimation(state);
         if (state.pendingStatusText !== null && state.pendingStatusText !== text) {
           const pending = state.pendingStatusText;
           state.pendingStatusText = null;
@@ -713,6 +750,81 @@ function scheduleStatusEdit(state: TelegramTurnState, text: string): void {
       })
       .catch(() => {});
   }, TOOL_STATUS_THROTTLE_MS);
+}
+
+// ─── 工具狀態行動畫（遞歸 setTimeout：tick N+1 必須等 tick N 的 sendOutbound 落定）───
+
+/** Build 一幀動畫文本：`<emoji> <label>...`。emoji 取自 cycle 第 `frame` 個元素。 */
+function statusFrameText(label: string, frame: number): string {
+  const cycle = TOOL_STATUS_EMOJI_CYCLE;
+  const emoji = cycle[((frame % cycle.length) + cycle.length) % cycle.length]!;
+  return `${emoji} ${label}...`;
+}
+
+/** 啟動動畫 timer（若未在跑）。遞歸：每個 tick 排下一個 setTimeout，**只在
+ *  上一個 sendOutbound().finally() 落定後**才排隊下一個。setInterval 不可——慢網
+ *  下累積並行的 editMessageText 請求會撞 429 + 在 chat 上互相覆蓋。 */
+function ensureStatusAnimation(state: TelegramTurnState): void {
+  if (state.toolStatusAnimTimer !== null) return;
+  const scheduleNext = (): void => {
+    state.toolStatusAnimTimer = setTimeout(() => {
+      state.toolStatusAnimTimer = null;
+      // 同步觸發一幀：sync 邏輯；async 部分（sendOutbound 落定後排下一個）
+      // 在 .finally() 內完成。
+      runStatusAnimationFrame(state, scheduleNext);
+    }, TOOL_STATUS_ANIMATION_INTERVAL_MS);
+  };
+  scheduleNext();
+}
+
+/** 停掉動畫 timer。deleteStatusMessage / clearTurnTimers 都會調。 */
+function stopStatusAnimation(state: TelegramTurnState): void {
+  if (state.toolStatusAnimTimer !== null) {
+    clearTimeout(state.toolStatusAnimTimer);
+    state.toolStatusAnimTimer = null;
+  }
+}
+
+/** 一幀動畫的同步決策 + 異步發送。`scheduleNext` 是 sendOutbound 落定後的回調，
+ *  由 ensureStatusAnimation 注入——只在上一個請求 settle 後才排下一個 tick。 */
+function runStatusAnimationFrame(
+  state: TelegramTurnState,
+  scheduleNext: () => void,
+): void {
+  // 收尾 / 拆除 / 首發失敗 / 尚未落地 → 不發、不排下一個。
+  // currentToolLabel 保證非空：ensureStatusAnimation 只在 scheduleToolStatus 的
+  // 首發 .then 內啟動，該路徑已先把 label 寫入，且後續無任何路徑重設它。
+  if (state.statusDead) return;
+  if (state.statusMessageId === null) return;
+  // label 變更已排隊（pendingStatusText != null）→ 讓節流窗口先發，動畫不覆蓋。
+  // 注意：label 變更的 edit 自身會把 lastSentStatus 推到新 label 的當前 frame，
+  // 動畫下一幀再從當前 frame 續接，emoji 不中斷。
+  if (state.pendingStatusText !== null) {
+    scheduleNext();
+    return;
+  }
+  const gateway = handle;
+  if (!gateway) return;
+  // frame 每 tick 前進 1，cycle 4 個字形互異 → 新 text 必與上一幀不同，因此無需
+  // 「text === lastSentStatus 就跳過」的比對（label 變更路徑的相同比對由
+  // scheduleStatusEdit 負責）。若日後 cycle 改成含重複 emoji / 長度 1，需在此補回。
+  state.toolStatusAnimFrame = (state.toolStatusAnimFrame + 1) % TOOL_STATUS_EMOJI_CYCLE.length;
+  const text = statusFrameText(state.currentToolLabel, state.toolStatusAnimFrame);
+  state.lastSentStatus = text;
+  void gateway.client
+    .sendOutbound({
+      kind: 'editMessage',
+      request_id: crypto.randomUUID(),
+      chat_id: state.chatId,
+      message_id: state.statusMessageId,
+      text,
+    })
+    .catch(() => {})
+    .finally(() => {
+      // 上一幀落定（無論成功 / 失敗）→ 排下一幀；若已被收尾（statusDead）則
+      // 確保不再啟動。
+      if (!state.statusDead) scheduleNext();
+    });
 }
 
 /**

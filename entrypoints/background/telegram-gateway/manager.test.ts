@@ -685,33 +685,157 @@ describe('setupTelegramGatewayManager', () => {
     mockToolLabel.mockReturnValueOnce('Reading file');
     fireToolExecution(sessionId, 'fs_read');
 
-    await flushAsync(); // 回執落位 → statusMessageId 就位 + 補發 edit 的節流窗口啟動
+    await flushAsync(); // 回執落位 → statusMessageId 就位 + 補發 edit 的節流窗口啟動 + 動畫 timer 啟動
     const sends = sentMessages(client);
     expect(sends).toHaveLength(1); // 在途合併：只有 1 條狀態行
     expect(sends[0]).toMatchObject({ text: '🔧 Browsing web...', disable_notification: true });
 
+    // 節流窗口內：label change 的 edit 未放行；動畫 tick 因 pendingStatusText != null 也跳過
     await vi.advanceTimersByTimeAsync(500);
-    expect(statusEdits(client)).toHaveLength(0); // 節流窗口內未放行
+    expect(statusEdits(client)).toHaveLength(0);
 
-    await vi.advanceTimersByTimeAsync(2_500);
+    // 走過節流窗口：label change 落地。動畫在 pending 清掉後續接會再發 edit，
+    // 我們只斷言「label change 的 edit 存在」+「它是首個 edit」（priority 體現）。
+    await vi.advanceTimersByTimeAsync(3_000);
     const edits = statusEdits(client);
-    expect(edits).toHaveLength(1);
+    expect(edits.length).toBeGreaterThanOrEqual(1);
     expect(edits[0]).toMatchObject({ message_id: 1, text: '🔧 Reading file...' });
   });
 
-  it('label 未变化 → 不重复 edit', async () => {
+  // ─── 工具狀態行動畫（1Hz emoji 旋轉；遞歸 setTimeout）───
+
+  it('狀態行發出後 1Hz 動畫：editMessage 依 cycle 切換 emoji 前綴', async () => {
+    const client = await startTurnHarness();
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync(); // 狀態行尚未發出
+    const sessionId = await telegramSessionId(965822571);
+
+    fireToolExecution(sessionId); // 狀態行發出：frame 0 (🔧 Browsing web...)
+    await flushAsync(); // 狀態行落地、動畫 timer 排到 +1s
+
+    // 推進 2.5s：動畫 tick 在 +1s、+2s 各發一次 edit
+    await vi.advanceTimersByTimeAsync(2_500);
+    const edits = statusEdits(client);
+    expect(edits.length).toBeGreaterThanOrEqual(2);
+    expect(edits[0]).toMatchObject({ message_id: 1, text: '⚙️ Browsing web...' });
+    expect(edits[1]).toMatchObject({ message_id: 1, text: '🛠️ Browsing web...' });
+  });
+
+  it('動畫 cycle 4 幀：🔧 → ⚙️ → 🛠️ → 🔩 → 🔧（frame 4 回到 frame 0 的字形，仍與上一幀 🔩 不同 → 照常 fire）', async () => {
     const client = await startTurnHarness();
     await inboundCallback(0)(TEST_INBOUND);
     await flushAsync();
     const sessionId = await telegramSessionId(965822571);
 
     fireToolExecution(sessionId);
-    await vi.advanceTimersByTimeAsync(2_800); // 状态行发出（send 非 edit）
+    await flushAsync();
+
+    // 5 ticks × 1s = 5s；cycle 4 + 1 wrap。預期 edits: ⚙️, 🛠, 🔩, 🔧, ⚙️
+    await vi.advanceTimersByTimeAsync(5_500);
+    const edits = statusEdits(client);
+    expect(edits.map((e) => e.text)).toEqual([
+      '⚙️ Browsing web...',
+      '🛠️ Browsing web...',
+      '🔩 Browsing web...',
+      '🔧 Browsing web...',
+      '⚙️ Browsing web...',
+    ]);
+  });
+
+  it('label 變更（pendingStatusText != null）期間動畫 tick 跳過 edit、不覆蓋排隊中的 label edit', async () => {
+    const client = await startTurnHarness();
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
+
+    // tool 1：狀態行發出
+    fireToolExecution(sessionId);
+    // tool 2（同 1s 內）：label 變更排隊到 pendingStatusText
+    mockToolLabel.mockReturnValueOnce('Reading file');
+    fireToolExecution(sessionId, 'fs_read');
+
+    await flushAsync(); // 狀態行落地 + 動畫 timer + throttle timer 排隊
+
+    // 推進到 throttle 窗口前：動畫 tick 期間 pendingStatusText 仍非空 → 跳過 edit
+    await vi.advanceTimersByTimeAsync(2_500);
     expect(statusEdits(client)).toHaveLength(0);
 
+    // 走過 throttle 窗口：label change edit 落地
+    await vi.advanceTimersByTimeAsync(3_000);
+    const edits = statusEdits(client);
+    expect(edits.length).toBeGreaterThanOrEqual(1);
+    expect(edits[0]).toMatchObject({ text: '🔧 Reading file...' });
+  });
+
+  it('finalize (agent_end) 後 stopStatusAnimation，後續不再觸發 editMessage', async () => {
+    await telegramGatewayConfig.setValue(VALID_CONFIG(true));
+    await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
+    const fields = {
+      id: await telegramSessionId(965822571),
+      title: 'Telegram · @tester',
+      model: 'test-model',
+      provider: 'test',
+      userInstructions: '',
+      thinkingLevel: 'medium' as const,
+    };
+    const { sessionStore } = await import('../chat/session-store');
+    await sessionStore.create(fields);
+    await sessionStore.createWithMessages(fields, [
+      { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+    ] as never[]);
+    await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
+    setupTelegramGatewayManager();
+    await flushAsync();
+    const client = mockBootstrap.mock.results[0]!.value.client as {
+      sendOutbound: ReturnType<typeof vi.fn>;
+    };
+    client.sendOutbound.mockClear();
+
+    await inboundCallback(0)(TEST_INBOUND);
+    const sessionId = await telegramSessionId(965822571);
     fireToolExecution(sessionId);
-    await vi.advanceTimersByTimeAsync(2_800);
-    expect(statusEdits(client)).toHaveLength(0); // 同 label → 跳过 edit
+    await flushAsync(); // 狀態行落地、動畫啟動
+
+    // 動畫先 tick 幾次（驗證它真的在跑）
+    await vi.advanceTimersByTimeAsync(3_000);
+    const editsBeforeFinalize = statusEdits(client).length;
+    expect(editsBeforeFinalize).toBeGreaterThanOrEqual(1);
+
+    // finalize → stopStatusAnimation + deleteStatusMessage
+    fireBroadcast({
+      type: 'agent_end',
+      sessionId,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+      ] as never[],
+    });
+    await flushAsync();
+    expect(statusDeletes(client)).toHaveLength(1);
+
+    // 推 5s：動畫已停，不會再發 editMessage。
+    const editsAtFinalize = statusEdits(client).length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(statusEdits(client).length).toBe(editsAtFinalize);
+  });
+
+  it('abort (prompt throw) 後 stopStatusAnimation + statusDead，後續 tick 不再 fire', async () => {
+    const client = await startTurnHarness();
+    mockPrompt.mockImplementationOnce(async () => {
+      const sessionId = await telegramSessionId(965822571);
+      fireToolExecution(sessionId);
+      throw new Error('mid-run failure');
+    });
+
+    await inboundCallback(0)(TEST_INBOUND);
+    await flushAsync(); // abort 已跑：reaction ❌ + status line 被刪
+
+    const editsAtAbort = statusEdits(client).length;
+    expect(statusDeletes(client)).toHaveLength(1);
+
+    // 推 5s：動畫已停，statusDead=true，runStatusAnimationFrame 早返。
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(statusEdits(client).length).toBe(editsAtAbort);
   });
 
   it('status 首發失敗 → 本輪放棄（不重試），finalize 照常送達', async () => {
