@@ -2346,7 +2346,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             )}
           </div>
           <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
-            {/* 上下文占用环（1.8.0）：数字来自后台 context_usage 帧，与压缩判据同一套估算。 */}
+            {/* Context usage ring (1.8.0): the number comes from the background's
+                `context_usage` frame — the same estimate the compaction threshold uses. */}
             <ContextUsageIndicator usage={contextUsage} />
             <MentionPopover
               disabled={isDispatching}
