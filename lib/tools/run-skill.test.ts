@@ -1,119 +1,102 @@
-// runSkillGate 单测——重点：ChatInput toolbar 的 Skills chip（chatSkillAuto
-// 缓存）短路掉 permission card，**不持久化 grant**。toggle off → 立即恢复询问。
-
+import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
+import { getSkillGrant } from '@/lib/ai-config/skill-grants';
+import { vfs } from '@/lib/persistence/vfs';
+import { CEBIAN_SKILLS_DIR } from '@/lib/persistence/vfs-paths';
+import { createSessionRunSkillTool, runSkillGate } from '@/lib/tools/run-skill';
+import { runInSandbox } from '@/lib/tools/sandbox-rpc';
 
-vi.mock('@/lib/persistence/vfs', () => ({
-  vfs: {
-    stat: vi.fn(async () => undefined),
-    readFile: vi.fn(async () => '---\nmetadata:\n  permissions:\n    - chrome.cookies\n---\n'),
-    exists: vi.fn(async () => true),
-  },
-  normalizePath: (p: string) => p,
-}));
-
-vi.mock('@/lib/content/frontmatter', () => ({
-  parseFrontmatter: () => ({
-    data: { metadata: { permissions: ['chrome.cookies'] } },
-    body: '',
-  }),
-}));
-
-vi.mock('@/lib/ai-config/skill-grants', () => ({
-  getSkillGrants: vi.fn(async () => ({})),
-  setSkillGrant: vi.fn(async () => {}),
-  permissionsMatch: vi.fn(() => false),
-}));
-
-vi.mock('@/lib/ai-config/skill-validator', () => ({
-  validateSkillName: () => ({ valid: true, error: undefined }),
-}));
-
-vi.mock('./sandbox-rpc', () => ({
-  runInSandbox: vi.fn(),
-}));
-
-// fake-browser 不实现 chrome.i18n.getMessage——用 stub 避免 t 抛错。
 vi.mock('@/lib/i18n', () => ({
-  t: (key: string, subs?: unknown[]) =>
-    subs && subs.length ? `${key}|${subs.join(',')}` : key,
+  t: (key: string) => key,
 }));
 
-describe('runSkillGate — Skills chip (chatSkillAuto) toggle', () => {
-  let runSkillGate: typeof import('./run-skill').runSkillGate;
-  let _setChatSkillAutoCachedForTest: typeof import('./run-skill')._setChatSkillAutoCachedForTest;
-  let chatSkillAuto: typeof import('@/lib/persistence/storage').chatSkillAuto;
+vi.mock('@/lib/tools/sandbox-rpc', () => ({
+  runInSandbox: vi.fn(async () => ({ ok: true })),
+}));
 
+const SKILL = 'snapshot-test';
+const SKILL_DIR = `${CEBIAN_SKILLS_DIR}/${SKILL}`;
+const SCRIPT = 'scripts/run.js';
+
+function skillMd(permission: string): string {
+  return `---\nname: ${SKILL}\ndescription: test\nmetadata:\n  permissions:\n    - ${permission}\n---\nTest`;
+}
+
+async function writeSkill(permission: string, script: string): Promise<void> {
+  await vfs.rm(SKILL_DIR, { recursive: true, force: true });
+  await vfs.mkdir(`${SKILL_DIR}/scripts`, { recursive: true });
+  await vfs.writeFile(`${SKILL_DIR}/SKILL.md`, skillMd(permission));
+  await vfs.writeFile(`${SKILL_DIR}/${SCRIPT}`, script);
+}
+
+describe('runSkillGate 快照绑定', () => {
   beforeEach(async () => {
-    fakeBrowser.reset(); // AGENTS.md：清 storage 起点，避免与 watch 时序纠缠
-    vi.resetModules();
-    const mod = await import('./run-skill');
-    runSkillGate = mod.runSkillGate;
-    _setChatSkillAutoCachedForTest = mod._setChatSkillAutoCachedForTest;
-    chatSkillAuto = (await import('@/lib/persistence/storage')).chatSkillAuto;
-    // 测试以干净缓存启动（默认 false）。
-    _setChatSkillAutoCachedForTest(false);
+    fakeBrowser.reset();
+    vi.mocked(runInSandbox).mockClear();
+    await writeSkill('vfs.read', 'module.exports = "before";');
   });
 
-  it('toggle ON → 立即放行（needsGrant:false），不读取 grant、不持久化', async () => {
-    const grantsMod = await import('@/lib/ai-config/skill-grants');
-    _setChatSkillAutoCachedForTest(true);
-    const result = await runSkillGate.check({
-      skill: 'web-summary',
-      script: 'extract.js',
-    });
-    expect(result.needsGrant).toBe(false);
-    // 关键：不读 grants（toggle ON 不查询永久授权，不读路径）、不持久化任何东西
-    expect(grantsMod.getSkillGrants).not.toHaveBeenCalled();
-    expect(grantsMod.setSkillGrant).not.toHaveBeenCalled();
+  it('授权检查后脚本变化则执行失败关闭', async () => {
+    const args = { skill: SKILL, script: SCRIPT, args: {}, tabId: 1 };
+    const checked = await runSkillGate.check(args, 'call-script-changed');
+    expect(checked.needsGrant).toBe(true);
+    await vfs.writeFile(`${SKILL_DIR}/${SCRIPT}`, 'module.exports = "after";');
+
+    const tool = createSessionRunSkillTool('session-1');
+    await expect(tool.execute('call-script-changed', args)).rejects.toThrow(
+      /changed while permission approval was pending/i,
+    );
   });
 
-  it('toggle OFF (默认) + skill 有 permissions + 无 grant → 出 permissionRequest card', async () => {
-    _setChatSkillAutoCachedForTest(false);
-    const result = await runSkillGate.check({
-      skill: 'web-summary',
-      script: 'extract.js',
-    });
-    expect(result.needsGrant).toBe(true);
-    expect(result.request).toEqual({
-      title: expect.any(String),
-      permissions: ['chrome.cookies'],
-    });
+  it('always 只持久化授权卡片展示的权限集合', async () => {
+    const args = { skill: SKILL, script: SCRIPT, args: {}, tabId: 1 };
+    await runSkillGate.check(args, 'call-always');
+    await vfs.writeFile(`${SKILL_DIR}/SKILL.md`, skillMd('chrome.cookies'));
+
+    await runSkillGate.persistGrant(args, 'call-always');
+
+    expect((await getSkillGrant(SKILL))?.permissions).toEqual(['vfs.read']);
+    runSkillGate.discard?.('call-always');
   });
 
-  it('toggle ON → OFF 往返 → 立即恢复询问（不留残余）', async () => {
-    _setChatSkillAutoCachedForTest(true);
-    const on = await runSkillGate.check({
-      skill: 'web-summary',
-      script: 'extract.js',
-    });
-    expect(on.needsGrant).toBe(false);
+  it('授权检查后权限变化则执行失败关闭', async () => {
+    const args = { skill: SKILL, script: SCRIPT, args: {}, tabId: 1 };
+    await runSkillGate.check(args, 'call-permission-changed');
+    await vfs.writeFile(`${SKILL_DIR}/SKILL.md`, skillMd('chrome.cookies'));
 
-    _setChatSkillAutoCachedForTest(false);
-    const off = await runSkillGate.check({
-      skill: 'web-summary',
-      script: 'extract.js',
-    });
-    expect(off.needsGrant).toBe(true);
-    expect(off.request?.permissions).toEqual(['chrome.cookies']);
+    const tool = createSessionRunSkillTool('session-1');
+    await expect(tool.execute('call-permission-changed', args)).rejects.toThrow(
+      /changed while permission approval was pending/i,
+    );
+    expect(runInSandbox).not.toHaveBeenCalled();
   });
 
-  it('真实路径：写 storage → watch 同步缓存 → gate 放行（端到端覆盖实际 chip 流程）', async () => {
-    // 模拟 ChatInput 的 SkillsChip 翻转：useStorageItem 写入 → watch 触发 →
-    // 缓存更新 → 下次 gate.check 看到新值。这条覆盖了之前直接调 setter 时绕过的
-    // watch 订阅 + 初始 getValue 同步。
-    const onResult = await chatSkillAuto.getValue();
-    expect(onResult).toBe(false);
-    await chatSkillAuto.setValue(true);
-    // watch 回调可能跨一个 microtask 边界——放一个 setTimeout(0) 让 watch 跑完。
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const result = await runSkillGate.check({
-      skill: 'web-summary',
-      script: 'extract.js',
-    });
-    expect(result.needsGrant).toBe(false);
-    const grantsMod = await import('@/lib/ai-config/skill-grants');
-    expect(grantsMod.setSkillGrant).not.toHaveBeenCalled();
+  it('授权检查后改用另一脚本则执行失败关闭', async () => {
+    const checkedArgs = { skill: SKILL, script: SCRIPT, args: {}, tabId: 1 };
+    await runSkillGate.check(checkedArgs, 'call-script-path-changed');
+    await vfs.writeFile(`${SKILL_DIR}/scripts/other.js`, 'module.exports = "before";');
+
+    const tool = createSessionRunSkillTool('session-1');
+    await expect(tool.execute('call-script-path-changed', {
+      ...checkedArgs,
+      script: 'scripts/other.js',
+    })).rejects.toThrow(/changed while permission approval was pending/i);
+    expect(runInSandbox).not.toHaveBeenCalled();
+  });
+
+  it('内容未变化时正常进入沙箱，并且快照不可重放', async () => {
+    const args = { skill: SKILL, script: SCRIPT, args: { value: 1 }, tabId: 1 };
+    await runSkillGate.check(args, 'call-unchanged');
+    const tool = createSessionRunSkillTool('session-1');
+
+    const result = await tool.execute('call-unchanged', args);
+
+    expect(result.content).toEqual([{ type: 'text', text: '{\n  "ok": true\n}' }]);
+    expect(runInSandbox).toHaveBeenCalledTimes(1);
+    await expect(tool.execute('call-unchanged', args)).rejects.toThrow(
+      /no authorization snapshot/i,
+    );
+    expect(runInSandbox).toHaveBeenCalledTimes(1);
   });
 });

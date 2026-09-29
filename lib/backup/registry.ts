@@ -14,7 +14,9 @@ import {
   lastSelectedModel,
   compactionModel,
   domSubAgentModel,
+  compactionSettings,
   autoTitleSettings,
+  chatAppearance,
   customProviders,
   userInstructions,
   themePreference,
@@ -82,9 +84,8 @@ export type StorageClass = 'settings' | 'credentials' | 'exclude';
  * 拆出无密钥的 `safe`（进 settings）与抽离的 `secret`（进 credentials）。
  * `restoreSecret` 在恢复 credentials 分类时，把备份 secret 按策略写进本地完整值。
  * `fillMissing` 是合并模式的「补缺」钩子，与 storageClass 解耦：credentials 类 item 必
- * 须声明；settings 类的集合项可选声明以获得「补缺」（列表项如 customProviders /
- * mcpServers 按元素 id，map 项如 workerModels 按 role key）；未声明的标量 settings
- * 项在 merge 下保留本地。
+ * 须声明；settings 类的列表项（customProviders / mcpServers）可选声明以获得「按 id
+ * 补缺」；未声明的标量 settings 项在 merge 下仅在本地从未写过时从备份补入，否则保留本地。
  */
 export interface BackupEntry<T> {
   item: WxtStorageItem<T, any>;
@@ -374,6 +375,9 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
     storageClass: 'settings',
     fillMissing: (local: ModelIdentity | null, backup: ModelIdentity | null) => local ?? backup,
   }),
+  // 自动压缩设置（开关 + 触发阈值百分比，1.8.0 新增）。无 fillMissing：merge 下本地
+  // 没存过才从备份补入整个对象，本地已配置则保留本地。
+  entry({ item: compactionSettings, storageClass: 'settings' }),
   // DOM 子代理模型：`null` = 关闭功能（默认），merge 视为空 → 用备份补入；本地已
   // 配置保留本地。语义与 compactionModel 同形态。Caveat：无法区分「用户主动清空以
   // 关闭 delegate_dom」与「从未配置」，前者在备份带模型时会被重新填回（merge「只增
@@ -461,6 +465,11 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
     fillMissing: (local: AutoTitleSettings, backup: AutoTitleSettings) =>
       local.enabled && local.model == null ? backup : local,
   }),
+  // 对话区外观（1.8.0 新增：字号 80–150% + 字体预设 / 本机字体名，无密钥）。无
+  // fillMissing：merge 下本地没存过才从备份补入整个对象。
+  // 注意：fork 另有一套 chatFontSize / chatFontFamily（见文件末尾 exclude 区），
+  // 与 chatAppearance 是两代并存的实现，二者归属分类不同，待 3c 合并 UI 时统一。
+  entry({ item: chatAppearance, storageClass: 'settings' }),
   entry({
     item: customProviders,
     storageClass: 'settings',

@@ -10,6 +10,9 @@ import { chatSkillAuto } from '@/lib/persistence/storage';
 import { t } from '@/lib/i18n';
 import type { ToolGate, PermissionRequestDetails } from '@/lib/agent/tool-permissions';
 import { runInSandbox } from './sandbox-rpc';
+import { SkillSnapshotRegistry, createSkillSnapshot } from './skill-snapshot';
+
+const skillSnapshots = new SkillSnapshotRegistry();
 
 // ─── Tool definition ───
 
@@ -69,11 +72,12 @@ export const runSkillTool: AgentTool<typeof RunSkillParameters> = {
 export function createSessionRunSkillTool(sessionId: string): AgentTool<typeof RunSkillParameters> {
   return {
     ...runSkillTool,
-    execute: (_toolCallId, params, signal) => executeRunSkill(sessionId, params, signal),
+    execute: (toolCallId, params, signal) => executeRunSkill(toolCallId, sessionId, params, signal),
   };
 }
 
 async function executeRunSkill(
+  toolCallId: string,
   sessionId: string,
   params: Static<typeof RunSkillParameters>,
   signal?: AbortSignal,
@@ -84,7 +88,10 @@ async function executeRunSkill(
 
   // 授权已由 beforeToolCall 门禁（runSkillGate）在执行前强制：execute 能跑到这里，
   // 即代表「该 skill 无需授权」或「用户已授权」。这里只解析路径 + 进沙箱执行。
-  const { permissions, code } = await resolveSkillRun(skill, script);
+  const resolved = await resolveSkillRun(skill, script);
+  const { permissions, code } = resolved;
+  const currentSnapshot = await createSkillSnapshot(resolved);
+  skillSnapshots.assertMatch(toolCallId, currentSnapshot);
 
   signal?.throwIfAborted();
 
@@ -106,7 +113,7 @@ async function executeRunSkill(
  */
 async function resolveSkillPermissions(
   skill: string,
-): Promise<{ normalizedSkillDir: string; permissions: string[] }> {
+): Promise<{ normalizedSkillDir: string; permissions: string[]; skillMd: string }> {
   // 技能身份 = 文件夹名（全代码库一致：grants / 扫描 / 导入清理都用它）。先按
   // agentskills.io 规范校验，拒掉 `foo/../bar` 这类别名——它们能指向同一目录却
   // 让 grant 的存/读/清用上不同 key，制造授权错配（详见 skill-validator）。
@@ -142,7 +149,7 @@ async function resolveSkillPermissions(
     throw new Error(`Failed to parse SKILL.md: ${(err as Error).message}`);
   }
 
-  return { normalizedSkillDir, permissions };
+  return { normalizedSkillDir, permissions, skillMd: content };
 }
 
 /**
@@ -152,8 +159,14 @@ async function resolveSkillPermissions(
 async function resolveSkillRun(
   skill: string,
   script: string,
-): Promise<{ permissions: string[]; code: string }> {
-  const { normalizedSkillDir, permissions } = await resolveSkillPermissions(skill);
+): Promise<{
+  permissions: string[];
+  skillMd: string;
+  scriptPath: string;
+  script: string;
+  code: string;
+}> {
+  const { normalizedSkillDir, permissions, skillMd } = await resolveSkillPermissions(skill);
 
   const normalizedScriptPath = normalizePath(`${normalizedSkillDir}/${script}`);
   if (!normalizedScriptPath.startsWith(normalizedSkillDir + '/')) {
@@ -165,7 +178,7 @@ async function resolveSkillRun(
   const rawScript = await vfs.readFile(normalizedScriptPath, 'utf8');
   const code = typeof rawScript === 'string' ? rawScript : new TextDecoder().decode(rawScript as Uint8Array);
 
-  return { permissions, code };
+  return { permissions, skillMd, scriptPath: script, script: code, code };
 }
 
 // ─── Permission gate (registered into session-manager's PERMISSION_GATES) ───
@@ -182,22 +195,27 @@ async function resolveSkillRun(
 export const runSkillGate: ToolGate = {
   toolName: TOOL_RUN_SKILL,
 
-  async check(args): Promise<{ needsGrant: boolean; request?: PermissionRequestDetails }> {
+  async check(args, toolCallId): Promise<{ needsGrant: boolean; request?: PermissionRequestDetails }> {
     const { skill, script } = args as Static<typeof RunSkillParameters>;
+
+    let resolved: Awaited<ReturnType<typeof resolveSkillRun>>;
+    try {
+      resolved = await resolveSkillRun(skill, script);
+    } catch {
+      // 解析失败 → 交给 execute 抛权威错误
+      return { needsGrant: false };
+    }
+    const { permissions } = resolved;
+    // 快照必须在任何提前返回**之前**登记：execute 阶段无条件 assertMatch，
+    // 缺快照会直接拒绝执行（skill-snapshot 的安全契约）。所以 Skills chip 的
+    // 自动放行路径同样要走到这里，只是跳过下面的授权询问。
+    skillSnapshots.set(toolCallId, await createSkillSnapshot(resolved));
 
     // ChatInput toolbar 的 Skills chip—— toggle ON 时跳过 permission card 且
     // **不持久化 grant**：toggle off 即时恢复询问，零残留、零干扰。读缓存
     // 模块级（见本文件底部 in-memory 缓存初始化块），避免热路径每次 run_skill
     // 都打 disk I/O。
     if (chatSkillAutoCached) return { needsGrant: false };
-
-    let permissions: string[];
-    try {
-      ({ permissions } = await resolveSkillPermissions(skill));
-    } catch {
-      // 解析失败 → 交给 execute 抛权威错误
-      return { needsGrant: false };
-    }
 
     if (permissions.length === 0) return { needsGrant: false };
 
@@ -216,15 +234,19 @@ export const runSkillGate: ToolGate = {
     };
   },
 
-  async persistGrant(args): Promise<void> {
+  async persistGrant(args, toolCallId): Promise<void> {
     const { skill } = args as Static<typeof RunSkillParameters>;
     try {
-      const { permissions } = await resolveSkillPermissions(skill);
+      const { permissions } = skillSnapshots.get(toolCallId);
       await setSkillGrant(skill, permissions);
     } catch (err) {
       // 持久化失败不阻断本次已授权的执行——降级为「仅本次」。
       console.warn('[run-skill] failed to persist skill grant:', err);
     }
+  },
+
+  discard(toolCallId): void {
+    skillSnapshots.delete(toolCallId);
   },
 };
 

@@ -20,8 +20,10 @@ import {
   type WorkerRoleOption,
 } from '@/components/chat/WorkerRoleMentionPopover';
 import { detectAtToken } from '@/components/chat/detect-at-token';
+import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
+import type { ContextUsage } from '@/lib/ipc/protocol';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
 import { resolveModel } from '@/lib/providers/resolve-model';
 import { isUsableModel } from '@/lib/providers/usable-models';
@@ -47,11 +49,13 @@ import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
 import { canvasPickChannel } from '@/lib/canvas/pick-channel';
 import { buildCanvasElementAttachment, pickDedupeKey } from '@/lib/canvas/element-inspect';
 import { useRecorder } from '@/hooks/useRecorder';
+import { useComposerAttachments } from '@/hooks/useComposerAttachments';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { appendTranscript, cleanTranscript } from '@/lib/speech/transcript';
-import { queryMicPermission, openMicPermissionPage, openSystemMicSettings } from '@/lib/speech/mic-permission';
+import { openPermissionPage, openPermissionSettings, queryPermission } from '@/lib/ui/user-permission';
 import { useMobileEmulation } from '@/hooks/useMobileEmulation';
-import { downloadFile, formatDuration, formatCompactCount, formatBytes } from '@/lib/utils';
+import { useChatAppearance } from '@/hooks/useChatAppearance';
+import { downloadFile, formatDuration, formatCompactCount } from '@/lib/utils';
 import { t } from '@/lib/i18n';
 import type { PromptDispatchResult } from '@/hooks/useBackgroundAgent';
 import { debugLog } from '@/lib/debug/log';
@@ -115,12 +119,20 @@ interface ChatInputProps {
   /** When provided, pressing Escape inside the textarea calls this
    *  callback. Used by the edit flow to cancel without committing. */
   onCancelEdit?: () => void;
+  /** 当前上下文占用；`null`（还没收到后台快照）时不渲染占用环。 */
+  contextUsage: ContextUsage | null;
+  /** 发送进行中（上锁到派发完成）的起止通知。聊天页据此决定拖放区此刻能不能接收文件。 */
+  onDispatchingChange?: (dispatching: boolean) => void;
+  /** 聊天页拖放区放下的文件；`folders` 是被排除的文件夹名，只用来提示。 */
+  addFiles?: (files: readonly File[], folders: readonly string[]) => void;
 }
 
 /** 暴露给父组件的 imperative handle：允许欢迎页等外部入口填入文本并聚焦输入框，
  *  同时仍由 ChatInput 持有 value 状态。 */
 export interface ChatInputHandle {
   fill: (text: string) => void;
+  /** 拖放区放下的文件交给输入框处理（聊天页的文件拖放区经此转发）。 */
+  addFiles: (files: readonly File[], folders: readonly string[]) => void;
   /** Insert text at the current cursor position (or append if caret is at end).
    *  Used by the "Quote" feature when the user selects text in an assistant
    *  message and clicks the floating Quote button. */
@@ -151,6 +163,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     hideTeamControls = false,
     initialValue,
     onCancelEdit,
+    contextUsage,
+    onDispatchingChange,
+    addFiles,
   },
   ref,
 ) {
@@ -165,13 +180,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // 文字便从标记右侧接着流，换行后第二行自动回到整宽。
   const slashPillRef = useRef<HTMLSpanElement>(null);
   const [slashPillWidth, setSlashPillWidth] = useState(0);
+  // 只用来触发重新测量高度：字号 / 字体变了，行数与行高随之变，但 value 一个字没动
+  const appearance = useChatAppearance();
   // 选中一条提示词要 await 读 VFS + 采集模板变量（页面脚本注入、剪贴板），期间用户可能
   // 已经切了会话、又点了另一条、把已挂的标记退格摘掉，或者干脆已经把消息发出去了。
   // 这四处都自增，选中落定前比对世代号，过期的结果直接丢弃。
   const slashPromptSeqRef = useRef(0);
   const [prompts, setPrompts] = useState<PromptMeta[]>([]);
   const [selectedPromptIndex, setSelectedPromptIndex] = useState(0);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   // Quote chips: preview pills rendered above the textarea when the user
   // clicks the floating Quote button. The textarea itself is plain text and
   // can't render mixed font sizes, so the chip gives the user the smaller
@@ -184,13 +200,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // time via the mention resolver (see handleSend). Each chip is removed
   // individually via its X button.
   const [mentions, setMentions] = useState<MentionChip[]>([]);
-  // Mirror of `attachments` for synchronous reads after an await. The
-  // recorder's `subscribeSession` callback fires synchronously when the
-  // BG delivers a session, but React state isn't flushed by the time
-  // `await recorder.stop()` resumes — so we keep this ref so handleSend
-  // can read the post-stop attachment list without waiting for a render.
-  const attachmentsRef = useRef<Attachment[]>([]);
-  attachmentsRef.current = attachments;
   const [isPicking, setIsPicking] = useState(false);
   // Region-pick mode is mutually exclusive with click-pick — the toggle
   // buttons in the toolbar cancel the other when activated.
@@ -264,21 +273,24 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // 当前模型是否支持图片（多模态/VLM）输入：读 pi-ai Model.input 是否含 'image'
   const supportsImage = resolvedModel?.input?.includes('image') ?? false;
 
-  // 异步图片生产者（截图 await、FileReader.onload）可能在用户切换到纯文本
-  // 模型之后才回调，用 ref 同步读取最新的 supportsImage，避免迟到的图片被追加。
+  // 截图 await 期间用户可能切到了纯文本模型，用 ref 同步读取最新的 supportsImage，
+  // 避免迟到的截图被追加（文件读取的同类判断在 useComposerAttachments 里）。
   const supportsImageRef = useRef(supportsImage);
   supportsImageRef.current = supportsImage;
 
-  // 切换到不支持图片的模型时，自动剥离已有的图片附件（保留文件附件），
-  // 避免把图片发给纯文本模型导致请求异常。
+  // Guard the short dispatch window: recorder finalization plus prompt
+  // delivery / one fast reconnect retry. Once the prompt is dispatched,
+  // the composer becomes editable again while the agent replies.
+  const isDispatchingRef = useRef(false);
+  const [isDispatching, setIsDispatching] = useState(false);
   useEffect(() => {
-    if (supportsImage) return;
-    setAttachments((prev) => {
-      if (!prev.some((a) => a.type === 'image')) return prev;
-      toast.info(t('chat.composer.imageStripped'));
-      return prev.filter((a) => a.type !== 'image');
-    });
-  }, [supportsImage]);
+    onDispatchingChange?.(isDispatching);
+  }, [isDispatching, onDispatchingChange]);
+
+  const isComposerLocked = useCallback(() => isDispatchingRef.current, []);
+  const {
+    attachments, getAttachments, freeSlots, updateAttachments, ingestFiles, waitForIntake,
+  } = useComposerAttachments({ supportsImage, isLocked: isComposerLocked });
 
   // 点击 textarea / popover 之外的区域关闭 popover——onMouseDown 而非 onClick，
   // 避免点击 popover 内部 button 后触发 click 事件冒泡导致 popover 立刻关闭、
@@ -374,8 +386,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const handleSpeechError = useCallback((kind: string) => {
     switch (kind) {
       case 'not-allowed':
-        toast.info(t('chat.composer.voiceNeedPermission'));
-        openMicPermissionPage();
+        void openPermissionPage('microphone').then((opened) => {
+          if (opened) toast.info(t('chat.composer.voiceNeedPermission'));
+        });
         break;
       case 'language-unavailable':
         toast.error(t('chat.composer.voiceLanguageUnavailable'));
@@ -416,20 +429,22 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       speech.stop();
       return;
     }
-    const perm = await queryMicPermission();
+    const perm = await queryPermission('microphone');
     if (perm === 'granted' || perm === 'unknown') {
       // unknown：无法探测，乐观尝试；若实际未授权，识别会回 not-allowed 走引导。
       void speech.start();
       return;
     }
     if (perm === 'denied') {
-      toast.error(t('chat.composer.voiceDenied'));
-      openSystemMicSettings();
+      void openPermissionSettings('microphone').then((opened) => {
+        if (opened) toast.error(t('chat.composer.voiceDenied'));
+      });
       return;
     }
     // prompt：尚未授权，打开授权页让用户在普通标签页完成一次授权。
-    toast.info(t('chat.composer.voiceNeedPermission'));
-    openMicPermissionPage();
+    void openPermissionPage('microphone').then((opened) => {
+      if (opened) toast.info(t('chat.composer.voiceNeedPermission'));
+    });
   }, [speechActive, finalizePendingInterim, speech]);
 
   /** 输入框滚动时把标记一并带走。它绝对定位在容器上、不跟随文本滚动，不同步就会
@@ -461,7 +476,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     syncSlashPillOffset();
     // 也要盯着 `slashPillWidth`：标记挂上/摘掉会改变 `text-indent`，首行随之重排、
     // 行数可能变，但 value 一个字都没动——只看 value 的话高度就停在旧值上了。
-  }, [value, slashPillWidth, syncSlashPillOffset]);
+    // `appearance` 同理：在设置里调字号 / 字体时输入框里可能正留着草稿。
+  }, [value, slashPillWidth, syncSlashPillOffset, appearance]);
 
   // 标记宽度只能实测：提示词名字的长度、界面字体、侧边栏宽度（`max-w-[45%]` 截断）
   // 都会改变它，写死任何常量都会让首行文字与标记错位。ResizeObserver 覆盖字体加载
@@ -531,85 +547,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const canSend = value.trim().length > 0 || quoteChips.length > 0 || mentions.length > 0 || slashPrompt !== null;
 
   // Recorder integration. The captured session lands in attachments via
-  // the channel subscription below — NOT via `recorder.stop()`'s return
-  // value. handleSend just needs to await stop() so any in-flight session
-  // delivery completes before we read attachments.
+  // the channel subscription in useComposerAttachments — NOT via
+  // `recorder.stop()`'s return value. handleSend just needs to await stop()
+  // so any in-flight session delivery completes before we read attachments.
   const recorder = useRecorder();
-  // Guard the short dispatch window: recorder finalization plus prompt
-  // delivery / one fast reconnect retry. Once the prompt is dispatched,
-  // the composer becomes editable again while the agent replies.
-  const isDispatchingRef = useRef(false);
-  const [isDispatching, setIsDispatching] = useState(false);
-
-  // Keep the ref in sync with state so any post-await reader sees the
-  // most-recent attachments without depending on a re-render.
-  useEffect(() => {
-    attachmentsRef.current = attachments;
-  }, [attachments]);
-
-  // Subscribe to recorder sessions delivered by the background. Fires for
-  // every finished recording (manual stop button, send-time auto-stop,
-  // cap-trigger), so this is the single sink for recording attachments.
-  //
-  // We compute the next list from `attachmentsRef.current` and write
-  // BOTH the ref and the state SYNCHRONOUSLY — NOT inside a
-  // `setAttachments(prev => ...)` updater. React 18 defers the updater's
-  // execution until the next flush, but `useRecorder.stop()`'s await
-  // resumption is a microtask scheduled at the same publishSession call,
-  // so by the time handleSend reads `attachmentsRef.current` the updater
-  // hasn't run yet. Writing the ref outside the updater ensures handleSend
-  // sees the new chip before dispatching `onSend`.
-  useEffect(() => {
-    return recorderChannel.subscribeSession((session) => {
-      const current = attachmentsRef.current;
-      if (current.length >= MAX_ATTACHMENT_COUNT) {
-        toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
-        return;
-      }
-      const next = [...current, recordingToAttachment(session)];
-      debugLog.info('ui', 'attachment:add', {
-        kind: 'recording',
-        eventsCount: session.events.length,
-        durationMs: session.durationMs,
-      });
-      attachmentsRef.current = next;
-      setAttachments(next);
-    });
-  }, []);
-
-  // Canvas Pick Element（CanvasPane 发布）：把拾取的元素挂成合成 file 附件
-  // （`buildCanvasElementAttachment`——chip 与 LLM envelope 走 file 附件既有
-  // 管线）。与 recorder 订阅同款守则：mount-once effect + attachmentsRef 读
-  // 最新列表、写 ref 与 state 同步进行，handleSend 的 outgoing 快照总能看到
-  // 刚挂的 chip。去重键由 builder 侧 `pickDedupeKey` 单源提供（canvas 路径 +
-  // selector 两行注释）：同一文件同一元素重复拾取只提示、不重复挂，与页内
-  // element picker 语义一致。
-  useEffect(() => {
-    return canvasPickChannel.subscribe(({ pick, canvasPath }) => {
-      const current = attachmentsRef.current;
-      const pickKey = pickDedupeKey(pick, canvasPath);
-      if (current.some((a) => a.type === 'file' && a.content.startsWith(pickKey))) {
-        toast.info(t('chat.composer.elementAdded'));
-        return;
-      }
-      if (current.length >= MAX_ATTACHMENT_COUNT) {
-        toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
-        return;
-      }
-      const att = buildCanvasElementAttachment(pick, canvasPath);
-      debugLog.info('ui', 'attachment:add', {
-        kind: 'canvas-element',
-        mime: att.mimeType,
-        size: att.size,
-        canvasPath,
-        selector: pick.selector,
-      });
-      const next = [...current, att];
-      attachmentsRef.current = next;
-      setAttachments(next);
-    });
-  }, []);
-
   const handleSend = async () => {
     if (!canSend) {
       debugLog.info('ui', 'send:rejected', { reason: 'empty' });
@@ -657,6 +598,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     slashPromptSeqRef.current++;
 
     try {
+      // 等此前接受的文件全部读完落进附件，否则刚选完文件就发送会漏掉它们。
+      // 上锁之后不再接受新文件（见 ingestFiles），所以队尾就是最后一批。
+      await waitForIntake();
+      if (sessionIdRef.current !== dispatchSessionId) return;
       // Resolve prompt at send-time if inline expansion is disabled. The
       // expanded body is wrapped in a COMMAND directive so the LLM sees
       // it as a hybrid-injected prompt framing (matching mention chips)
@@ -958,15 +903,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         // attachments; prompt/skill directives are pulled out for inline
         // injection (see filterInlineable below), so they no longer count.
         const totalAttachmentCount =
-          attachmentsRef.current.length + resolvedMentions.length + resolvedPinned.length;
+          getAttachments().length + resolvedMentions.length + resolvedPinned.length;
         if (totalAttachmentCount > MAX_ATTACHMENT_COUNT) {
           debugLog.info('ui', 'send:rejected', { reason: 'max_attachments' });
           toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
           return;
         }
         // Wait for the BG to finalize. The session is delivered (and
-        // appended to `attachmentsRef`) synchronously by the channel
-        // subscription above before this await resolves.
+        // appended to the attachment list) synchronously by the channel
+        // subscription in useComposerAttachments before this await resolves.
         await recorder.stop();
       }
       if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
@@ -1039,7 +984,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
 
       const outgoing: Attachment[] = [
-        ...attachmentsRef.current,
+        ...getAttachments(),
         ...filteredResolvedMentions,
         ...filteredResolvedPinned,
       ];
@@ -1053,8 +998,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       if (dispatchSessionId !== null && sessionIdRef.current !== dispatchSessionId) return;
 
       setValue('');
-      setAttachments([]);
-      attachmentsRef.current = [];
+      updateAttachments(() => []);
       setSlashPrompt(null);
       setShowSlash(false);
       setHistoryIndex(null);
@@ -1553,7 +1497,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     prevAttachmentCountRef.current = attachments.length;
   }, [attachments]);
 
-  useImperativeHandle(ref, () => ({ fill, insertText, insertQuote }), [fill, insertText, insertQuote]);
 
   // Scan prompts when slash menu opens
   useEffect(() => {
@@ -1689,16 +1632,16 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           // keeps the narrower field access legal under the union return type.
           if (att.type !== 'element') break;
           // Deduplicate: same selector + same frameId
-          const isDuplicate = attachments.some(
+          const isDuplicate = getAttachments().some(
             (a) => a.type === 'element' && a.selector === att.selector && a.frameId === att.frameId,
           );
           if (isDuplicate) {
             toast.info(t('chat.composer.elementAdded'));
-          } else if (attachments.length >= MAX_ATTACHMENT_COUNT) {
+          } else if (freeSlots() <= 0) {
             toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
           } else {
             debugLog.info('ui', 'attachment:add', { kind: 'element', mime: 'text/html', size: (att.textContent ?? '').length });
-            setAttachments((prev) => [...prev, att]);
+            updateAttachments((prev) => [...prev, att]);
           }
           break;
         }
@@ -1758,7 +1701,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             mime: result.attachment.mimeType,
             size: result.attachment.data.length,
           });
-          setAttachments((prev) => [...prev, result.attachment as Attachment]);
+          updateAttachments((prev) => [...prev, result.attachment as Attachment]);
           break;
         }
         case 'cancelled':
@@ -1800,7 +1743,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       toast.warning(t('chat.composer.modelNoImage'));
       return;
     }
-    if (attachments.length >= MAX_ATTACHMENT_COUNT) {
+    if (freeSlots() <= 0) {
       toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
       return;
     }
@@ -1808,9 +1751,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'jpeg', quality: 85 });
       if (isDispatchingRef.current) return;
       if (!supportsImageRef.current) return;
+      // 截图 await 期间可能又进来了录制 / 文件，名额以此刻为准
+      if (freeSlots() <= 0) {
+        toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
+        return;
+      }
       const base64 = dataUrl.split(',', 2)[1] ?? '';
       debugLog.info('ui', 'attachment:add', { kind: 'screenshot', mime: 'image/jpeg', size: base64.length });
-      setAttachments((prev) => [
+      updateAttachments((prev) => [
         ...prev,
         { type: 'image', source: 'screenshot', data: base64, mimeType: 'image/jpeg' },
       ]);
@@ -1820,158 +1768,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (isDispatchingRef.current) {
-      e.target.value = '';
-      return;
-    }
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
-    if (remaining <= 0) {
-      toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
-      e.target.value = '';
-      return;
-    }
-
-    const filesToProcess = Array.from(files).slice(0, remaining);
-    if (files.length > remaining) {
-      toast.warning(t('chat.composer.truncatedFiles', [remaining]));
-    }
-
-    for (const file of filesToProcess) {
-      if (isImageFile(file)) {
-        // 当前模型不支持多模态时，跳过图片文件（文本文件仍照常处理）。
-        if (!supportsImage) {
-          toast.warning(t('chat.composer.modelNoImage'));
-          continue;
-        }
-        if (file.size > MAX_IMAGE_SIZE) {
-          toast.error(t('chat.composer.fileTooLarge', [file.name, formatBytes(MAX_IMAGE_SIZE)]));
-          continue;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (isDispatchingRef.current) return;
-          if (!supportsImageRef.current) return;
-          const dataUrl = reader.result as string;
-          const base64 = dataUrl.split(',', 2)[1] ?? '';
-          const mimeType = file.type || 'image/png';
-          debugLog.info('ui', 'attachment:add', { kind: 'image-upload', mime: mimeType, size: file.size });
-          setAttachments((prev) => {
-            if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
-            return [...prev, { type: 'image', source: 'upload', data: base64, mimeType, name: file.name }];
-          });
-        };
-        reader.onerror = () => toast.error(t('chat.composer.readFileFailed', [file.name]));
-        reader.readAsDataURL(file);
-      } else if (isTextFile(file.name)) {
-        if (file.size > MAX_TEXT_FILE_SIZE) {
-          toast.error(t('chat.composer.fileTooLarge', [file.name, formatBytes(MAX_TEXT_FILE_SIZE)]));
-          continue;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (isDispatchingRef.current) return;
-          const mime = file.type || 'text/plain';
-          debugLog.info('ui', 'attachment:add', { kind: 'text-file', mime, size: file.size });
-          setAttachments((prev) => {
-            if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
-            return [...prev, { type: 'file', content: reader.result as string, name: file.name, mimeType: file.type || 'text/plain', size: file.size }];
-          });
-        };
-        reader.onerror = () => toast.error(t('chat.composer.readFileFailed', [file.name]));
-        reader.readAsText(file);
-      } else if (isPdfFile(file)) {
-        // PDF attachment: read into ArrayBuffer, send to the offscreen
-        // document for text extraction (pdfjs-dist can't run from the SW
-        // — needs DOM/OffscreenCanvas). The extracted text becomes a
-        // `<attached-file type="application/pdf">` block the LLM can read.
-        if (file.size > MAX_PDF_SIZE) {
-          toast.error(t('chat.composer.fileTooLarge', [file.name, formatBytes(MAX_PDF_SIZE)]));
-          continue;
-        }
-        // Pre-flight: an empty PDF trips pdf.js's "file is empty" error
-        // before our content-based checks run, and shows up as a noisy
-        // toast. Bail early with a clearer message.
-        if (file.size === 0) {
-          toast.error(t('chat.composer.readFileFailed', [file.name]));
-          continue;
-        }
-        // `file.arrayBuffer()` is the modern promise-based equivalent of
-        // FileReader.readAsArrayBuffer. Returns a fresh, owned ArrayBuffer
-        // we can safely structured-clone through `chrome.runtime.sendMessage`
-        // — no detach races, no buffering into a string. Wrap in
-        // `Uint8Array` at the call site so pdf.js (which v5 rejects raw
-        // ArrayBuffers) sees the typed-array view it wants.
-        let buf: ArrayBuffer;
-        try {
-          buf = await file.arrayBuffer();
-        } catch (err) {
-          toast.error(`${t('chat.composer.readFileFailed', [file.name])}: ${(err as Error).message ?? String(err)}`);
-          continue;
-        }
-        try {
-          // Lazy-create the offscreen document so the first PDF
-          // attachment pays the setup cost (the offscreen page hosts
-          // pdf.js's worker and runs the extraction).
-          const { ensureOffscreen } = await import('@/lib/tools/offscreen');
-          await ensureOffscreen();
-          // We send the PDF bytes as base64 instead of a raw ArrayBuffer.
-          // chrome.runtime.sendMessage's structured-clone path has been
-          // observed to detach or zero the source buffer in some MV3
-          // builds (offline / multi-MB / certain chromium releases),
-          // which then makes pdf.js fail with "file is empty" — and a
-          // base64 string sidesteps the issue entirely. The 4/3 size
-          // overhead is acceptable for the 50 MB cap and only matters
-          // on the IPC hop, not on disk.
-          const bytes = new Uint8Array(buf);
-          let binary = '';
-          // Chunked to avoid call-stack overflow on multi-MB buffers
-          // (String.fromCharCode.apply blows the stack past ~120 KB).
-          const CHUNK = 0x8000;
-          for (let i = 0; i < bytes.length; i += CHUNK) {
-            binary += String.fromCharCode.apply(
-              null,
-              bytes.subarray(i, i + CHUNK) as unknown as number[],
-            );
-          }
-          const base64 = btoa(binary);
-          const resp = await chrome.runtime.sendMessage({
-            type: 'pdf-extract-bytes',
-            bytesBase64: base64,
-          }) as { result?: { text: string; pageCount: number; pages: number[]; truncated: boolean }; error?: string };
-          if (resp.error) throw new Error(resp.error);
-          const result = resp.result;
-          if (!result) throw new Error('PDF extraction returned no result');
-          debugLog.info('ui', 'attachment:add', {
-            kind: 'pdf',
-            mime: 'application/pdf',
-            size: file.size,
-            pageCount: result.pageCount,
-          });
-          setAttachments((prev) => {
-            if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
-            return [...prev, {
-              type: 'pdf',
-              content: result.text,
-              name: file.name,
-              mimeType: 'application/pdf',
-              size: file.size,
-              pageCount: result.pageCount,
-              extractedPageCount: result.pages.length,
-              truncated: result.truncated,
-            }];
-          });
-        } catch (err) {
-          toast.error(`${t('chat.composer.readFileFailed', [file.name])}: ${(err as Error).message ?? String(err)}`);
-        }
-      } else {
-        toast.error(t('chat.composer.unsupportedFileType', [file.name]));
-      }
-    }
-
+    if (files) ingestFiles(Array.from(files), 'upload');
     // Reset input so the same file can be selected again
     e.target.value = '';
   };
@@ -1998,51 +1797,23 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // Suppress default paste unless there's a real text/plain payload —
     // many screenshot tools also put text/html (filename / <img>) which we don't want in the textarea.
     if (!hasPlainText) e.preventDefault();
-
-    const remaining = MAX_ATTACHMENT_COUNT - attachments.length;
-    if (remaining <= 0) {
-      toast.warning(t('chat.composer.maxAttachments', [MAX_ATTACHMENT_COUNT]));
-      return;
-    }
-
-    const filesToProcess = imageFiles.slice(0, remaining);
-    if (imageFiles.length > remaining) {
-      toast.warning(t('chat.composer.truncatedFiles', [remaining]));
-    }
-
-    for (const file of filesToProcess) {
-      if (file.size > MAX_IMAGE_SIZE) {
-        toast.error(t('chat.composer.fileTooLarge', [file.name || 'image', formatBytes(MAX_IMAGE_SIZE)]));
-        continue;
-      }
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (isDispatchingRef.current) return;
-        if (!supportsImageRef.current) return;
-        const dataUrl = reader.result as string;
-        const base64 = dataUrl.split(',', 2)[1] ?? '';
-        const mimeType = file.type || 'image/png';
-        debugLog.info('ui', 'attachment:add', { kind: 'image-paste', mime: mimeType, size: file.size });
-        setAttachments((prev) => {
-          if (prev.some((a) => a.type === 'image' && a.data === base64)) {
-            // When the user pasted text, the image is likely a side-effect of selecting
-            // rich content — silently skip instead of nagging.
-            if (!hasPlainText) toast.info(t('chat.composer.imageAlreadyAdded'));
-            return prev;
-          }
-          if (prev.length >= MAX_ATTACHMENT_COUNT) return prev;
-          return [...prev, { type: 'image', source: 'paste', data: base64, mimeType, name: file.name || undefined }];
-        });
-      };
-      reader.onerror = () => toast.error(t('chat.composer.readFileFailed', [file.name || 'image']));
-      reader.readAsDataURL(file);
-    }
+    ingestFiles(imageFiles, 'paste', hasPlainText ? 'quiet' : 'notify');
   };
 
   const removeAttachment = (index: number) => {
     if (isDispatchingRef.current) return;
-    setAttachments((prev) => prev.filter((_, i) => i !== index));
+    updateAttachments((prev) => prev.filter((_, i) => i !== index));
   };
+
+  const addDroppedFiles = (files: readonly File[], folders: readonly string[]) => {
+    if (isDispatchingRef.current) return;
+    for (const name of folders) toast.error(t('errors.folderUnsupported', [name]));
+    ingestFiles(files, 'upload');
+  };
+
+  // 不传依赖：addDroppedFiles 每次渲染都会换新，句柄跟着重建拿到最新闭包，重建一个小对象的开销可以忽略。
+  // insertText / insertQuote 是 Quote 功能的入口（见 ChatInputHandle 注释）。
+  useImperativeHandle(ref, () => ({ fill, addFiles: addDroppedFiles, insertText, insertQuote }));
 
   return (
     <footer className="px-1.5 py-1.5 bg-background relative shrink-0">
@@ -2499,7 +2270,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               // `top-2 / left-3` 对齐 textarea 的 `py-2 / px-3`；字号行高与首行文字
               // 完全一致，标记的盒高因此正好是一个行框，天然坐在首行上。
               // `max-w-[45%]` 保证名字再长，首行也总还有地方写字。
-              className="pointer-events-none absolute top-2 left-3 max-w-[45%] truncate rounded-md bg-primary/10 px-1.5 font-mono text-[0.85rem] leading-relaxed text-primary"
+              className="pointer-events-none absolute top-2 left-3 max-w-[45%] truncate rounded-md bg-primary/10 px-1.5 font-mono chat-text-input leading-relaxed text-primary"
             >
               /{slashPrompt.name}
             </span>
@@ -2523,7 +2294,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             disabled={isDispatching}
             spellCheck={false}
             style={slashPrompt && slashPillWidth ? { textIndent: slashPillWidth } : undefined}
-            className="w-full bg-transparent border-none outline-none resize-none text-foreground text-[0.85rem] px-3 py-2 min-h-13 max-h-37.5 leading-relaxed placeholder:text-muted-foreground/50"
+            className="w-full bg-transparent border-none outline-none resize-none text-foreground chat-text-input chat-font px-3 py-2 min-h-13 max-h-37.5 leading-relaxed placeholder:text-muted-foreground/50"
           />
         </div>
 
@@ -2575,6 +2346,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             )}
           </div>
           <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
+            {/* 上下文占用环（1.8.0）：数字来自后台 context_usage 帧，与压缩判据同一套估算。 */}
+            <ContextUsageIndicator usage={contextUsage} />
             <MentionPopover
               disabled={isDispatching}
               onSelect={addMention}

@@ -29,6 +29,8 @@ vi.mock('./session-manager', () => ({
     getSessionState: mocks.getSessionState,
     getBranchInfo: mocks.getBranchInfo,
     cancel: mocks.cancel,
+    // 1.8.0：新 viewer 订阅时补发一帧上下文占用。测试不关心占用环，空实现即可。
+    pushContextUsage: vi.fn(),
   },
 }));
 

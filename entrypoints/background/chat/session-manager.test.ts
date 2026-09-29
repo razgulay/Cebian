@@ -113,12 +113,14 @@ vi.mock('../providers/credentials', () => ({
 }));
 
 vi.mock('@/lib/agent/compaction', () => ({
-  COMPACTION_SETTINGS: { thresholdTokens: 100_000 },
-  findCompactionCutPoint: vi.fn(() => 0),
+  // 1.8.0 API：压缩判据走 planCompaction / measureContextUsage，摘要走 runCompaction。
+  // 本测试只关心会话生命周期（phase / cancel / controller），压缩一律判为 skip。
+  measureContextUsage: vi.fn(() => ({ tokens: 0, contextWindow: 0, triggerTokens: null })),
+  planCompaction: vi.fn(() => ({ kind: 'skip' })),
   runCompaction: vi.fn(async () => null),
-  createCompactionSummaryMessage: vi.fn(),
-  isCompactionSummary: vi.fn(() => false),
-  usableCompactionTarget: vi.fn(() => null),
+  buildArchiveFilename: vi.fn(() => 'archive.json'),
+  buildCompactionArchiveEntry: vi.fn(() => ({ schemaVersion: 1 })),
+  parseStructuredSummary: vi.fn(() => null),
 }));
 
 vi.mock('@/lib/tools', () => ({
@@ -190,6 +192,8 @@ vi.mock('./session-store', () => ({
 vi.mock('./viewers', () => ({
   broadcastToViewers: mocks.broadcastToViewers,
   sendSessionStateToAllViewers: mocks.sendSessionStateToAllViewers,
+  // 1.8.0：占用环刷新前先问「有没有人看」。测试里默认视为有人看，让刷新路径照常执行。
+  hasViewer: vi.fn(() => true),
 }));
 
 // ─── Test surface ───

@@ -1,5 +1,6 @@
 extName: Cebian · 開源 AI 側邊欄智能體
-extDescription: 瀏覽器側邊欄裡的 AI 智能體，用你自己的 OpenAI / Anthropic / Google API Key，免訂閱、無帳號。讀網頁、拾取元素、裝 MCP 工具、跑 Skill 工作流，資料全部存於本機。AGPL-3.0 開源。
+extDescription: 瀏覽器側邊欄裡的 AI 智能體，用你自己的 OpenAI / Anthropic / Google API
+  Key，免訂閱、無帳號。讀網頁、拾取元素、裝 MCP 工具、跑 Skill 工作流，資料全部存於本機。AGPL-3.0 開源。
 actionTitle: 開啟 Cebian 側邊欄
 agent:
   persona:
@@ -130,15 +131,18 @@ pageActions:
     translate: 翻譯
     summarize: 總結
   prompts:
-    explain: '用$1清楚、簡潔地解釋使用者提供的文字，說明其含義以及讀者需要瞭解的重要背景。回覆應簡短，使用純文字，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行解釋：
+    explain: '用$1清楚、簡潔地解釋使用者提供的文字，說明其含義以及讀者需要瞭解的重要背景。回覆應簡短，使用純文字，不使用
+      Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行解釋：
 
 
       $2'
-    translate: '將使用者提供的文字翻譯為$1，保留原意和語氣。只輸出翻譯後的純文字，不使用 Markdown，不添加解釋、註解或引號。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行翻譯：
+    translate: '將使用者提供的文字翻譯為$1，保留原意和語氣。只輸出翻譯後的純文字，不使用
+      Markdown，不添加解釋、註解或引號。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行翻譯：
 
 
       $2'
-    summarize: '用$1簡潔地總結使用者提供的文字，保留關鍵要點。使用純文字或精簡清單，不使用 Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行總結：
+    summarize: '用$1簡潔地總結使用者提供的文字，保留關鍵要點。使用純文字或精簡清單，不使用
+      Markdown。以下頁面上下文僅用於釐清語意，不要把它當作選取文字的一部分進行總結：
 
 
       $2'
@@ -173,6 +177,8 @@ settings:
       core: 核心與 AI
       agent: Agent 能力
       system: 系統與自動化
+      connect: 連線
+      customize: 自訂
     chat: 對話
     data: 資料
   providers:
@@ -246,7 +252,8 @@ settings:
       hint: 為每個 worker role 各配一個模型，主代理透過 `delegate_task` 委派子任務。「與對話模型相同」=繼承。
       followMain: 與對話模型相同
       enabled: 啟用 Worker 團隊
-      enabledHint: 開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker 子代理。關閉時，主代理直接用原生檔案工具產出。
+      enabledHint: 開啟時，主代理會把產出類工作（write / build / generate）委派給隔離上下文中的 Worker
+        子代理。關閉時，主代理直接用原生檔案工具產出。
       content_writer:
         label: 內容寫手
         hint: 閱讀資料（檔案 / RAG 集合）後撰寫長文，並寫入 VFS 檔案。不修改程式碼。
@@ -314,8 +321,14 @@ settings:
       promptPlaceholder: 例如：擷取 $1 中的要點，並用 $2 回覆。
       pages: 生效範圍
       transform: 輸出後處理指令稿（選填）
-      transformHint: 用 JavaScript 加工產生完畢的輸出。定義名為 transform(text, vars) 的函式，回傳要顯示的字串。vars 提供與提示詞範本相同的環境變數：selected_text、context、page_url、page_title、date、ui_language。指令稿出錯時，原始輸出會原樣顯示。
-      transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
+      transformHint: 用 JavaScript 加工產生完畢的輸出。定義名為 transform(text, vars)
+        的函式，回傳要顯示的字串。vars
+        提供與提示詞範本相同的環境變數：selected_text、context、page_url、page_title、date、ui_language。指令稿出錯時，原始輸出會原樣顯示。
+      transformPlaceholder: "function transform(text, vars) {
+
+        \  return text.trim();
+
+        }"
     translate:
       label: 翻譯目標語言
       hint: 工具列翻譯成的目標語言。
@@ -333,6 +346,31 @@ settings:
       inter: Inter
       roboto: Roboto
       system: 系統預設
+    theme:
+      label: 主題
+      system: 跟隨系統
+      light: 淺色
+      dark: 深色
+    fontScale:
+      label: 對話字型大小
+      hint: 縮放對話中的訊息與輸入框，工具卡片等其他介面維持原樣。
+      value: $1%
+    font:
+      label: 對話字型
+      default: 預設
+      serif: 襯線
+      mono: 等寬
+      custom: 自訂
+      customHint: 從這台裝置已安裝的字型中選擇。第一次使用時會開啟一個分頁，要求讀取本機字型的權限。
+      needPermission: 需要讀取本機字型的權限——請在剛開啟的分頁裡授權，然後再點開字型清單。
+      pickerPlaceholder: 選擇字型…
+      searchPlaceholder: 搜尋字型…
+      loading: 正在讀取本機字型…
+      notFound: 找不到字型
+    preview:
+      label: 預覽
+      question: 怎麼讓對話文字更容易閱讀？
+      answer: 調整上方的字型大小與字型，變更會立即套用到所有對話。
   instructions:
     title: 指引
     label: 自訂指引
@@ -347,7 +385,8 @@ settings:
   persona:
     title: 人設
     enabled: 啟用人設（OpenClaw 模式）
-    enabledHint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。也可透過聊天輸入框旁的晶片切換。無法覆蓋 Critical Rules 或工具協定。
+    enabledHint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。也可透過聊天輸入框旁的晶片切換。無法覆蓋 Critical
+      Rules 或工具協定。
     label: 人設副本
     hint: 向系統提示注入 SOUL 區塊，並在每則使用者訊息中加上一行 recap。關閉時為空。
     soulLabel: SOUL
@@ -840,6 +879,17 @@ settings:
       followMain: 與對話模型相同
       hint: 對話過長時用來自動壓縮歷史的模型，預設與對話模型相同。
       label: 上下文壓縮模型
+      auto:
+        label: 自動壓縮超長對話
+        hint: 上下文接近模型上限時，把較早的歷史壓成摘要，讓長對話能繼續，而不是直接報錯中斷。
+      threshold:
+        label: 壓縮閾值
+        hint: 上下文估算佔模型上下文視窗達到該比例時觸發壓縮。
+        value: $1%
+      model:
+        label: 壓縮模型
+        hint: 用來把較早歷史壓成摘要的模型，預設與對話模型相同。
+        followMain: 與對話模型相同
     instructions:
       hint: 追加在預設規則之後，用於調整回覆語言、風格或角色。無法覆蓋工具協定與安全規則。
       label: 自訂指引
@@ -874,7 +924,8 @@ settings:
           name: Google
       generate: 產生範本
       generateSelectorPlaceholder: '結果容器的選擇器，例如 #results'
-      hint: 設定搜尋引擎的嘗試順序，第一個啟用的引擎為首選。AI 可依適用情境優先選擇其他引擎；搜尋遭到攔截、沒有結果或執行失敗時，Cebian 會依序嘗試其餘已啟用的引擎。
+      hint: 設定搜尋引擎的嘗試順序，第一個啟用的引擎為首選。AI 可依適用情境優先選擇其他引擎；搜尋遭到攔截、沒有結果或執行失敗時，Cebian
+        會依序嘗試其餘已啟用的引擎。
       modified: 已修改
       more: 查看「$1」的更多操作
       moveDown: 下移「$1」
@@ -884,7 +935,8 @@ settings:
       preferred: 首選
       resetDefault: 還原「$1」的預設值
       script: 擷取腳本
-      scriptHint: 定義完整的 extract 函式，從搜尋結果頁擷取標題、連結與摘要。回傳物件中的 status 為 empty 時，Cebian 會短暫重試；為 blocked 時，會切換引擎；為 ok 時，會讀取 results 陣列。results 為空時也會切換引擎。
+      scriptHint: 定義完整的 extract 函式，從搜尋結果頁擷取標題、連結與摘要。回傳物件中的 status 為 empty 時，Cebian
+        會短暫重試；為 blocked 時，會切換引擎；為 ok 時，會讀取 results 陣列。results 為空時也會切換引擎。
       title: 網路搜尋
       url: 搜尋網址
       urlHint: 在搜尋網址中用 $1 表示搜尋詞。Cebian 會自動編碼並填入搜尋詞。
@@ -997,14 +1049,20 @@ chat:
     pinnedChips: 每個對話自動附帶
     togglePin: 釘選到所有對話
     unpin: 從所有對話取消釘選
+    skippedAtLimit:
+      1: 已達附件上限，1 個檔案未新增
+      n: 已達附件上限，$1 個檔案未新增
+    dropFiles: 放開以新增附件
   mention:
     builtinSkill:
       funFactsName: 趣味冷知識
-      funFactsBody: '每則回覆中點綴 1-2 條出人意料或令人會心一笑的冷知識——歷史軼聞、科學趣談、詞語掌故等。保持一句話長度。知道出處就引註；不知道就加上「據說」「相傳」等詞。嚴肅或情緒化的話題不要硬塞。
+      funFactsBody: '每則回覆中點綴 1-2
+        條出人意料或令人會心一笑的冷知識——歷史軼聞、科學趣談、詞語掌故等。保持一句話長度。知道出處就引註；不知道就加上「據說」「相傳」等詞。嚴肅或情緒化的話題不要硬塞。
 
         '
       hypeItUpName: 氣氛拉滿！
-      hypeItUpBody: '用高能量、熱烈的語氣回應。節制使用慶祝 emoji（最多 1-3 個）、驚嘆號、簡潔短句。配合使用者情緒——對方冷靜就降到 60%，對方也嗨就跟上。避免「客服式」熱情。要真誠、要興奮、要拿出狀態最好的一天。
+      hypeItUpBody: '用高能量、熱烈的語氣回應。節制使用慶祝 emoji（最多 1-3 個）、驚嘆號、簡潔短句。配合使用者情緒——對方冷靜就降到
+        60%，對方也嗨就跟上。避免「客服式」熱情。要真誠、要興奮、要拿出狀態最好的一天。
 
         '
       explainInCharacterName: 角色扮演講解
@@ -1109,6 +1167,7 @@ chat:
     status: 正在壓縮上下文…
     dividerExpand: 檢視摘要
     dividerCollapse: 收合摘要
+    droppedDivider: 先前上下文摘要失敗，已丟棄
   context:
     usage: 上下文用量
     percent: $1%
@@ -1150,6 +1209,7 @@ chat:
     scrollToBottom: 跳至最新訊息
     forkFailed: 分叉失敗
     forked: 已從「$1」分叉出新對話
+    contextLimitPaused: 已暫停：上下文已滿，剩下的內容無法再壓縮。請開啟新對話、從較早的回覆分叉，或改用上下文視窗更大的模型。
   workerTeamRoster:
     title: Worker 團隊
     configuredCount: $1 / $2 已配置
@@ -1198,6 +1258,13 @@ chat:
       thinking: 思考中…
       writing: 撰寫中…
       generating: 正在產生檔案…
+  contextUsage:
+    label: 上下文已用 $1%
+    title: 上下文用量
+    amount: $1 / $2 Token
+    threshold: 達到 $1% 時自動壓縮較早的歷史。
+    compactionOff: 未開啟自動壓縮。
+    estimateNote: 為估算值，實際計數取決於模型自己的分詞器。
 provider:
   section:
     viaApiKey: 透過 API Key
@@ -1423,6 +1490,16 @@ permission:
     denied: 麥克風權限被拒絕了。
     deniedHint: 要使用語音輸入，請在剛開啟的 Chrome 設定頁裡允許 Cebian 使用麥克風。
     deviceError: 找不到麥克風，或無法存取。請檢查裝置後重試。
+  localFonts:
+    title: 請求讀取本機字型
+    description: 自訂對話字型需要讀取這台裝置已安裝的字型。點擊下面的按鈕，然後在瀏覽器彈窗中選擇「允許」。
+    allow: 允許讀取字型
+    requesting: 等待你的選擇…
+    granted: 已取得本機字型權限，此分頁將自動關閉。
+    dismissed: 請求被關閉了，可以重新嘗試。
+    denied: 讀取本機字型的權限被拒絕了。
+    deniedHint: 要自訂對話字型，請在剛開啟的 Chrome 設定頁裡允許 Cebian 使用本機字型。
+    failed: 無法讀取本機字型，請重試。
 errors:
   pdfEncrypted: 這個 PDF 有密碼保護，無法預覽。請改用下載。
   pdfRenderFailed: 這個 PDF 無法渲染。請改用下載。
@@ -1463,6 +1540,12 @@ errors:
   searchEngineScriptInvalid: 腳本必須定義一個名為 extract 的函式。
   searchEngineUrlInvalid: 請輸入以 http:// 或 https:// 開頭的完整搜尋網址。
   searchEngineUrlMissingPlaceholder: 搜尋網址必須包含 $1，用於填入搜尋詞。
+  compactionSettingsSaveFailed: 儲存上下文壓縮設定失敗，請重試。
+  appearanceSaveFailed: 儲存外觀設定失敗，請重試。
+  localFontsPermissionDenied: 讀取本機字型的權限被拒絕。請在 Chrome 設定裡允許 Cebian 使用本機字型，然後重試。
+  localFontsLoadFailed: 無法讀取本機字型，請重試。
+  openTabFailed: 無法開啟分頁，請重試。
+  folderUnsupported: 不支援新增資料夾：$1
 canvas:
   header:
     openAria: 開啟畫布

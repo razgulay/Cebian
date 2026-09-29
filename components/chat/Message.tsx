@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Lightbulb, CheckCircle, Crosshair, FileText, Film, Pencil, Quote, ShieldAlert, Sparkles, Zap } from 'lucide-react';
+import { Bot, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Lightbulb, CheckCircle, Crosshair, FileText, Film, FoldVertical, Pencil, Quote, Scissors, ShieldAlert, Sparkles, Zap } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -198,7 +198,7 @@ export function UserMessageBubble({
             }}
             aria-label={t('common.edit')}
             rows={Math.min(8, Math.max(2, draft.split('\n').length))}
-            className="w-full resize-y bg-transparent text-[0.9rem] leading-relaxed outline-none px-2 py-1"
+            className="w-full resize-y bg-transparent chat-text-body chat-font leading-relaxed outline-none px-2 py-1"
           />
           <div className="flex items-center justify-end gap-2 px-1">
             <span className="text-[0.7rem] text-muted-foreground mr-auto">
@@ -345,7 +345,7 @@ export function UserMessageBubble({
           >
             <div
               ref={collapse.innerRef}
-              className="bg-card border border-border px-4 py-3 rounded-2xl text-[length:var(--chat-font-size)] font-medium leading-relaxed w-full whitespace-pre-wrap break-all"
+              className="bg-card border border-border px-4 py-3 rounded-2xl chat-text-body chat-font font-medium leading-relaxed w-full whitespace-pre-wrap break-all"
             >
               {bubble}
             </div>
@@ -444,21 +444,42 @@ export function UserMessageBubble({
  *  amber 半透明边框 + 柔光阴影 + 可展开 / 折叠的摘要披露（chevron）。
  *  「压缩前 token 数」以小号徽章形式展现在分隔条右侧；披露框里渲染
  *  `compactionSummary.summary` 原文（不解析 Markdown——避免引入额外依赖，
- *  与 AGENTS.md §"Cohesion, coupling" 的「一文件一职责」一致）。 */
+ *  与 AGENTS.md §"Cohesion, coupling" 的「一文件一职责」一致）。
+ *
+ *  `dropped`：摘要没能生成、早期历史被直接丢弃的兜底（见 createDroppedHistoryMessage）。
+ *  这跟压缩不是一回事——模型那边什么都没留下——所以文案与图标都要区分开，否则用户会
+ *  以为早期内容还在摘要里。此形态没有摘要可展开，故不渲染胶囊与披露框。 */
 export interface CompactionDividerProps {
   /** Summary 内容 + tokensBefore。token 数缺失时省略右侧徽章。 */
   summary?: {
     summary: string;
     tokensBefore?: number;
   };
+  /** true = 摘要生成失败、早期历史被丢弃的兜底标记。 */
+  dropped?: boolean;
 }
 
-export function CompactionDivider({ summary }: CompactionDividerProps = {}) {
+export function CompactionDivider({ summary, dropped }: CompactionDividerProps = {}) {
   // 披露展开状态——只在自身实例内持有，不与其他分隔条联动（多段压缩时
   // 各自独立展开 / 收起；如需「一次只展开一个」是后续迭代）。
   const [open, setOpen] = useState(false);
   const summaryText = summary?.summary ?? '';
   const hasTokens = typeof summary?.tokensBefore === 'number' && summary.tokensBefore > 0;
+
+  // dropped：摘要生成失败的兜底标记。没有摘要可展开，用简洁静态条 + 剪刀图标区分于
+  // 正常压缩（后者早期内容仍留在摘要里，前者是真的没了）。
+  if (dropped) {
+    return (
+      <div className="flex items-center gap-2 my-1 select-none" role="separator">
+        <div className="h-px flex-1 bg-border" />
+        <span className="flex items-center gap-1.5 text-[0.7rem] text-muted-foreground/70 font-medium whitespace-nowrap">
+          <Scissors className="size-3 shrink-0" />
+          {t('chat.compaction.droppedDivider')}
+        </span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    );
+  }
 
   return (
     // flex-wrap lets the disclosure block drop onto a new row beneath the
@@ -602,7 +623,7 @@ export function AgentMessage({
           Cebian Agent
         </div>
       )}
-      <div ref={contentRef} className="text-[length:var(--chat-font-size)] font-medium leading-relaxed space-y-3 animate-message-fade-in">
+      <div ref={contentRef} className="chat-text-body chat-font font-medium leading-relaxed space-y-3 animate-message-fade-in">
         {children}
         {isStreaming && <StreamingCursor />}
       </div>
@@ -661,7 +682,7 @@ export function AgentTextBlock({ content, streaming }: { content: string; stream
   // data-speech-content：标记「可朗读的回复正文」，供 extractSpeakText 只读此子树，
   // 从而跳过 thinking / 工具卡片 / 错误提示等同处一个容器下的其它块。
   return (
-    <div data-speech-content>
+    <div data-speech-content className="chat-text-body chat-font">
       <MarkdownRenderer content={shown} normalizeMath streaming={streaming} />
     </div>
   );
@@ -700,7 +721,7 @@ export function ThinkingBlock({ content, isLive }: { content: string; isLive?: b
         }`}
       >
         <div className="overflow-hidden">
-          <div className="px-3 py-3 border-t border-dashed border-border text-muted-foreground font-mono text-[0.75rem] leading-relaxed bg-card/50">
+          <div className="px-3 py-3 border-t border-dashed border-border text-muted-foreground font-mono chat-text-small leading-relaxed bg-card/50">
             <MarkdownRenderer content={content} normalizeMath streaming={isLive} />
           </div>
         </div>

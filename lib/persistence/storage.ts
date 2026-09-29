@@ -267,6 +267,67 @@ export const workerRoleTimeouts = defineLoggedItem<WorkerTimeoutMap>(
   { fallback: {} },
 );
 
+// ─── 上下文压缩设置（1.8.0）───
+
+/**
+ * 上下文压缩的触发设置。压缩「用哪个模型」是另一个存储项（`compactionModel`，见上）——
+ * 两者没有合并，因为 `local:compactionModel` 已是既有的持久化 key，改名会静默丢掉用户配置。
+ *
+ * - `enabled`：压缩总开关。关掉后对话超长会直接撞 provider 的上下文上限。
+ * - `thresholdPercent`：上下文估算占模型窗口的百分比，超过即触发压缩。此前写死为
+ *   「窗口 − 16384 token」，换算成百分比会随窗口漂移（128k 窗口 87%、1M 窗口 98.4%），
+ *   大窗口模型几乎压不到就已经撑爆；改成百分比后各档窗口的触发点一致。
+ */
+export interface CompactionSettings {
+  enabled: boolean;
+  /** 1–99 的整数，由 {@link resolveCompactionSettings} 保证。 */
+  thresholdPercent: number;
+}
+
+const DEFAULT_COMPACTION: CompactionSettings = { enabled: true, thresholdPercent: 80 };
+const MIN_THRESHOLD_PERCENT = 1;
+const MAX_THRESHOLD_PERCENT = 99;
+
+/**
+ * 把任意来源的阈值收成 1–99 的整数；数字与「数字字符串」之外的一律退回默认。
+ *
+ * 不能直接 `Number(x)` 后判 `isFinite`：`Number(null)` / `Number('')` / `Number([])` 都是 0，
+ * 会被当成合法输入夹到 1，于是「字段坏掉」静默变成「每轮都压缩」。
+ */
+function clampThresholdPercent(raw: unknown): number {
+  const numeric =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim() !== ''
+        ? Number(raw)
+        : Number.NaN;
+  if (!Number.isFinite(numeric)) return DEFAULT_COMPACTION.thresholdPercent;
+  return Math.min(MAX_THRESHOLD_PERCENT, Math.max(MIN_THRESHOLD_PERCENT, Math.round(numeric)));
+}
+
+/**
+ * 取规范的压缩设置：旧值缺字段时补默认（WXT fallback 只在 key 整体缺失时生效，同
+ * `resolveAutoTitleSettings` 的理由），并把阈值夹回 1–99 的整数。
+ *
+ * 这里必须真的校验值域而不只是补缺，因为这个存储项参与备份恢复：恢复流程会把备份文件
+ * 里的 JSON 原样写回，一个手改出来的 `120` 会让触发点超过窗口、压缩永不触发，直接退回
+ * issue #72 的症状；`0` 或负数则每轮都压。设置页的滑杆范围只是展示区间，不能当防线。
+ * 所有读取压缩设置的地方都走这里。
+ */
+export function resolveCompactionSettings(
+  s: Partial<CompactionSettings> | null | undefined,
+): CompactionSettings {
+  return {
+    enabled: typeof s?.enabled === 'boolean' ? s.enabled : DEFAULT_COMPACTION.enabled,
+    thresholdPercent: clampThresholdPercent(s?.thresholdPercent),
+  };
+}
+
+export const compactionSettings = storage.defineItem<CompactionSettings>(
+  'local:compactionSettings',
+  { fallback: { ...DEFAULT_COMPACTION } },
+);
+
 /** 自动生成会话标题：首轮结束后用一次短补全把「首句截断」换成简短标题。
  *  `model: null` = 跟随对话主模型（默认）。 */
 export interface AutoTitleSettings {
@@ -290,6 +351,71 @@ export function resolveAutoTitleSettings(s: Partial<AutoTitleSettings> | null | 
 export const autoTitleSettings = storage.defineItem<AutoTitleSettings>(
   'local:autoTitleSettings',
   { fallback: { ...DEFAULT_AUTO_TITLE } },
+);
+
+/** 对话区字体预设；`custom` 表示使用用户选择的本机字体。 */
+export type ChatFontPreset = 'default' | 'serif' | 'mono' | 'custom';
+
+/**
+ * 对话区外观：只作用于对话阅读区（用户消息、AI 回复、思考过程、输入框），不缩放工具卡片、
+ * 顶栏等界面框架。
+ * - `fontScalePercent`：相对各处原始字号的百分比。100 = 各处保持原始字号；每处文字按
+ *   自己的基准同比缩放，而不是统一成一个字号。
+ * - `fontPreset`：字体预设；`custom` 时使用 `customFontName`（本机已安装字体名，找不到时浏览器
+ *   自动回退系统字体）。切回预设时保留 `customFontName`，再切回 custom 不用重选。
+ */
+export interface ChatAppearance {
+  /** 80–150 且为 5 的倍数，由 {@link resolveChatAppearance} 保证。 */
+  fontScalePercent: number;
+  fontPreset: ChatFontPreset;
+  /** 已去首尾空白、截断到 {@link MAX_CUSTOM_FONT_NAME_LENGTH}（截断后再去尾部空白）。CSS 转义在渲染边界做。 */
+  customFontName: string;
+}
+
+const DEFAULT_CHAT_APPEARANCE: ChatAppearance = {
+  fontScalePercent: 100,
+  fontPreset: 'default',
+  customFontName: '',
+};
+export const MIN_CHAT_FONT_SCALE_PERCENT = 80;
+export const MAX_CHAT_FONT_SCALE_PERCENT = 150;
+export const CHAT_FONT_SCALE_STEP = 5;
+export const MAX_CUSTOM_FONT_NAME_LENGTH = 64;
+const CHAT_FONT_PRESETS: readonly ChatFontPreset[] = ['default', 'serif', 'mono', 'custom'];
+
+/**
+ * 取规范的对话区外观：缺字段补默认（WXT fallback 只在 key 整体缺失时生效），并校验值域。
+ * 该项参与备份恢复，恢复会把备份 JSON 原样写回，所以这里是防线，滑杆范围不是。
+ * 所有读取对话区外观的地方都走这里。
+ */
+export function resolveChatAppearance(
+  s: Partial<ChatAppearance> | null | undefined,
+): ChatAppearance {
+  // 只认有限数字：null / '' / 数组经 Number() 会变 0，被夹成最小值而不是退回默认
+  const rawScale = s?.fontScalePercent;
+  const fontScalePercent =
+    typeof rawScale === 'number' && Number.isFinite(rawScale)
+      ? Math.min(
+          MAX_CHAT_FONT_SCALE_PERCENT,
+          Math.max(
+            MIN_CHAT_FONT_SCALE_PERCENT,
+            Math.round(rawScale / CHAT_FONT_SCALE_STEP) * CHAT_FONT_SCALE_STEP,
+          ),
+        )
+      : DEFAULT_CHAT_APPEARANCE.fontScalePercent;
+  const fontPreset = CHAT_FONT_PRESETS.includes(s?.fontPreset as ChatFontPreset)
+    ? (s!.fontPreset as ChatFontPreset)
+    : DEFAULT_CHAT_APPEARANCE.fontPreset;
+  const customFontName =
+    typeof s?.customFontName === 'string'
+      ? s.customFontName.trim().slice(0, MAX_CUSTOM_FONT_NAME_LENGTH).trimEnd()
+      : DEFAULT_CHAT_APPEARANCE.customFontName;
+  return { fontScalePercent, fontPreset, customFontName };
+}
+
+export const chatAppearance = storage.defineItem<ChatAppearance>(
+  'local:chatAppearance',
+  { fallback: { ...DEFAULT_CHAT_APPEARANCE } },
 );
 
 export const customProviders = defineLoggedItem<CustomProviderConfig[]>(
@@ -322,7 +448,9 @@ export const canvasPanelOpen = defineLoggedItem<boolean>(
   { fallback: false },
 );
 
-export const themePreference = defineLoggedItem<'dark' | 'light' | 'system'>(
+export type ThemePreference = 'dark' | 'light' | 'system';
+
+export const themePreference = defineLoggedItem<ThemePreference>(
   'local:theme',
   { fallback: 'system' },
 );

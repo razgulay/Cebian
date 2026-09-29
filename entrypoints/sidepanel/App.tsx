@@ -14,8 +14,10 @@ import { CanvasPane } from '@/components/canvas/CanvasPane';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { useApplyThemePreference, resolveTheme } from '@/hooks/useApplyThemePreference';
 import { useChangelogOnUpdate } from '@/hooks/useChangelogOnUpdate';
-import { useChatFontSize } from '@/hooks/useChatFontSize';
-import { canvasPanelOpen, lastOpenSessionId } from '@/lib/persistence/storage';
+import { useChatAppearance } from '@/hooks/useChatAppearance';
+import { useFileDropGuard } from '@/hooks/useFileDropZone';
+import { canvasPanelOpen, lastOpenSessionId, themePreference } from '@/lib/persistence/storage';
+import { chatAppearanceStyle } from '@/lib/ui/chat-appearance';
 import { debugLog, withSession } from '@/lib/debug/log';
 import { sessionListChannel } from '@/lib/agent/session-list-channel';
 import { t } from '@/lib/i18n';
@@ -34,6 +36,9 @@ const SettingsRoutes = lazy(() =>
 function App() {
   const [theme, themeReady, setTheme] = useApplyThemePreference();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 对话区字号 / 字体：与主题一样先读出再渲染，避免首帧按默认字号画完再跳变。
+  // （1.8.0 起由 useChatAppearance 统一承载，取代 fork 的 useChatFontSize。）
+  const appearance = useChatAppearance();
   const [chatTitle, setChatTitle] = useState('');
   // Canvas pane 开关状态——持久化到 session: 存储（侧边栏关闭再开会恢复）。
   // `exclude` 分类不进备份（panel-open 是设备本地 UI 状态，不是用户配置）。
@@ -45,11 +50,8 @@ function App() {
   // 参与悬浮球的 open/close toggle：上报开启态 + 订阅「自关」指令。
   useSidePanelToggle();
 
-  // Apply user-controlled chat font size (writes `--chat-font-size` to the
-  // document root, consumed by text-[length:var(--chat-font-size)] in Message,
-  // MarkdownRenderer, ChatInput). No-op render-wise: just side-effects on the
-  // document root via useEffect.
-  useChatFontSize();
+  // 拖放区以外松开文件不让浏览器打开它；同时给内部拖动打标记（见 hook）。
+  useFileDropGuard();
 
   // 「在侧边栏继续」交接：仅当 handoff 的 windowId 命中本窗口时跳转（多窗口不误跳）。
   const goToSession = useCallback(
@@ -187,13 +189,14 @@ function App() {
     void setCanvasOpen(next);
   }, [canvasOpen, setCanvasOpen]);
 
-  if (!themeReady || !restored) return null;
+  if (!themeReady || !restored || !appearance) return null;
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex flex-col h-screen overflow-hidden relative">
-        {/* Hide Chrome's Header on routes that bring their own header:
-            - /settings/*  → SettingsLayout (top bar + back button) */}
+      <div
+        className="flex flex-col h-screen overflow-hidden relative"
+        style={chatAppearanceStyle(appearance)}
+      >
         {!location.pathname.startsWith('/settings') && (
           <Header
             title={chatTitle}

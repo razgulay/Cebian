@@ -6,7 +6,7 @@ const __DIAG_EDIT_BTN__ = true;
 import { useEffect, useState, useCallback, useMemo, useRef, useLayoutEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ArrowDown } from 'lucide-react';
+import { ArrowDown, Paperclip } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,7 +22,6 @@ const CHAT_MESSAGES_SELECTOR = '[role="chat-messages"]';
 import { ChatInput, type ChatInputHandle } from '@/components/chat/ChatInput';
 import { SelectionQuoteButton } from '@/components/chat/SelectionQuoteButton';
 import { WelcomeScreen } from '@/components/chat/WelcomeScreen';
-import { useChatFontSize } from '@/hooks/useChatFontSize';
 import {
   UserMessageBubble,
   AgentMessage,
@@ -66,6 +65,7 @@ import { useContextUsage } from '@/components/chat/context/useContextUsage';
 import { ContextUsageBadge } from '@/components/chat/context/ContextUsageBadge';
 import { useCompactionToasts } from '@/hooks/useCompactionToasts';
 import { useStickToBottom } from '@/hooks/useStickToBottom';
+import { useFileDropZone, type FileDrop } from '@/hooks/useFileDropZone';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { lastSelectedModel, lastSelectedThinkingLevel as thinkingLevelStorage, providerCredentials, customProviders, workerRoleTimeouts, type ModelIdentity, type ThinkingLevel } from '@/lib/persistence/storage';
 import { hasUsableModel } from '@/lib/providers/usable-models';
@@ -92,10 +92,8 @@ export function ChatPage({
   const isNewChat = !routeSessionId || routeSessionId === 'new';
   const navigate = useNavigate();
 
-  // Apply the user-selected chat font size as a CSS variable on the document
-  // root so all child elements (Message, MarkdownRenderer, ChatInput) pick
-  // it up via `text-[length:var(--chat-font-size)]`.
-  useChatFontSize();
+  // 对话区字号 / 字体由侧边栏根节点的 chatAppearanceStyle 挂 CSS 变量（见 App.tsx），
+  // 子组件经 `chat-text-*` / `chat-font` 工具类消费，此处无需再做处理。
 
   // 本窗口 / 本对话「当前选中的模型 / 思考档」本地草稿。发送 / 重试时随消息带出作
   // turn；新对话从全局种子 seed、已有会话从会话行（onSessionLoaded）seed。不直连全局
@@ -149,7 +147,7 @@ export function ChatPage({
     }
   }, []);
 
-  // 句柄：欢迎页示例卡片通过它把 prompt 填入输入框。
+  // 句柄：欢迎页示例卡片通过它把 prompt 填入输入框；拖放区通过它交付放下的文件。
   const inputRef = useRef<ChatInputHandle>(null);
 
   // 临时诊断：本轮 send→reply 的 trace 句柄。`handleSend` 在派发 tick 捕
@@ -176,6 +174,13 @@ export function ChatPage({
       handle.insertText?.(text);
     }
   }, []);
+
+  // 整个聊天页（消息区 + 输入框）都是文件拖放区。发送进行中不接收：那一刻的附件马上要被清空。
+  const [composerDispatching, setComposerDispatching] = useState(false);
+  const handleFileDrop = useCallback(({ files, folders }: FileDrop) => {
+    inputRef.current?.addFiles(files, folders);
+  }, []);
+  const fileDrop = useFileDropZone({ enabled: !composerDispatching, onDrop: handleFileDrop });
 
   // ─── Agent port (all agent/session logic via background) ───
   const agent = useBackgroundAgent({
@@ -224,7 +229,7 @@ export function ChatPage({
     compactNow,
   } = agent;
 
-  const { messages, branchInfo, isAgentRunning, isCompacting, sessionId: activeSessionId, sessionTitle, lastError } = state;
+  const { messages, branchInfo, isAgentRunning, isCompacting, sessionId: activeSessionId, sessionTitle, lastError, contextUsage } = state;
 
   // Context-usage 共享视图数据——ChatInput 通过 `usage` prop 消费；调用一次，
   // 整个组件树共享同一份 severity / headroom / compactNow 入口。turnModel 为
@@ -513,7 +518,7 @@ export function ChatPage({
     // id——provider 只包 chat 页自己，VFS 标签页等其它 markdown 渲染处拿到的
     // 恒为 null，链接行为不受影响。
     <ChatSessionIdContext.Provider value={chatSessionId}>
-      <div className="flex-1 min-h-0 relative flex flex-col">
+      <div className="flex-1 min-h-0 relative flex flex-col" {...fileDrop.zoneProps}>
         <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
           <div role="chat-messages" className="flex min-h-full flex-col gap-3 px-4 py-3">
             {sessionLoading && (
@@ -531,6 +536,7 @@ export function ChatPage({
                 <CompactionDivider
                   key={`compact-${idx}`}
                   summary={{ summary: msg.summary, tokensBefore: msg.tokensBefore }}
+                  dropped={msg.dropped}
                 />
               );
             }
@@ -1169,11 +1175,11 @@ export function ChatPage({
         )}
       </div>
 
-      {/*
-          Inline edit happens inside UserMessageBubble now (upstream's design):
-          the bubble toggles its own textarea. ChatInput is purely the
-          compose surface for new messages — no edit-mode switching needed.
-        */}
+        {/*
+            Inline edit happens inside UserMessageBubble now (upstream's design):
+            the bubble toggles its own textarea. ChatInput is purely the
+            compose surface for new messages — no edit-mode switching needed.
+          */}
         {state.contextOverflow && (
           <div className="mx-2 mb-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2">
             <div className="text-sm font-medium text-destructive">
@@ -1213,6 +1219,8 @@ export function ChatPage({
           onModelChange={handleModelChange}
           onThinkingChange={handleThinkingChange}
           hideTeamControls={isTelegramSession}
+          contextUsage={contextUsage}
+          onDispatchingChange={setComposerDispatching}
         />
 
       {/* Floating "Quote" button — appears whenever the user selects text
@@ -1222,6 +1230,17 @@ export function ChatPage({
         scopeSelector={CHAT_MESSAGES_SELECTOR}
         onQuote={handleQuote}
       />
+
+      {fileDrop.isOver && (
+        // 纯视觉提示：pointer-events-none 让拖放事件照常落到下面的区域上
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-2 z-50 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary/60 bg-background/85 text-sm text-primary backdrop-blur-[1px]"
+        >
+          <Paperclip className="size-5" />
+          {t('chat.composer.dropFiles')}
+        </div>
+      )}
     </ChatSessionIdContext.Provider>
   );
 }

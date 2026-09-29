@@ -12,6 +12,7 @@ import {
   type BranchEntryInfo,
   type BroadcastMessage,
   type ClientMessage,
+  type ContextUsage,
   type ServerMessage,
   type SessionSnapshot,
   type TurnSettings,
@@ -23,7 +24,6 @@ import { applyStreamOps } from '@/lib/agent/stream-replica';
 import type { PermissionRequest } from '@/lib/agent/tool-permissions';
 import { replaceUserText, truncateForRetry } from '@/lib/agent/message-helpers';
 import { rewriteLastUserMessage } from '@/lib/agent/rewrite-last-user-message';
-import { estimateContextTokensForUi } from '@/lib/agent/compaction';
 import type { Message } from '@earendil-works/pi-ai';
 import { t } from '@/lib/i18n';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
@@ -81,6 +81,9 @@ export interface AgentPortState {
    * prompt, which resets the BG counter.
    */
   contextOverflow: { attempts: number; lastError: string } | null;
+  /** 当前上下文占用（1.8.0）；后台在全量边界后单独补帧下发。`null` = 还没收到过。
+   *  与压缩判据共用后台的 measureContextUsage，界面数字即压缩比较的那个值。 */
+  contextUsage: ContextUsage | null;
   /** Active model's `contextWindow`（来自 pi-ai Model 的同名字段）。caller 在
    *  `currentModel` / provider 列表变化时通过 `setContextWindow` 推过来；初始
    *  为 null（无模型 / 解析失败时由 `useContextUsage` 在 effect 里设回 null）。
@@ -147,6 +150,7 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
     telegramStatus: 'disconnected',
     lastError: null,
     contextOverflow: null,
+    contextUsage: null,
     contextWindow: null,
     contextTokenEstimate: 0,
     liveLines: new Map(),
@@ -322,6 +326,11 @@ export function useBackgroundAgent(callbacks: AgentPortCallbacks) {
             hookFirstTokenSeenRef.current.delete(msg.sessionId);
           }
           setState(prev => ({ ...prev, isAgentRunning: true, isCompacting: false }));
+          break;
+
+        case 'context_usage':
+          if (!isCurrentSession(msg.sessionId)) break;
+          setState(prev => ({ ...prev, contextUsage: msg.contextUsage }));
           break;
 
 case 'stream_ops':
@@ -1184,6 +1193,8 @@ case 'stream_ops':
           // 旧估算只会让 pill 闪一下旧数字）。contextWindow 留待 useContextUsage
           // 在新会话的 currentModel 落定后通过 setContextWindow 推过来。
           contextTokenEstimate: 0,
+          // 占用环同理：不清的话切过去的一瞬间会显示上一个会话的占用，等后台补帧才纠正。
+          contextUsage: null,
         }
       : { ...prev, sessionId });
     postMessage({ type: 'subscribe', sessionId });
@@ -1213,18 +1224,9 @@ case 'stream_ops':
     return unsub;
   }, []);
 
-  // 用 messages 引用变化来驱动 token 估算刷新。estimateContextTokensForUi
-  // 与 BG maybeCompact 同形状（sanitize → lastSummary → sinceLast → estimate），
-  // 把 BG 的「真·视图」代价折在每次 messages 引用变的时候。一次 render 的 16ms
-  // 滞后对 pill 来说无感——它本来就是按状态变化闪的。BG `compaction_skipped`
-  // 广播会在收到时直接把数字覆写到 state（见 handleMessage 内的 case 分支），
-  // 下一次 messages 改变时本地又接管。
-  useEffect(() => {
-    setState(prev => {
-      const next = estimateContextTokensForUi(state.messages);
-      return prev.contextTokenEstimate === next ? prev : { ...prev, contextTokenEstimate: next };
-    });
-  }, [state.messages]);
+  // 占用环的数字改由后台的 `context_usage` 帧提供（见 handleMessage 的 case 分支）：
+  // 后台与压缩判据共用同一套 measureContextUsage，前端不再自己估算——两处各算一套必然
+  // 漂移，会出现「界面显示 75% 却已经开始压缩」。1.8.0 起移除 fork 的前端估算。
 
   const unsubscribe = useCallback(() => {
     // Don't reset messages here — that wipes the optimistic user bubble
@@ -1278,6 +1280,7 @@ case 'stream_ops':
       telegramStatus: 'disconnected',
       lastError: null,
       contextOverflow: null,
+      contextUsage: null,
       contextWindow: null,
       contextTokenEstimate: 0,
       liveLines: new Map(),

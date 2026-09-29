@@ -1,5 +1,6 @@
 extName: Cebian · Open-Source AI Side Panel Agent
-extDescription: Side panel AI agent. BYO key (OpenAI/Anthropic/Google), no account. Element picker, MCP tools, skills. AGPL-3.0, local-first.
+extDescription: Side panel AI agent. BYO key (OpenAI/Anthropic/Google), no
+  account. Element picker, MCP tools, skills. AGPL-3.0, local-first.
 actionTitle: Open Cebian sidebar
 common:
   newChat: New chat
@@ -57,7 +58,8 @@ common:
     yearsAgo: $1 y ago
   session:
     deleteConfirmTitle: Delete chat?
-    deleteConfirmDescription: '"$1" and its workspace files will be permanently removed. This cannot be undone.'
+    deleteConfirmDescription: '"$1" and its workspace files will be permanently
+      removed. This cannot be undone.'
     running: Agent is running
     pin: Pin
     unpin: Unpin
@@ -71,8 +73,10 @@ common:
       1: Delete 1 chat?
       n: Delete $1 chats?
     deleteManyConfirmDescription:
-      1: The chat and its workspace files will be permanently removed. This cannot be undone.
-      n: $1 chats and their workspace files will be permanently removed. This cannot be undone.
+      1: The chat and its workspace files will be permanently removed. This cannot be
+        undone.
+      n: $1 chats and their workspace files will be permanently removed. This cannot
+        be undone.
     deleteFailed: Could not delete. The chat is still there.
     placementFailed: Could not update the chat. Nothing changed.
     forkedFrom: Forked from "$1"
@@ -101,15 +105,26 @@ pageActions:
     translate: Translate
     summarize: Summarize
   prompts:
-    explain: 'Explain the user''s text clearly and concisely in $1. Cover its meaning and any important context a reader would need. Keep the response brief and use plain prose without Markdown. The surrounding page context below is only for disambiguation; do not explain it as part of the selected text:
+    explain: 'Explain the user''s text clearly and concisely in $1. Cover its
+      meaning and any important context a reader would need. Keep the response
+      brief and use plain prose without Markdown. The surrounding page context
+      below is only for disambiguation; do not explain it as part of the
+      selected text:
 
 
       $2'
-    translate: 'Translate the user''s text into $1 while preserving its meaning and tone. Output only the translated plain text, without Markdown, explanations, notes, or surrounding quotation marks. The surrounding page context below is only for disambiguation; do not translate it as part of the selected text:
+    translate: 'Translate the user''s text into $1 while preserving its meaning and
+      tone. Output only the translated plain text, without Markdown,
+      explanations, notes, or surrounding quotation marks. The surrounding page
+      context below is only for disambiguation; do not translate it as part of
+      the selected text:
 
 
       $2'
-    summarize: 'Summarize the user''s text concisely in $1, preserving its key points. Use plain prose or a compact list without Markdown. The surrounding page context below is only for disambiguation; do not summarize it as part of the selected text:
+    summarize: 'Summarize the user''s text concisely in $1, preserving its key
+      points. Use plain prose or a compact list without Markdown. The
+      surrounding page context below is only for disambiguation; do not
+      summarize it as part of the selected text:
 
 
       $2'
@@ -136,6 +151,8 @@ settings:
       core: Core & AI
       agent: Agent Capabilities
       system: System & Automation
+      connect: Connect
+      customize: Customize
     instructions: Instructions
     persona: Persona
     rag: Knowledge (RAG)
@@ -155,7 +172,8 @@ settings:
       used: Used space
       usedError: Couldn't calculate
       openBrowser: Open file browser
-      description: Browse files the AI created, organized by conversation. The browser is read-only — use the download button there to export.
+      description: Browse files the AI created, organized by conversation. The browser
+        is read-only — use the download button there to export.
   about:
     title: About
     tagline: AI browser sidebar assistant
@@ -185,7 +203,8 @@ settings:
       exclude: Except on these pages
       excludeHint: Takes precedence over the list above.
       addExclude: Add an exception
-      syntax: Chrome match patterns, e.g. *://*.example.com/*. Query strings and fragments are ignored.
+      syntax: Chrome match patterns, e.g. *://*.example.com/*. Query strings and
+        fragments are ignored.
       syntaxDocs: View configuration rules
     pagePattern:
       placeholder: '*://*.example.com/*'
@@ -193,7 +212,9 @@ settings:
       remove: Remove pattern $1
     actions:
       title: Toolbar actions
-      hint: Buttons appear on the toolbar in this order. Built-in actions can use a custom system prompt, be scoped or turned off; add your own actions with a custom name and prompt.
+      hint: Buttons appear on the toolbar in this order. Built-in actions can use a
+        custom system prompt, be scoped or turned off; add your own actions with
+        a custom name and prompt.
       builtin: Built-in
       custom: Custom
       pageScoped: Scoped
@@ -210,12 +231,21 @@ settings:
       label: Button text
       labelPlaceholder: e.g. Key points
       prompt: System prompt
-      promptHint: Tells the model what to do with the selected text. Type $1 to insert a variable.
+      promptHint: Tells the model what to do with the selected text. Type $1 to insert
+        a variable.
       promptPlaceholder: e.g. Extract the key points from $1 and reply in $2.
       pages: Where it applies
       transform: Post-process script (optional)
-      transformHint: 'JavaScript for post-processing the completed output. Define a function named transform(text, vars) that returns the string to display. vars provides the same environment variables as prompt templates: selected_text, context, page_url, page_title, date, ui_language. If the script fails, the original output is displayed unchanged.'
-      transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
+      transformHint: 'JavaScript for post-processing the completed output. Define a
+        function named transform(text, vars) that returns the string to display.
+        vars provides the same environment variables as prompt templates:
+        selected_text, context, page_url, page_title, date, ui_language. If the
+        script fails, the original output is displayed unchanged.'
+      transformPlaceholder: "function transform(text, vars) {
+
+        \  return text.trim();
+
+        }"
     ball:
       label: Floating ball
       hint: Show a pinned ball on web pages; click it to open or close the sidebar.
@@ -224,7 +254,8 @@ settings:
       hint: Show a quick-action toolbar when you select text on a page.
     model:
       label: Toolbar model
-      hint: The model used by all toolbar actions. A fast, low-cost model is usually enough. Defaults to the conversation model.
+      hint: The model used by all toolbar actions. A fast, low-cost model is usually
+        enough. Defaults to the conversation model.
       followMain: Same as conversation model
     translate:
       label: Translation target language
@@ -234,7 +265,8 @@ settings:
     title: Chat
     instructions:
       label: Custom instructions
-      hint: Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules.
+      hint: Appended after the default rules. Use it to adjust language, tone, or
+        persona. Cannot override tool protocols or safety rules.
       placeholder: 'e.g.
 
         - Reply in English
@@ -244,16 +276,35 @@ settings:
         - Default to TypeScript when discussing code'
     compaction:
       label: Context compaction model
-      hint: The model used to automatically compact overly long conversations. Defaults to the conversation model.
+      hint: The model used to automatically compact overly long conversations.
+        Defaults to the conversation model.
       followMain: Same as conversation model
+      auto:
+        label: Auto-compact long chats
+        hint: Summarize earlier history when the context approaches the model's limit,
+          so a long chat keeps going instead of failing.
+      threshold:
+        label: Compaction threshold
+        hint: Compact once the estimated context reaches this share of the model's
+          context window.
+        value: $1%
+      model:
+        label: Compaction model
+        hint: The model used to summarize earlier history. Defaults to the conversation
+          model.
+        followMain: Same as conversation model
     autoTitle:
       label: Auto-generate chat titles
-      hint: After the first reply, replace the default title (the first message, truncated) with a short AI-generated title.
+      hint: After the first reply, replace the default title (the first message,
+        truncated) with a short AI-generated title.
       model: Title model
       followMain: Same as conversation model
     search:
       title: Web search
-      hint: Set the order in which search engines are tried; the first enabled engine is preferred. The AI may pick another engine first based on its best-for hint. When a search is blocked, returns nothing, or fails, Cebian tries the remaining enabled engines in order.
+      hint: Set the order in which search engines are tried; the first enabled engine
+        is preferred. The AI may pick another engine first based on its best-for
+        hint. When a search is blocked, returns nothing, or fails, Cebian tries
+        the remaining enabled engines in order.
       preferred: Preferred
       custom: Custom
       modified: Modified
@@ -272,14 +323,20 @@ settings:
       name: Name
       namePlaceholder: e.g. Kagi
       url: Search URL
-      urlHint: Use $1 for the search terms in the URL. Cebian encodes and inserts the terms automatically.
+      urlHint: Use $1 for the search terms in the URL. Cebian encodes and inserts the
+        terms automatically.
       urlPreview: 'URL for "$1": $2'
       script: Extraction script
-      scriptHint: Define a complete extract function that reads titles, links and snippets from the results page. In the returned object, status empty makes Cebian retry briefly, blocked makes it switch engines, and ok makes it read the results array. An empty results array also switches engines.
+      scriptHint: Define a complete extract function that reads titles, links and
+        snippets from the results page. In the returned object, status empty
+        makes Cebian retry briefly, blocked makes it switch engines, and ok
+        makes it read the results array. An empty results array also switches
+        engines.
       generateSelectorPlaceholder: 'Results container selector, e.g. #results'
       generate: Generate template
       when: Best for (optional)
-      whenHint: Describe which searches should use this engine first, to help the AI choose.
+      whenHint: Describe which searches should use this engine first, to help the AI
+        choose.
       whenPlaceholder: e.g. Chinese queries
       engines:
         bing:
@@ -316,11 +373,13 @@ settings:
   memory:
     title: Memory
     enable: Enable memory
-    hint: Cross-conversation memory. Off by default; when on, the assistant saves and recalls durable facts about you across chats.
+    hint: Cross-conversation memory. Off by default; when on, the assistant saves
+      and recalls durable facts about you across chats.
     newBody: (Write the memory here)
     organize:
       title: Organize memory
-      hint: Merge duplicates, drop stale notes, and tidy your memory files in one pass.
+      hint: Merge duplicates, drop stale notes, and tidy your memory files in one
+        pass.
       button: Organize
       running: Organizing…
       model: Model
@@ -340,7 +399,8 @@ settings:
     title: Skills
     newBody: (Write your skill instructions here)
     create: Create skill
-    hint: Multi-file skill packs that follow the agentskills.io spec; the agent loads them on demand.
+    hint: Multi-file skill packs that follow the agentskills.io spec; the agent
+      loads them on demand.
     import: Import…
     exportCurrent: Export
     exportAll: Export all
@@ -365,11 +425,13 @@ settings:
       skillCount:
         1: 1 skill
         n: $1 skills
-      conflictNotice: A skill named "$1" already exists. It will be imported as "$2" unless you overwrite.
+      conflictNotice: A skill named "$1" already exists. It will be imported as "$2"
+        unless you overwrite.
       overwrite: Overwrite existing
       keepBoth: Import as new
       confirmOverwriteTitle: Overwrite existing skill?
-      confirmOverwriteDescription: '"$1" will be replaced and its saved permissions will be cleared. Continue?'
+      confirmOverwriteDescription: '"$1" will be replaced and its saved permissions
+        will be cleared. Continue?'
   mcp:
     title: MCP Servers
     description: Connect Model Context Protocol servers to expose their tools to the agent.
@@ -391,7 +453,8 @@ settings:
       urlInvalid: 'Invalid server URL: $1'
       urlScheme: 'Unsupported URL scheme: $1'
       bearerTokenRequired: Bearer token is required.
-      authHeaderConflict: Do not set the Authorization header manually when using bearer auth — set the token in the auth field instead.
+      authHeaderConflict: Do not set the Authorization header manually when using
+        bearer auth — set the token in the auth field instead.
     status:
       disabled: Disabled
       idle: Awaiting first call
@@ -428,7 +491,8 @@ settings:
     title: Backup & Restore
     local:
       title: Local backup
-      description: Export everything to a .zip file you keep yourself, and restore it on another device.
+      description: Export everything to a .zip file you keep yourself, and restore it
+        on another device.
       create: Create backup
       restore: Restore from file…
     create:
@@ -459,14 +523,17 @@ settings:
       encrypt: Encrypt backup
       passwordPlaceholder: Password
       passwordHint: A forgotten password cannot be recovered
-      bannerInfo: Backups don't include browser cookies or login state; some providers may need re-login after restoring on a new device
-      bannerWarning: This backup contains API keys, OAuth tokens, and other secrets. Don't share it with anyone; enabling encryption is recommended
+      bannerInfo: Backups don't include browser cookies or login state; some providers
+        may need re-login after restoring on a new device
+      bannerWarning: This backup contains API keys, OAuth tokens, and other secrets.
+        Don't share it with anyone; enabling encryption is recommended
       atLeastOne: Select at least one category to back up
       success: Backup created
       failed: Backup failed
     picker:
       title: Select VFS folders / files
-      hint: Ticking a folder includes its entire contents. Selection is stored in the backup and restored to the same paths
+      hint: Ticking a folder includes its entire contents. Selection is stored in the
+        backup and restored to the same paths
       # $1 = number of selected VFS paths
       selectedCount: $1 selected
       empty: Empty folder
@@ -492,14 +559,18 @@ settings:
       catCredentials: Credentials
       apply: Restore
       confirmReplaceTitle: Replace local data?
-      confirmReplaceBody: Replace mode wipes the selected categories before restoring. This cannot be undone
-      confirmReplaceCredentialsBody: Replace mode wipes the selected categories before restoring, and writes API keys and tokens from the backup onto this device. This cannot be undone
+      confirmReplaceBody: Replace mode wipes the selected categories before restoring.
+        This cannot be undone
+      confirmReplaceCredentialsBody: Replace mode wipes the selected categories before
+        restoring, and writes API keys and tokens from the backup onto this
+        device. This cannot be undone
       # $1 = custom VFS roots joined with ' · '
       confirmReplaceVfsCustom: 'The following custom VFS paths will be wiped first: $1'
       confirmCredentialsTitle: Restore credentials?
       confirmCredentialsBody: This will write API keys and tokens from the backup onto this device
       invalidFile: This file is not a valid Cebian backup
-      incompatible: This backup was created by a newer version of Cebian and cannot be restored
+      incompatible: This backup was created by a newer version of Cebian and cannot be
+        restored
       corrupt: This backup is damaged or incomplete and can't be restored
       passwordRequired: This backup is encrypted; enter its password
       success: Restore complete
@@ -521,12 +592,15 @@ settings:
       testSuccess: Connection looks good
       save: Save & connect
       title: WebDAV backup
-      description: Back up to a WebDAV server and keep multiple snapshots there, with restore on any device.
+      description: Back up to a WebDAV server and keep multiple snapshots there, with
+        restore on any device.
       notConfigured: Configure a WebDAV connection first
       changeConnection: Change connection
       removeConnection: Disconnect
       removeConfirmTitle: Disconnect WebDAV?
-      removeConfirmBody: The saved connection (including the password) will be removed from this device. Snapshots already uploaded to the WebDAV server are kept and stay accessible after reconnecting.
+      removeConfirmBody: The saved connection (including the password) will be removed
+        from this device. Snapshots already uploaded to the WebDAV server are
+        kept and stay accessible after reconnecting.
       removeSuccess: WebDAV connection removed
       backupNow: Back up to WebDAV
       refresh: Refresh
@@ -537,12 +611,14 @@ settings:
       savedConnection: Connection saved
       uploadSuccess: Uploaded to WebDAV
       deleteConfirmTitle: Delete this snapshot?
-      deleteConfirmBody: $1 will be permanently removed from the WebDAV server. This cannot be undone
+      deleteConfirmBody: $1 will be permanently removed from the WebDAV server. This
+        cannot be undone
       deleteSuccess: Snapshot deleted
       deleteFailed: Delete failed
       error:
         network: Can't reach the WebDAV server — check the URL and your network
-        timeout: The WebDAV server took too long to respond — check the URL and your network
+        timeout: The WebDAV server took too long to respond — check the URL and your
+          network
         unauthorized: Authentication failed — check the username and password
         notFound: Remote path not found
         conflict: The parent folder doesn't exist on the server
@@ -562,16 +638,22 @@ settings:
     used: Used space
     usedError: Couldn't calculate
     openBrowser: Open file browser
-    description: Browse files the AI created, organized by conversation. The browser is read-only — use the download button there to export.
+    description: Browse files the AI created, organized by conversation. The browser
+      is read-only — use the download button there to export.
   debugLog:
     title: Debug log
-    description: Captures every console message from the extension into a local ring buffer. Export this file when reporting a bug so the maintainer can see what happened without you having to reproduce it live.
+    description: Captures every console message from the extension into a local ring
+      buffer. Export this file when reporting a bug so the maintainer can see
+      what happened without you having to reproduce it live.
     enable:
       label: Capture debug log
-      hint: When off, nothing is written to the ring buffer. The Export button is also disabled.
+      hint: When off, nothing is written to the ring buffer. The Export button is also
+        disabled.
     verbose:
       label: Verbose (per-token events)
-      hint: Also capture every streaming LLM token. Off by default — the default level already keeps all agent boundaries and warnings, which is what you usually want when filing a bug.
+      hint: Also capture every streaming LLM token. Off by default — the default level
+        already keeps all agent boundaries and warnings, which is what you
+        usually want when filing a bug.
     live:
       label: Live log
       hint: Watch new entries appear as they happen, instead of waiting to export.
@@ -594,19 +676,24 @@ settings:
     title: Advanced
     compaction:
       label: Context compaction model
-      hint: Model used to compact long conversations. Defaults to the conversation model.
+      hint: Model used to compact long conversations. Defaults to the conversation
+        model.
       followMain: Same as conversation model
     domSubAgent:
       label: DOM sub-agent model
-      hint: Cheap model for page-reading tasks delegated by the main chat. Off = feature disabled.
+      hint: Cheap model for page-reading tasks delegated by the main chat. Off =
+        feature disabled.
       false: Off (disabled)
       'off': 'Off'
     workers:
       title: Worker models
-      hint: One model per worker role — the main agent delegates via `delegate_task`. Leave on “Same as conversation model” to inherit.
+      hint: One model per worker role — the main agent delegates via `delegate_task`.
+        Leave on “Same as conversation model” to inherit.
       followMain: Same as conversation model
       enabled: Enable worker team
-      enabledHint: When on, the main agent delegates artifact tasks (write / build / generate) to worker sub-agents in isolated contexts. When off, the main agent writes artifacts directly with native file tools.
+      enabledHint: When on, the main agent delegates artifact tasks (write / build /
+        generate) to worker sub-agents in isolated contexts. When off, the main
+        agent writes artifacts directly with native file tools.
       content_writer:
         label: Content writer
         hint: Reads sources and writes long-form content into a VFS file.
@@ -615,7 +702,8 @@ settings:
         hint: Writes HTML / CSS / JS into a VFS file. No browser tools.
       reviewer:
         label: Reviewer
-        hint: Reads up to 3 files and emits findings as a text handoff. Cannot modify files or invoke browser tools.
+        hint: Reads up to 3 files and emits findings as a text handoff. Cannot modify
+          files or invoke browser tools.
       researcher:
         label: Researcher
         hint: Searches files and RAG collections to produce a structured summary.
@@ -631,19 +719,52 @@ settings:
     title: Appearance
     fontSize:
       label: Chat font size
-      hint: Drag the slider to fine-tune the size of user prompts and assistant messages in the sidepanel chat. Range 15–18 px (step 0.5). Default 15 px.
+      hint: Drag the slider to fine-tune the size of user prompts and assistant
+        messages in the sidepanel chat. Range 15–18 px (step 0.5). Default 15
+        px.
       preview: Preview — The quick brown fox jumps over the lazy dog.
     fontFamily:
       label: Chat font family
-      hint: Choose the typeface used in the sidepanel chat. Affects user prompts and assistant messages.
+      hint: Choose the typeface used in the sidepanel chat. Affects user prompts and
+        assistant messages.
       geist: Geist (default)
       inter: Inter
       roboto: Roboto
       system: System default
+    theme:
+      label: Theme
+      system: System
+      light: Light
+      dark: Dark
+    fontScale:
+      label: Chat font size
+      hint: Scales messages and the input box. Tool cards and the rest of the
+        interface keep their size.
+      value: $1%
+    font:
+      label: Chat font
+      default: Default
+      serif: Serif
+      mono: Monospace
+      custom: Custom
+      customHint: Choose from the fonts installed on this device. The first time,
+        Cebian opens a tab to ask for permission to read them.
+      needPermission: Permission to read installed fonts is needed — grant it in the
+        tab that just opened, then open the font list again.
+      pickerPlaceholder: Choose a font…
+      searchPlaceholder: Search fonts…
+      loading: Reading installed fonts…
+      notFound: No fonts found
+    preview:
+      label: Preview
+      question: How can I make chat text easier to read?
+      answer: Adjust the font size and font above. Changes apply to all chats right
+        away.
   instructions:
     title: Instructions
     label: Custom instructions
-    hint: Appended after the default rules. Use it to adjust language, tone, or persona. Cannot override tool protocols or safety rules.
+    hint: Appended after the default rules. Use it to adjust language, tone, or
+      persona. Cannot override tool protocols or safety rules.
     placeholder: 'e.g.
 
       - Reply in English
@@ -654,9 +775,12 @@ settings:
   persona:
     title: Persona
     enabled: Enable persona (OpenClaw mode)
-    enabledHint: Adds a SOUL block to the system prompt and a 1-line recap in every user message. Also togglable via the chip next to the chat composer. Cannot override Critical Rules or tool protocols.
+    enabledHint: Adds a SOUL block to the system prompt and a 1-line recap in every
+      user message. Also togglable via the chip next to the chat composer.
+      Cannot override Critical Rules or tool protocols.
     label: Persona copy
-    hint: Appended to the system prompt as a SOUL block, plus a 1-line recap in every user message. Empty when off.
+    hint: Appended to the system prompt as a SOUL block, plus a 1-line recap in
+      every user message. Empty when off.
     soulLabel: SOUL
     soulPlaceholder: 'e.g.
 
@@ -686,10 +810,12 @@ settings:
     connectionStatusReady: Ready
     connectionStatusWarn: pgvector missing
     connectionStatusError: Connection failed
-    pgvectorMissing: Connected, but pgvector extension is missing. Enable it in your Neon console → Extensions.
+    pgvectorMissing: Connected, but pgvector extension is missing. Enable it in your
+      Neon console → Extensions.
     bootstrapFailed: Schema bootstrap failed
     embedderTitle: Embedding model
-    embedderHint: OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI on port 8317.
+    embedderHint: OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI
+      on port 8317.
     embedderBaseUrl: Base URL
     embedderApiKey: API key (optional)
     embedderModel: Model
@@ -707,7 +833,8 @@ settings:
     rerankApiKey: Rerank API key (optional)
     rerankTopN: Top-N after rerank
     ragSearchTitle: Agentic rag_search tool
-    ragSearchHint: Off — agent only sees the chunks pre-injected at send time. On lets it query during the conversation.
+    ragSearchHint: Off — agent only sees the chunks pre-injected at send time. On
+      lets it query during the conversation.
     contextualRetrievalTitle: Contextual Retrieval (Lớp 0)
     contextualRetrievalHint: Off — chunks indexed as-is. On improves recall for mid-document passages.
     contextualLlmBaseUrl: Contextual LLM Base URL
@@ -718,16 +845,20 @@ settings:
     retrievalModeRecommendedBadge: Recommended
     retrievalModeHybridSubLabel: Combines vector similarity with keyword match for best recall.
     retrievalModeVector: Vector only
-    hybridScoreWarning: Hybrid mode uses a different relevance scale (RRF). Your previous threshold may need lowering — try 0 to start.
+    hybridScoreWarning: Hybrid mode uses a different relevance scale (RRF). Your
+      previous threshold may need lowering — try 0 to start.
     pinGateTitle: Pinned RAG relevance gate
     pinGateHint: Skip pinned envelopes when the question looks off-topic. 0 = always attach.
     pinMinScore: Min relevance score
     pinMinScoreHint: Lower = more results, higher = stricter relevance. Try 0 to start.
-    contextualHint: Chunks will be indexed with LLM-generated context prefixes (~1 LLM call per chunk).
+    contextualHint: Chunks will be indexed with LLM-generated context prefixes (~1
+      LLM call per chunk).
     newCollection: New collection
-    newCollectionHint: Pick a folder (existing or new), then drop files into it. Indexing runs locally — files stay on your disk, vectors go to Neon.
+    newCollectionHint: Pick a folder (existing or new), then drop files into it.
+      Indexing runs locally — files stay on your disk, vectors go to Neon.
     newCollectionName: Collection name
-    nameInvalid: Name must start with a letter or digit; letters, digits, dashes and underscores only.
+    nameInvalid: Name must start with a letter or digit; letters, digits, dashes and
+      underscores only.
     nameExists: A collection named "$1" already exists.
     folderLabel: Folder
     folderPlaceholder: Choose a folder…
@@ -753,19 +884,23 @@ settings:
     renameCollectionLabel: New name
     renamePlaceholder: Type a new name
     renameConfirm: Rename "$1" to "$2"?
-    renameConfirmHint: Existing chunks in Neon will be re-tagged with the new name. Embeddings are not regenerated — search results stay identical.
+    renameConfirmHint: Existing chunks in Neon will be re-tagged with the new name.
+      Embeddings are not regenerated — search results stay identical.
     renameSuccess: Renamed "$1" → "$2"
     renameFailed: Rename failed
     renameInUse: A collection named "$1" already exists
     deleteCollection: Delete collection
     confirmDeleteTitle: Delete collection?
-    confirmDelete: Delete collection "$1" and its $2 chunks from Neon? Files on your disk are not affected.
+    confirmDelete: Delete collection "$1" and its $2 chunks from Neon? Files on your
+      disk are not affected.
     deleteSuccess: Deleted "$1"
     deleteFailed: Delete failed
   scheduler:
     title: Scheduled tasks
-    description: Run fetch or webcheck jobs on a cron or interval schedule in the background.
-    empty: No scheduled tasks yet. Create one below to start fetching in the background.
+    description: Run fetch or webcheck jobs on a cron or interval schedule in the
+      background.
+    empty: No scheduled tasks yet. Create one below to start fetching in the
+      background.
     createButton: New task
     columns:
       name: Name
@@ -813,10 +948,13 @@ settings:
       webcheckConditionContainsText: contains text
       fetchUrlPlaceholder: https://example.com/api
       webcheckUrlPlaceholder: https://example.com/health
-    permissionDeniedBody: System notifications are blocked. Enable them in your browser's site settings to receive scheduler task results.
+    permissionDeniedBody: System notifications are blocked. Enable them in your
+      browser's site settings to receive scheduler task results.
   notifications:
     title: Notification channels
-    description: Send scheduler task results to ntfy, Telegram, Discord/Slack-style webhooks, or any custom endpoint. Channels fire alongside the in-browser desktop notification.
+    description: Send scheduler task results to ntfy, Telegram, Discord/Slack-style
+      webhooks, or any custom endpoint. Channels fire alongside the in-browser
+      desktop notification.
     empty:
       title: No channels configured
       hint: Add one below to start receiving scheduler results outside the browser.
@@ -838,7 +976,8 @@ settings:
       endpointPlaceholder: https://ntfy.example.com
       chatIdLabel: Chat ID
       chatIdPlaceholder: '123456789'
-      chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after sending the bot a message.
+      chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after sending
+        the bot a message.
       urlLabel: Webhook URL
       urlPlaceholder: https://discord.com/api/webhooks/…
       enabled: Enabled
@@ -858,17 +997,21 @@ settings:
     testInProgress: Sending…
     testResultSuccess: 'Last test: $1 ms'
     testResultFailure: 'Test failed: $1'
-    basicAuthHint: Add `?user=<user>&pass=<pass>` to a self-hosted ntfy endpoint to send Basic auth header.
-    permissionRequired: This channel requires a token / URL to work. Fill the corresponding secret field before testing.
+    basicAuthHint: Add `?user=<user>&pass=<pass>` to a self-hosted ntfy endpoint to
+      send Basic auth header.
+    permissionRequired: This channel requires a token / URL to work. Fill the
+      corresponding secret field before testing.
   telegramGateway:
     title: Telegram Gateway
-    description: Two-way realtime bridge between Telegram and Cebian agent. Requires a self-deployed Cloudflare Worker relay.
+    description: Two-way realtime bridge between Telegram and Cebian agent. Requires
+      a self-deployed Cloudflare Worker relay.
     workerUrl: Worker URL
     botToken: Bot token
     webhookSecret: Webhook secret
     wsAuthToken: WS auth token
     allowedChatIds: Allowed chat IDs
-    chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after messaging the bot.
+    chatIdHint: Find via @userinfobot on Telegram, or check getUpdates after
+      messaging the bot.
     interactiveMode: Interactive mode (route Telegram messages to agent)
     enabled: Enable connection (turn off to disconnect from gateway)
     save: Save
@@ -898,19 +1041,23 @@ chat:
     readFileFailed: 'Failed to read: $1'
     unsupportedFileType: 'Unsupported file type: $1'
     modelNoImage: Current model doesn't support multimodal input
-    imageStripped: Removed image attachments — the current model doesn't support multimodal input
+    imageStripped: Removed image attachments — the current model doesn't support
+      multimodal input
     noPrompts: No prompts yet — create one from AI config
     noMatch: No matches
     iframeEnterHint: ⏎ enter
     voiceStart: Voice input
     voiceStop: Stop voice input
     voicePreparing: Preparing the speech model…
-    voiceNeedPermission: Microphone access is needed — grant it in the tab that just opened, then click the mic again.
-    voiceDenied: Microphone access is blocked. Allow it for Cebian in Chrome settings, then try again.
+    voiceNeedPermission: Microphone access is needed — grant it in the tab that just
+      opened, then click the mic again.
+    voiceDenied: Microphone access is blocked. Allow it for Cebian in Chrome
+      settings, then try again.
     voiceLanguageUnavailable: Speech recognition isn't available for the current language.
     voiceNoSpeech: No speech detected. Try again.
     voiceAudioCapture: No microphone was found, or it couldn't be accessed.
-    voiceNetworkFailed: Couldn't reach the speech recognition service. Check your network and try again.
+    voiceNetworkFailed: Couldn't reach the speech recognition service. Check your
+      network and try again.
     voiceFailed: Voice input failed. Please try again.
     pickRegion: Crop region
     cancelRegionPick: Cancel crop
@@ -925,15 +1072,18 @@ chat:
     workerTeam:
       fast: Fast
       team: Team
-      toggleHint: Switch between Fast Mode (main agent writes directly) and Team Mode (delegate to worker sub-agents)
+      toggleHint: Switch between Fast Mode (main agent writes directly) and Team Mode
+        (delegate to worker sub-agents)
     persona:
       normal: Normal
       openclaw: OpenClaw
-      toggleHint: Switch between Normal Mode (default Cebian) and OpenClaw Mode (custom persona copy + identity)
+      toggleHint: Switch between Normal Mode (default Cebian) and OpenClaw Mode
+        (custom persona copy + identity)
     skillAutoToggle:
       auto: Auto
       manual: Manual
-      toggleHint: Auto-approve skill permissions while on — grants are not persisted, so turning off returns to manual approval
+      toggleHint: Auto-approve skill permissions while on — grants are not persisted,
+        so turning off returns to manual approval
     quoteChips: Quoted excerpts
     removeQuoteChip: Remove quoted excerpt
     loadMore: Show $1 more
@@ -969,6 +1119,10 @@ chat:
     pinnedChips: Auto-included in every chat
     togglePin: Pin across chats
     unpin: Unpin from all chats
+    skippedAtLimit:
+      1: Attachment limit reached; 1 file not added
+      n: Attachment limit reached; $1 files not added
+    dropFiles: Drop to attach files
   attachments:
     image: Image
     screenshot: Screenshot
@@ -985,7 +1139,8 @@ chat:
   recorder:
     start: Start recording user actions
     stop: Stop recording (will attach to next message)
-    startRejectedBusy: Another sidepanel is already recording. Stop it first to start a new recording.
+    startRejectedBusy: Another sidepanel is already recording. Stop it first to
+      start a new recording.
     autoStoppedEvents: 'Recording auto-stopped: event limit reached'
     autoStoppedTime: 'Recording auto-stopped: time limit reached'
   askUser:
@@ -1003,20 +1158,25 @@ chat:
     allowAlways: Always allow this skill
     expired: This permission request has expired
     perm:
-      pageExecuteJs: Run scripts in your web pages — read and change page content, and act through your logged-in sessions
+      pageExecuteJs: Run scripts in your web pages — read and change page content, and
+        act through your logged-in sessions
       vfsRead: Read files in this skill's own workspace folder
       vfsWrite: Read and write files in this skill's own workspace folder
-      bgFetchAny: Make network requests to any website in the background, bypassing cross-origin limits
+      bgFetchAny: Make network requests to any website in the background, bypassing
+        cross-origin limits
       bgFetchPattern: Make background network requests to $1, bypassing cross-origin limits
-      chromeTabs: View and manage your browser tabs (open, close, move, reload) and capture the visible tab's contents
+      chromeTabs: View and manage your browser tabs (open, close, move, reload) and
+        capture the visible tab's contents
       chromeWindows: View and manage your browser windows
       chromeAlarms: Schedule and manage background timers
       chromeWebNavigation: Read navigation details of your open pages and their frames
       chromeBookmarks: Read and modify your bookmarks
       chromeHistory: Read and modify your browsing history
-      chromeCookies: Read, change, and delete cookies for sites you visit, including login-session cookies normally hidden from web pages
+      chromeCookies: Read, change, and delete cookies for sites you visit, including
+        login-session cookies normally hidden from web pages
       chromeTopSites: Read your most-visited sites
-      chromeSessions: View and restore recently closed tabs and windows, including sessions synced from your other devices
+      chromeSessions: View and restore recently closed tabs and windows, including
+        sessions synced from your other devices
       chromeDownloads: View and manage your downloads, and start new ones
       chromeNotifications: Create and manage system notifications
       chromeFallback: Call the browser's chrome.$1 API
@@ -1042,7 +1202,8 @@ chat:
     loading: Loading interactive view…
     retry: Retry
     errorGeneric: Failed to load interactive view
-    errorServerUnavailable: This MCP server is no longer available. Re-enable it in settings to view this diagram.
+    errorServerUnavailable: This MCP server is no longer available. Re-enable it in
+      settings to view this diagram.
     errorFetchFailed: 'Couldn''t load the interactive view: $1'
   message:
     tokensInOut: ↑$1 ↓$2
@@ -1060,6 +1221,7 @@ chat:
     status: Compacting context…
     dividerExpand: Show summary
     dividerCollapse: Hide summary
+    droppedDivider: Earlier context dropped (could not be summarized)
   session:
     loading: Loading session…
     modelError: Model returned an error
@@ -1070,37 +1232,59 @@ chat:
     reconnecting: Connection lost, retrying…
     welcomeReady: What can I help you with?
     exampleSummarizeTitle: Summarize this page
-    exampleSummarizePrompt: Read the content of the current page and summarize its key points concisely.
+    exampleSummarizePrompt: Read the content of the current page and summarize its
+      key points concisely.
     exampleTranslateTitle: Translate this page
-    exampleTranslatePrompt: Translate the main content of the current page into English, keeping the original structure.
+    exampleTranslatePrompt: Translate the main content of the current page into
+      English, keeping the original structure.
     exampleExtractTitle: Extract key points
-    exampleExtractPrompt: Extract the key information from the current page (title, main points, important links) and organize it into a list.
+    exampleExtractPrompt: Extract the key information from the current page (title,
+      main points, important links) and organize it into a list.
     exampleTabsTitle: Organize my tabs
-    exampleTabsPrompt: Take a look at the tabs I currently have open, group them by topic, and point out any duplicate pages I can close.
+    exampleTabsPrompt: Take a look at the tabs I currently have open, group them by
+      topic, and point out any duplicate pages I can close.
     scrollToBottom: Jump to latest
     contextOverflow:
       title: Context exceeds model limit
       retry: Retry (drop earlier history)
       stop: Stop
     compactionSkipped:
-      toast: Context too full to compact ($1% used). Try dropping a large paste or starting a new conversation.
+      toast: Context too full to compact ($1% used). Try dropping a large paste or
+        starting a new conversation.
     compactNow:
       idle: Compact now
       busy: Compacting…
       empty: Need at least 2 turns to compact
       noModel: Select a model first
+    contextLimitPaused: "Paused: the context is full and what remains cannot be compacted any
+      further. Start a new chat, fork from an earlier reply, or switch to a
+      model with a larger context window."
   mention:
     builtinSkill:
       funFactsName: Fun facts
-      funFactsBody: 'Sprinkle 1-2 surprising or delightful facts into every reply — historical trivia, science oddities, language etymology, etc. Keep them short (one sentence each). Always cite the source if you know it; otherwise hedge with "apparently" / "reportedly". Don''t force facts into serious or emotional requests — read the room.
+      funFactsBody: 'Sprinkle 1-2 surprising or delightful facts into every reply —
+        historical trivia, science oddities, language etymology, etc. Keep them
+        short (one sentence each). Always cite the source if you know it;
+        otherwise hedge with "apparently" / "reportedly". Don''t force facts
+        into serious or emotional requests — read the room.
 
         '
       hypeItUpName: Hype it up!
-      hypeItUpBody: 'Respond with high-energy enthusiasm. Use celebratory emojis sparingly (1-3 max), exclamations, and punchy short sentences. Mirror the user''s excitement level — if they''re chill, dial back to ~60% hype; if they''re hyped, match them. Avoid corporate-sounding cheerfulness. Be genuine, be excited, be YOU on a great day.
+      hypeItUpBody: 'Respond with high-energy enthusiasm. Use celebratory emojis
+        sparingly (1-3 max), exclamations, and punchy short sentences. Mirror
+        the user''s excitement level — if they''re chill, dial back to ~60%
+        hype; if they''re hyped, match them. Avoid corporate-sounding
+        cheerfulness. Be genuine, be excited, be YOU on a great day.
 
         '
       explainInCharacterName: Explain something in character
-      explainInCharacterBody: 'Adopt a memorable persona for the explanation — a grizzled sea captain, a 1920s noir detective, a time-traveling historian, etc. Pick the persona that best fits the topic. Stay in character throughout: vocabulary, metaphors, mannerisms, all consistent. Briefly introduce the character on first use ("Right then, gather ''round — Captain Marlow here…"), then commit fully. End the explanation in-character too.
+      explainInCharacterBody: 'Adopt a memorable persona for the explanation — a
+        grizzled sea captain, a 1920s noir detective, a time-traveling
+        historian, etc. Pick the persona that best fits the topic. Stay in
+        character throughout: vocabulary, metaphors, mannerisms, all consistent.
+        Briefly introduce the character on first use ("Right then, gather
+        ''round — Captain Marlow here…"), then commit fully. End the explanation
+        in-character too.
 
         '
   fork:
@@ -1108,7 +1292,8 @@ chat:
     backTooltip: Go to original conversation
   edit:
     title: Edit message
-    description: Edit this message and rerun the agent from this point. Everything after it will be discarded.
+    description: Edit this message and rerun the agent from this point. Everything
+      after it will be discarded.
     submit: Rerun
   context:
     usage: Context usage
@@ -1126,7 +1311,8 @@ chat:
     title: Worker team
     configuredCount: $1 / $2 configured
     false: 'Off'
-    unconfigured: No worker models configured. Open Settings → Advanced → Worker models to set up.
+    unconfigured: No worker models configured. Open Settings → Advanced → Worker
+      models to set up.
     expand: Expand worker team
     collapse: Collapse worker team
     role:
@@ -1156,8 +1342,10 @@ chat:
       reviewer: reviewing
       researcher: researching
     timeoutHint:
-      withModel: Worker $1 timed out / API error. Switch to a different model on the Sidebar Team Roster and retry.
-      generic: This worker timed out / hit an API error. Switch to a different model on the Sidebar Team Roster and retry.
+      withModel: Worker $1 timed out / API error. Switch to a different model on the
+        Sidebar Team Roster and retry.
+      generic: This worker timed out / hit an API error. Switch to a different model
+        on the Sidebar Team Roster and retry.
     duration: Failed after $1 s
     batch:
       header: Batch · $1 tasks — $2 succeeded, $3 failed
@@ -1171,6 +1359,13 @@ chat:
       thinking: Thinking…
       writing: Writing…
       generating: Generating file…
+  contextUsage:
+    label: "Context used: $1%"
+    title: Context used
+    amount: $1 of $2 tokens
+    threshold: Earlier history is compacted automatically at $1%.
+    compactionOff: Automatic compaction is turned off.
+    estimateNote: Estimated — the exact count depends on the provider's tokenizer.
 provider:
   section:
     viaApiKey: Via API Key
@@ -1219,12 +1414,14 @@ provider:
     contextWindowPlaceholder: 128000 (default)
     maxTokens: Max output
     maxTokensPlaceholder: 0 (unlimited)
-    tokensHint: Blank uses defaults · context window sets when history is compacted, not a hard limit
+    tokensHint: Blank uses defaults · context window sets when history is compacted,
+      not a hard limit
     manualModelPlaceholder: Manual Model ID
     addManual: Add model manually
     advanced: Advanced
     headers: Custom headers
-    authOverrideHint: You set both an API Key and an Authorization header; the API Key wins. To authenticate via the header, clear the API Key above.
+    authOverrideHint: You set both an API Key and an Authorization header; the API
+      Key wins. To authenticate via the header, clear the API Key above.
     addCustom: Add custom provider
     fetchFailed: Failed to fetch models, please add manually
     showAll: Show all
@@ -1320,9 +1517,11 @@ vfs:
   pathCopied: Path copied
   showCollapsed: Show collapsed folders
   sandboxPreview: Sandboxed preview
-  sandboxPreviewHint: Rendered in an isolated sandbox page. Scripts can run, but cannot reach the extension APIs or anything Cebian stores.
+  sandboxPreviewHint: Rendered in an isolated sandbox page. Scripts can run, but
+    cannot reach the extension APIs or anything Cebian stores.
   staticPreview: Static preview
-  staticPreviewHint: This browser cannot run scripts inside the preview. The page is rendered without JavaScript.
+  staticPreviewHint: This browser cannot run scripts inside the preview. The page
+    is rendered without JavaScript.
   pageIndicator: Page $1 of $2
   pageCount:
     0: No pages
@@ -1388,14 +1587,30 @@ permission:
   unknownType: Unsupported permission request.
   microphone:
     title: Request microphone access
-    description: Cebian needs microphone access for voice input. Click the button below, then choose Allow in the browser prompt.
+    description: Cebian needs microphone access for voice input. Click the button
+      below, then choose Allow in the browser prompt.
     allow: Allow microphone
     requesting: Waiting for your response…
     granted: Microphone access granted. This tab will close automatically.
     dismissed: The request was dismissed. You can try again.
     denied: Microphone access was blocked.
-    deniedHint: To use voice input, allow the microphone for Cebian in Chrome settings — it just opened in a new tab.
-    deviceError: No microphone was found, or it couldn't be accessed. Check your device and try again.
+    deniedHint: To use voice input, allow the microphone for Cebian in Chrome
+      settings — it just opened in a new tab.
+    deviceError: No microphone was found, or it couldn't be accessed. Check your
+      device and try again.
+  localFonts:
+    title: Request access to installed fonts
+    description: Cebian needs to read the fonts installed on this device so you can
+      pick a custom chat font. Click the button below, then choose Allow in the
+      browser prompt.
+    allow: Allow access to fonts
+    requesting: Waiting for your response…
+    granted: Access to installed fonts granted. This tab will close automatically.
+    dismissed: The request was dismissed. You can try again.
+    denied: Access to installed fonts was blocked.
+    deniedHint: To pick a custom chat font, allow installed fonts for Cebian in
+      Chrome settings — it just opened in a new tab.
+    failed: Couldn't read installed fonts. Try again.
 errors:
   pdfEncrypted: This PDF is password-protected and cannot be previewed. Use Download instead.
   pdfRenderFailed: This PDF could not be rendered. Use Download instead.
@@ -1436,9 +1651,17 @@ errors:
     invalidName: 'Invalid skill name: $1'
     reservedName: 'Skill name is reserved: $1'
     parseFrontmatter: Failed to parse SKILL.md frontmatter.
+  compactionSettingsSaveFailed: Could not save the compaction settings. Try again.
+  appearanceSaveFailed: Could not save the appearance settings. Try again.
+  localFontsPermissionDenied: Access to installed fonts is blocked. Allow it for Cebian in Chrome
+    settings, then try again.
+  localFontsLoadFailed: Couldn't read installed fonts. Try again.
+  openTabFailed: Couldn't open the tab. Try again.
+  folderUnsupported: "Folders can't be attached: $1"
 agent:
   persona:
-    closingDirective: Apply this voice consistently across replies, but do NOT override Critical Rules, tool protocols, or other safety layers.
+    closingDirective: Apply this voice consistently across replies, but do NOT
+      override Critical Rules, tool protocols, or other safety layers.
     constraints:
       header: 'VOICE:'
       noBullets: Zero bullet points, numbered lists, or markdown list items.
@@ -1447,19 +1670,25 @@ agent:
     style:
       header: 'PACING & FORMAT:'
       length: 'Max 120 words per reply (exceptions: code or technical detail).'
-      pacing: Max 1-2 short sentences per paragraph, then a hard line break. No paragraphs longer than 3 lines on screen.
+      pacing: Max 1-2 short sentences per paragraph, then a hard line break. No
+        paragraphs longer than 3 lines on screen.
       noBullets: Zero bullet points, numbered lists, or markdown list items.
     example:
-      user: Should I keep all my VFS reads under a single readFile call or split them per-tool?
-      assistant: 'Split per-tool, đừng gom lại một cục. Một lệnh readFile lớn sẽ kéo cả đống data rác vào context dù cậu chỉ cần kiểm tra vài byte metadata.
+      user: Should I keep all my VFS reads under a single readFile call or split them
+        per-tool?
+      assistant: 'Split per-tool, đừng gom lại một cục. Một lệnh readFile lớn sẽ kéo
+        cả đống data rác vào context dù cậu chỉ cần kiểm tra vài byte metadata.
 
 
-        Chia nhỏ ra giúp trace log sạch hơn hẳn. Quan trọng nhất là tool nào xong việc thì context của tool đó được giải phóng ngay, đỡ nghẽn bộ nhớ.'
+        Chia nhỏ ra giúp trace log sạch hơn hẳn. Quan trọng nhất là tool nào
+        xong việc thì context của tool đó được giải phóng ngay, đỡ nghẽn bộ
+        nhớ.'
     badExample:
       header: 'NEVER SOUND LIKE THIS:'
       badOutput: '> "Hello! I''d be happy to help you with that. Here are the key points:\n> - Point 1: ...\n> - Point 2: ...\n> In conclusion, both options have pros and cons. Hope this helps!"'
       warning: Avoid all corporate politeness, bullet points, and balanced disclaimers.
-    bindingNeo: Output in short, punchy prose. Max 2 sentences per paragraph. Zero bullet points.
+    bindingNeo: Output in short, punchy prose. Max 2 sentences per paragraph. Zero
+      bullet points.
     recap:
       youAre: You are $1
       vibe: $1

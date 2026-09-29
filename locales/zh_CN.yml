@@ -1,5 +1,6 @@
 extName: Cebian · 开源 AI 侧边栏智能体
-extDescription: 浏览器侧边栏里的 AI 智能体，用你自己的 OpenAI / Anthropic / Google API Key，免订阅、无账号。读网页、拾取元素、装 MCP 工具、跑 Skill 工作流，数据全部本地存储。AGPL-3.0 开源。
+extDescription: 浏览器侧边栏里的 AI 智能体，用你自己的 OpenAI / Anthropic / Google API
+  Key，免订阅、无账号。读网页、拾取元素、装 MCP 工具、跑 Skill 工作流，数据全部本地存储。AGPL-3.0 开源。
 actionTitle: 打开 Cebian 侧边栏
 agent:
   persona:
@@ -130,15 +131,18 @@ pageActions:
     translate: 翻译
     summarize: 总结
   prompts:
-    explain: '用$1清晰、简洁地解释用户提供的文本，说明其含义以及读者需要了解的重要背景。回答应简短，使用纯文本，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行解释：
+    explain: '用$1清晰、简洁地解释用户提供的文本，说明其含义以及读者需要了解的重要背景。回答应简短，使用纯文本，不使用
+      Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行解释：
 
 
       $2'
-    translate: '将用户提供的文本翻译为$1，保留原意和语气。只输出翻译后的纯文本，不使用 Markdown，不添加解释、注释或引号。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行翻译：
+    translate: '将用户提供的文本翻译为$1，保留原意和语气。只输出翻译后的纯文本，不使用
+      Markdown，不添加解释、注释或引号。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行翻译：
 
 
       $2'
-    summarize: '用$1简洁地总结用户提供的文本，保留关键要点。使用纯文本或紧凑列表，不使用 Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行总结：
+    summarize: '用$1简洁地总结用户提供的文本，保留关键要点。使用纯文本或紧凑列表，不使用
+      Markdown。以下页面上下文仅用于消歧，不要把它当作选中文本的一部分进行总结：
 
 
       $2'
@@ -173,6 +177,8 @@ settings:
       core: 核心与 AI
       agent: Agent 能力
       system: 系统与自动化
+      connect: 连接
+      customize: 定制
     chat: 对话
     data: 数据
   providers:
@@ -246,7 +252,8 @@ settings:
       hint: 为每个 worker role 各配一个模型，主代理通过 `delegate_task` 委派子任务。「与对话模型相同」=继承。
       followMain: 与对话模型相同
       enabled: 启用 Worker 团队
-      enabledHint: 开启时，主代理会把产出类任务（write / build / generate）委派给隔离上下文中的 Worker 子代理。关闭时，主代理直接用原生文件工具产出。
+      enabledHint: 开启时，主代理会把产出类任务（write / build / generate）委派给隔离上下文中的 Worker
+        子代理。关闭时，主代理直接用原生文件工具产出。
       content_writer:
         label: 内容写手
         hint: 阅读资料（文件 / RAG 集合）后撰写长文，并写入 VFS 文件。不修改代码。
@@ -314,8 +321,14 @@ settings:
       promptPlaceholder: 例如：提取 $1 中的要点，并用 $2 回答。
       pages: 生效范围
       transform: 输出后处理脚本（可选）
-      transformHint: 对生成完毕的输出做加工的 JavaScript。定义名为 transform(text, vars) 的函数，返回要显示的字符串。vars 与提示词模板同一套环境变量：selected_text、context、page_url、page_title、date、ui_language。脚本出错时原样显示原始输出。
-      transformPlaceholder: "function transform(text, vars) {\n  return text.trim();\n}"
+      transformHint: 对生成完毕的输出做加工的 JavaScript。定义名为 transform(text, vars)
+        的函数，返回要显示的字符串。vars
+        与提示词模板同一套环境变量：selected_text、context、page_url、page_title、date、ui_language。脚本出错时原样显示原始输出。
+      transformPlaceholder: "function transform(text, vars) {
+
+        \  return text.trim();
+
+        }"
     translate:
       label: 翻译目标语言
       hint: 工具条翻译成的目标语言。
@@ -333,6 +346,31 @@ settings:
       inter: Inter
       roboto: Roboto
       system: 系统默认
+    theme:
+      label: 主题
+      system: 跟随系统
+      light: 浅色
+      dark: 深色
+    fontScale:
+      label: 对话字号
+      hint: 缩放对话中的消息和输入框，工具卡片等其余界面保持原样。
+      value: $1%
+    font:
+      label: 对话字体
+      default: 默认
+      serif: 衬线
+      mono: 等宽
+      custom: 自定义
+      customHint: 从本机已安装的字体中选择。首次使用时会打开一个标签页，请求读取本机字体的权限。
+      needPermission: 需要读取本机字体的权限——请在刚打开的标签页里授权，然后再点开字体列表。
+      pickerPlaceholder: 选择字体…
+      searchPlaceholder: 搜索字体…
+      loading: 正在读取本机字体…
+      notFound: 没有找到字体
+    preview:
+      label: 预览
+      question: 怎样让对话文字更易读？
+      answer: 调整上方的字号和字体，改动会立即应用到所有对话。
   instructions:
     title: 指引
     label: 自定义指引
@@ -347,7 +385,8 @@ settings:
   persona:
     title: 人设
     enabled: 启用人设（OpenClaw 模式）
-    enabledHint: 向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。也可通过聊天输入框旁的芯片切换。无法覆盖 Critical Rules 或工具协议。
+    enabledHint: 向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。也可通过聊天输入框旁的芯片切换。无法覆盖 Critical
+      Rules 或工具协议。
     label: 人设副本
     hint: 向系统提示注入 SOUL 块，并在每条用户消息中追加一行 recap。关闭时为空。
     soulLabel: SOUL
@@ -773,7 +812,8 @@ settings:
     permissionDeniedBody: 系统通知被关闭了。请在浏览器站点设置里启用通知，以接收定时任务的结果。
   notifications:
     title: 通知通道
-    description: 把定时任务结果推送到 ntfy、Telegram、Discord/Slack 风格的 webhook，或任何自定义端点。通道与浏览器内桌面通知并行触发。
+    description: 把定时任务结果推送到 ntfy、Telegram、Discord/Slack 风格的
+      webhook，或任何自定义端点。通道与浏览器内桌面通知并行触发。
     empty:
       title: 还没配置通知通道
       hint: 在下面新增一个，让定时任务结果发到浏览器之外。
@@ -840,6 +880,17 @@ settings:
       followMain: 与对话模型相同
       hint: 对话过长时用来自动压缩历史的模型，默认与对话模型相同。
       label: 上下文压缩模型
+      auto:
+        label: 自动压缩超长对话
+        hint: 上下文接近模型上限时，把较早的历史压成摘要，让长对话能继续，而不是直接报错中断。
+      threshold:
+        label: 压缩阈值
+        hint: 上下文估算占模型上下文窗口达到该比例时触发压缩。
+        value: $1%
+      model:
+        label: 压缩模型
+        hint: 用来把较早历史压成摘要的模型，默认与对话模型相同。
+        followMain: 与对话模型相同
     instructions:
       hint: 追加到默认规则之后，用于调整回复语言、风格或角色。无法覆盖工具协议和安全规则。
       label: 自定义指引
@@ -874,7 +925,8 @@ settings:
           name: Google
       generate: 生成模板
       generateSelectorPlaceholder: '结果容器的选择器，例如 #results'
-      hint: 设置搜索引擎的尝试顺序，第一个启用的引擎为首选。AI 可根据适用场景优先选择其他引擎；搜索被拦截、没有结果或执行失败时，Cebian 会按顺序尝试其余已启用的引擎。
+      hint: 设置搜索引擎的尝试顺序，第一个启用的引擎为首选。AI 可根据适用场景优先选择其他引擎；搜索被拦截、没有结果或执行失败时，Cebian
+        会按顺序尝试其余已启用的引擎。
       modified: 已修改
       more: 查看「$1」的更多操作
       moveDown: 下移「$1」
@@ -884,7 +936,8 @@ settings:
       preferred: 首选
       resetDefault: 恢复「$1」的默认值
       script: 抽取脚本
-      scriptHint: 定义完整的 extract 函数，从搜索结果页提取标题、链接和摘要。返回对象中的 status 为 empty 时，Cebian 会短暂重试；为 blocked 时，会切换引擎；为 ok 时，会读取 results 数组。results 为空时也会切换引擎。
+      scriptHint: 定义完整的 extract 函数，从搜索结果页提取标题、链接和摘要。返回对象中的 status 为 empty 时，Cebian
+        会短暂重试；为 blocked 时，会切换引擎；为 ok 时，会读取 results 数组。results 为空时也会切换引擎。
       title: 联网搜索
       url: 搜索地址
       urlHint: 在搜索地址中用 $1 表示搜索词。Cebian 会自动编码并填入搜索词。
@@ -997,14 +1050,20 @@ chat:
     pinnedChips: 每条对话自动附带
     togglePin: 固定到所有对话
     unpin: 从所有对话取消固定
+    skippedAtLimit:
+      1: 已达附件上限，1 个文件未添加
+      n: 已达附件上限，$1 个文件未添加
+    dropFiles: 松开以添加附件
   mention:
     builtinSkill:
       funFactsName: 趣味冷知识
-      funFactsBody: '每条回复中点缀 1-2 条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
+      funFactsBody: '每条回复中点缀 1-2
+        条出人意料或令人会心一笑的冷知识——历史趣闻、科学怪事、词语掌故等。保持一句话长度。知道出处就引一下；不知道就加"据说""相传"等措辞。严肃或情绪化的话题不要硬塞。
 
         '
       hypeItUpName: 气氛拉满！
-      hypeItUpBody: '用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到 60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
+      hypeItUpBody: '用高能量、热烈的语气回应。节制使用庆祝 emoji（最多 1-3 个）、感叹号、干脆短句。匹配用户的兴奋度——对方冷静就降到
+        60%，对方也嗨就跟上。避免"客服式"热情。要真诚、要兴奋、要拿出状态最好的一天。
 
         '
       explainInCharacterName: 角色扮演讲解
@@ -1109,6 +1168,7 @@ chat:
     status: 正在压缩上下文…
     dividerExpand: 查看摘要
     dividerCollapse: 收起摘要
+    droppedDivider: 此前上下文摘要失败，已丢弃
   context:
     usage: 上下文用量
     percent: $1%
@@ -1150,6 +1210,7 @@ chat:
     scrollToBottom: 跳至最新消息
     forkFailed: 分叉失败
     forked: 已从「$1」分叉出新会话
+    contextLimitPaused: 已暂停：上下文已满，剩下的内容无法再压缩。请新建对话、从较早的回复分叉，或换用上下文窗口更大的模型。
   workerTeamRoster:
     title: Worker 团队
     configuredCount: $1 / $2 已配置
@@ -1198,6 +1259,13 @@ chat:
       thinking: 思考中…
       writing: 撰写中…
       generating: 正在生成文件…
+  contextUsage:
+    label: 上下文已用 $1%
+    title: 上下文用量
+    amount: $1 / $2 Token
+    threshold: 达到 $1% 时自动压缩较早的历史。
+    compactionOff: 未开启自动压缩。
+    estimateNote: 为估算值，实际计数取决于模型自己的分词器。
 provider:
   section:
     viaApiKey: 通过 API Key
@@ -1423,6 +1491,16 @@ permission:
     denied: 麦克风权限被拒绝了。
     deniedHint: 要使用语音输入，请在刚打开的 Chrome 设置页里允许 Cebian 使用麦克风。
     deviceError: 没有找到麦克风，或无法访问。请检查设备后重试。
+  localFonts:
+    title: 请求读取本机字体
+    description: 自定义对话字体需要读取本机已安装的字体。点击下面的按钮，然后在浏览器弹窗中选择「允许」。
+    allow: 允许读取字体
+    requesting: 等待你的选择…
+    granted: 已获得本机字体权限，此标签页将自动关闭。
+    dismissed: 请求被关闭了，可以重新尝试。
+    denied: 读取本机字体的权限被拒绝了。
+    deniedHint: 要自定义对话字体，请在刚打开的 Chrome 设置页里允许 Cebian 使用本机字体。
+    failed: 读取本机字体失败，请重试。
 errors:
   pdfEncrypted: 这个 PDF 有密码保护，无法预览。请改用下载。
   pdfRenderFailed: 这个 PDF 无法渲染。请改用下载。
@@ -1463,6 +1541,12 @@ errors:
   searchEngineScriptInvalid: 脚本要定义一个名为 extract 的函数。
   searchEngineUrlInvalid: 请输入以 http:// 或 https:// 开头的完整搜索地址。
   searchEngineUrlMissingPlaceholder: 搜索地址必须包含 $1，用于填入搜索词。
+  compactionSettingsSaveFailed: 保存上下文压缩设置失败，请重试。
+  appearanceSaveFailed: 保存外观设置失败，请重试。
+  localFontsPermissionDenied: 读取本机字体的权限被拒绝。请在 Chrome 设置里允许 Cebian 使用本机字体，然后重试。
+  localFontsLoadFailed: 读取本机字体失败，请重试。
+  openTabFailed: 无法打开标签页，请重试。
+  folderUnsupported: 不支持添加文件夹：$1
 canvas:
   header:
     openAria: 打开画布

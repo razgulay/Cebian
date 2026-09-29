@@ -269,13 +269,55 @@ describe('customProviders headers 端到端（密钥进 credentials、不进 con
 });
 
 describe('restoreStorage — merge', () => {
-  it('标量设置（无 fillMissing）merge 下保留本地、不写', async () => {
+  it('标量设置（无 fillMissing）本地已有值时 merge 保留本地、不写', async () => {
     await lastSelectedModel.setValue({ provider: 'local', modelId: 'm' });
     const data: CollectedStorage = {
       config: { [SK.activeModel]: { provider: 'backup', modelId: 'b' } },
     };
-    await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
+    const result = await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
     expect(await lastSelectedModel.getValue()).toEqual({ provider: 'local', modelId: 'm' });
+    expect(result.settingsWritten).toBe(0);
+  });
+
+  it('标量设置本地从未写过时 merge 从备份补入（全新安装恢复，#76）', async () => {
+    const data: CollectedStorage = {
+      config: {
+        [SK.userInstructions]: '用中文回复',
+        [SK.activeModel]: { provider: 'backup', modelId: 'b' },
+      },
+    };
+    const result = await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
+    expect(await userInstructions.getValue()).toBe('用中文回复');
+    expect(await lastSelectedModel.getValue()).toEqual({ provider: 'backup', modelId: 'b' });
+    expect(result.settingsWritten).toBe(2);
+  });
+
+  it('标量设置本地为空串时 merge 视为未设置、从备份补入（fork 的 #76 语义）', async () => {
+    // fork 给 userInstructions 声明了 fillMissing（isEmptyValue → 取备份），因为用户报告
+    // 「merge 恢复后自定义指引丢失」(#76)。空串在本项目里表示「未配置」而非「主动清空」，
+    // 故与 upstream 的「空串 = 已设置、保留本地」相反。要主动清空请用 replace 策略。
+    await userInstructions.setValue('');
+    const data: CollectedStorage = { config: { [SK.userInstructions]: '用中文回复' } };
+    const result = await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
+    expect(await userInstructions.getValue()).toBe('用中文回复');
+    expect(result.settingsWritten).toBe(1);
+  });
+
+  it('标量设置本地为 null 时视为未存值，merge 从备份补入', async () => {
+    // WXT 写 null 等于删 key，故「本地设为 null」与「从未写过」不可区分，均按缺失补入
+    await lastSelectedModel.setValue(null);
+    const data: CollectedStorage = {
+      config: { [SK.activeModel]: { provider: 'backup', modelId: 'b' } },
+    };
+    await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
+    expect(await lastSelectedModel.getValue()).toEqual({ provider: 'backup', modelId: 'b' });
+  });
+
+  it('备份标量值为 null 时 merge 跳过、不计入写入数', async () => {
+    const data: CollectedStorage = { config: { [SK.activeModel]: null } };
+    const result = await restoreStorage(data, { strategy: 'merge', settings: true, credentials: false });
+    expect(await lastSelectedModel.getValue()).toBeNull();
+    expect(result.settingsWritten).toBe(0);
   });
 
   it('customProviders 按 id 补缺：本地已有保留、本地缺的从备份补入', async () => {
