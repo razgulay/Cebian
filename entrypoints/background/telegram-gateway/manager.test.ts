@@ -797,9 +797,9 @@ describe('setupTelegramGatewayManager', () => {
     expect(statusDeletes(client)).toHaveLength(1);
   });
 
-  // ─── Sliding window：每 5 turn 觸發 compaction ───
+  // ─── Sliding window：每 15 turn 觸發 compaction ───
 
-  it('sliding window：第 5 turn 後觸發 compactNow，前 4 turn 不觸發', async () => {
+  it('sliding window：第 15 turn 後觸發 compactNow，前 14 turn 不觸發', async () => {
     await telegramGatewayConfig.setValue(VALID_CONFIG(true));
     await telegramGatewaySecrets.setValue(VALID_SECRETS('tok'));
     await lastSelectedModel.setValue({ provider: 'test', modelId: 'test-model' });
@@ -807,15 +807,15 @@ describe('setupTelegramGatewayManager', () => {
     await flushAsync();
     const cb = inboundCallback(0);
 
-    // Turn 1–4：不足 5 turn → 不觸發 compaction
-    for (let i = 1; i <= 4; i++) {
+    // Turn 1–14：不足 15 turn → 不觸發 compaction
+    for (let i = 1; i <= 14; i++) {
       await cb({ ...TEST_INBOUND, update_id: i, message_id: i, text: `msg ${i}` });
       await flushAsync();
     }
     expect(mockCompactNow).not.toHaveBeenCalled();
 
-    // Turn 5：達到 TELEGRAM_MAX_TURNS → 觸發 compaction
-    await cb({ ...TEST_INBOUND, update_id: 5, message_id: 5, text: 'msg 5' });
+    // Turn 15：達到 TELEGRAM_MAX_TURNS → 觸發 compaction
+    await cb({ ...TEST_INBOUND, update_id: 15, message_id: 15, text: 'msg 15' });
     await flushAsync();
     expect(mockCompactNow).toHaveBeenCalledTimes(1);
     expect(mockCompactNow).toHaveBeenCalledWith(expect.any(String));
@@ -829,7 +829,9 @@ describe('setupTelegramGatewayManager', () => {
     await flushAsync();
     const cb = inboundCallback(0);
 
-    for (let i = 1; i <= 6; i++) {
+    // 跑滿一整個 sliding window（15）+ 1 次：OFF 時 inbound 在計數前就 return，
+    // 因此永遠不會累積到門檻。跑超過門檻才能證明擋的是 gate 而不是「還沒到數」。
+    for (let i = 1; i <= 16; i++) {
       await cb({ ...TEST_INBOUND, update_id: i, message_id: i, text: `msg ${i}` });
       await flushAsync();
     }

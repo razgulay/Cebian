@@ -132,8 +132,9 @@ const TOOL_STATUS_THROTTLE_MS = 2_750;
 // Telegram typing 状态 ~5s 自动过期 → 4s 续发
 const TYPING_INTERVAL_MS = 4_000;
 // Sliding window：每 N 个 turn 触发 compaction，把舊語境摘要化、LLM context
-// 回到短狀態（Telegram 對話保持快速回應）。
-const TELEGRAM_MAX_TURNS = 5;
+// 回到短狀態（Telegram 對話保持快速回應）。15 是「短對話不受打擾、長對話仍會收斂」
+// 的折中：門檻太低會讓幾輪閒聊也觸發一次摘要（每次都是額外一次 LLM 呼叫）。
+const TELEGRAM_MAX_TURNS = 15;
 
 /** 一个进行中的 Telegram turn 的 UX 状态。session 结束 / gateway 拆除时清理。 */
 interface TelegramTurnState {
