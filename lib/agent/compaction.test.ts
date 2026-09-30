@@ -501,6 +501,57 @@ describe('planCompaction', () => {
       ...after,
     ]);
   });
+
+  // ─── force（用户主动触发 / Telegram sliding window）───
+
+  it('force 跳过阈值门：用量远低于阈值也照常 compact', () => {
+    // 手动压缩的语义是「现在压」，与当前占用无关。没有 force 时这条会 skip。
+    const messages = conversation(3, '中'.repeat(2_000));
+    expect(plan(messages).kind).toBe('skip');
+    const forced = planCompaction({ messages, settings, contextWindow: 20_000, force: true });
+    expect(forced.kind).toBe('compact');
+  });
+
+  it('force 不绕过总开关：关掉压缩时仍然 skip', () => {
+    // enabled=false 是用户的显式选择，force 是「按计划该压就压」，不该推翻它。
+    const messages = conversation(20, '中'.repeat(2_000));
+    expect(
+      planCompaction({
+        messages,
+        settings: { enabled: false, thresholdPercent: 80 },
+        contextWindow: 20_000,
+        force: true,
+      }).kind,
+    ).toBe('skip');
+  });
+
+  it('force 不绕过「窗口未知」：contextWindow 为 0 时仍然 skip', () => {
+    const messages = conversation(20, '中'.repeat(2_000));
+    expect(
+      planCompaction({ messages, settings, contextWindow: 0, force: true }).kind,
+    ).toBe('skip');
+  });
+
+  it('force 仍保留 stuck 判定：切不动时照样报 stuck，不强推一次必然 400 的请求', () => {
+    // 一次工具调用就返回超大正文：切点退化到下标 0，压了等于没压。
+    const messages = [user('抓一下这个页面'), toolResult('t', '中'.repeat(100_000))];
+    expect(
+      planCompaction({ messages, settings, contextWindow: 20_000, force: true }).kind,
+    ).toBe('stuck');
+  });
+
+  it('force 下保留区预算不受影响：仍按 thresholdPercent 算，不被抬到整窗', () => {
+    // 曾经的写法是把 thresholdPercent 抬到 100 来「绕过阈值」，那会让 trigger = 整窗，
+    // 于是 keepRecentTokens 也随之放大，保留区几乎吃掉整个窗口。force 只跳过比较，
+    // 预算照旧按 settings.thresholdPercent 算。
+    const messages = conversation(20, '中'.repeat(2_000));
+    const forced = planCompaction({ messages, settings, contextWindow: 20_000, force: true });
+    const normal = plan(messages);
+    if (forced.kind !== 'compact' || normal.kind !== 'compact') {
+      throw new Error(`expected both compact, got ${forced.kind}/${normal.kind}`);
+    }
+    expect(forced.plan.retainedTail.length).toBe(normal.plan.retainedTail.length);
+  });
 });
 
 // ─── 占用快照 ───

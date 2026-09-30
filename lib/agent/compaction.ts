@@ -188,6 +188,17 @@ interface ContextInput {
   contextWindow: number;
   systemPrompt?: string;
   tools?: unknown[];
+  /**
+   * 强制压缩：跳过「用量是否已越过 thresholdPercent」这道门，直接按可切性判断。
+   *
+   * 用于用户主动触发（`compactNow`）与 Telegram 的 sliding window——两者都是「按计划
+   * 该压就压」，与用量阈值无关。仍受 `settings.enabled` 与窗口已知这两条约束（关掉压缩
+   * 是用户的显式选择，force 也不该绕过），也仍然保留 stuck 判定：压不动就是压不动，
+   * 强行裸发只会 400。
+   *
+   * 注意 force 只影响**触发**，不影响保留区预算的取法——见 `resolveCompactionBudget`。
+   */
+  force?: boolean;
 }
 
 /**
@@ -315,7 +326,10 @@ function planCompaction(params: ContextInput): CompactionDecision {
   const budget = resolveCompactionBudget(params.settings, params.contextWindow);
   if (!Number.isFinite(budget.triggerTokens)) return { kind: 'skip' };
   const { messages, lastSummary, sinceLast, tokens } = readContext(params, budget);
-  if (tokens <= budget.triggerTokens) return { kind: 'skip' };
+  // force（用户主动触发 / Telegram sliding window）跳过阈值这道门——调用方要的是
+  // 「现在就压」，与当前用量无关。注意是**跳过比较**，不是把阈值抬到 100：后者会让
+  // 触发点等于整个窗口，只有已经撑爆才压得动，等于没压。enabled 与 stuck 判定照旧。
+  if (!params.force && tokens <= budget.triggerTokens) return { kind: 'skip' };
 
   const cut = findCompactionCutPoint(sinceLast, budget.keepRecentTokens);
   // cut <= 0：无候选 / 从头保留即 no-op（其前没有可摘要的历史）。已经超阈值却切不动，

@@ -1722,12 +1722,11 @@ class SessionManager {
     const settings = resolveCompactionSettings(await compactionSettings.getValue());
     if (!settings.enabled) return;
 
-    // 手动路径不看阈值：临时放到 100 让 planCompaction 必判 compact，其余判据
-    // （保留区预算、stuck 检测）保持生效——压不动就是压不动，强行裸发只会 400。
-    const decision = this.currentCompactionDecision(agentSession, {
-      ...settings,
-      thresholdPercent: 100,
-    });
+    // 手动路径不看用量阈值：force 让 planCompaction 跳过「是否越过 thresholdPercent」
+    // 这道门，其余判据（enabled、保留区预算、stuck 检测）保持生效——压不动就是压不动，
+    // 强行裸发只会 400。不能用「把 thresholdPercent 抬到 100」来绕：那样触发点等于整个
+    // 窗口，只有已经撑爆才压得动，等于没压。
+    const decision = this.currentCompactionDecision(agentSession, settings, true);
     if (decision.kind === 'skip') {
       // 没有可切的历史：告诉前端「按了但无事可做」，按钮不至于像坏的。
       const state = agentSession.agent.state;
@@ -1939,6 +1938,7 @@ class SessionManager {
   private currentCompactionDecision(
     agentSession: AgentSession,
     settings: CompactionSettings,
+    force = false,
   ): CompactionDecision {
     const state = agentSession.agent.state;
     return planCompaction({
@@ -1947,6 +1947,7 @@ class SessionManager {
       contextWindow: state.model.contextWindow,
       systemPrompt: state.systemPrompt,
       tools: state.tools,
+      force,
     });
   }
 
