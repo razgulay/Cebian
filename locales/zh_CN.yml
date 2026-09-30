@@ -1169,18 +1169,6 @@ chat:
     dividerExpand: 查看摘要
     dividerCollapse: 收起摘要
     droppedDivider: 此前上下文摘要失败，已丢弃
-  context:
-    usage: 上下文用量
-    percent: $1%
-    headroom: 剩余 $1
-    plenty: 余量充足
-    tight: 已偏紧——建议压缩
-    nearFull: 上下文即将用尽
-    used: 已用
-    cached: 已缓存
-    free: 空闲
-    total: 总计
-    compactNow: 立即压缩
   session:
     loading: 加载会话中…
     modelError: 模型返回错误
@@ -1190,11 +1178,6 @@ chat:
       stop: 停止
     compactionSkipped:
       toast: 上下文过满无法自动压缩（已用 $1%）。可尝试删除大段粘贴内容或开启新会话。
-    compactNow:
-      idle: 立即压缩
-      busy: 正在压缩…
-      empty: 至少需要 2 条消息才能压缩
-      noModel: 请先选择模型
     cancelled: 已取消
     notConnected: 未连接到后台服务，请稍后再试
     reconnecting: 连接断开，正在重试…

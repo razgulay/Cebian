@@ -1011,19 +1011,6 @@ case 'stream_ops':
   }, [postMessage]);
 
   /**
-   * 手动触发上下文压缩（user clicked the pill's adjacent compact button）。
-   * 走和 proactive 80% 预检同一条流水线，只跳过阈值门。session 必须 idle；
-   // busy 时 BG 抛错并通过 `error` ServerMessage 反馈，UI 在那里打 toast 并
-   // 退出 button 的 loading 态。无 session 或断连时本地直接 return。
-   */
-  const compactNow = useCallback(() => {
-    const sessionId = sessionIdRef.current;
-    if (!sessionId) return;
-    if (!portRef.current) return;
-    postMessage({ type: 'compact_now', sessionId });
-  }, [postMessage]);
-
-  /**
    * 把当前会话的「resolved contextWindow」从 caller（一般是 useContextUsage，
    * 通过 resolveModel + storage 推算出来的）推入 hook state。null 表示无模型
    * / 解析失败，pill 与 popover 在 null 时隐藏整张图。effect 在 caller
@@ -1377,7 +1364,6 @@ case 'stream_ops':
     cancelTool,
     resolvePermission,
     sendContextOverflowResponse,
-    compactNow,
     setContextWindow,
   };
 }

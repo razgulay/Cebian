@@ -224,24 +224,9 @@ export function ChatPage({
     resolveTool,
     resolvePermission,
     sendContextOverflowResponse,
-    compactNow,
   } = agent;
 
   const { messages, branchInfo, isAgentRunning, isCompacting, sessionId: activeSessionId, sessionTitle, lastError, contextUsage } = state;
-
-  // 占用环的手动压缩入口：数据全部来自会话状态，不再经 fork 的 useContextUsage。
-  // `canCompact` 沿用旧口径——至少一对 user + assistant，否则切点无效、后台只会
-  // 回一条 compaction_skipped。
-  const compaction = useMemo(
-    () => ({
-      onCompact: () => { compactNow(); },
-      isCompacting,
-      isAgentRunning,
-      hasModel: turnModel !== null,
-      canCompact: messages.length >= 2,
-    }),
-    [compactNow, isCompacting, isAgentRunning, turnModel, messages.length],
-  );
 
   // Mirror activeSessionId into a ref so the subscribe-effect can read the
   // latest value WITHOUT re-running when activeSessionId changes. Putting
@@ -1217,7 +1202,6 @@ export function ChatPage({
           onThinkingChange={handleThinkingChange}
           hideTeamControls={isTelegramSession}
           contextUsage={contextUsage}
-          compaction={compaction}
           onDispatchingChange={setComposerDispatching}
         />
 

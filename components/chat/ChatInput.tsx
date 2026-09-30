@@ -20,7 +20,7 @@ import {
   type WorkerRoleOption,
 } from '@/components/chat/WorkerRoleMentionPopover';
 import { detectAtToken } from '@/components/chat/detect-at-token';
-import { ContextUsageIndicator, type CompactionControl } from '@/components/chat/ContextUsageIndicator';
+import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import type { ContextUsage } from '@/lib/ipc/protocol';
@@ -121,8 +121,6 @@ interface ChatInputProps {
   onCancelEdit?: () => void;
   /** 当前上下文占用；`null`（还没收到后台快照）时不渲染占用环。 */
   contextUsage: ContextUsage | null;
-  /** 手动压缩入口（占用环 popover 里的「立即压缩」）。不传则只读展示。 */
-  compaction?: CompactionControl;
   /** 发送进行中（上锁到派发完成）的起止通知。聊天页据此决定拖放区此刻能不能接收文件。 */
   onDispatchingChange?: (dispatching: boolean) => void;
   /** 聊天页拖放区放下的文件；`folders` 是被排除的文件夹名，只用来提示。 */
@@ -166,7 +164,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     initialValue,
     onCancelEdit,
     contextUsage,
-    compaction,
     onDispatchingChange,
     addFiles,
   },
@@ -2340,7 +2337,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           <div className={`flex items-center gap-1 ${isDispatching ? 'opacity-90' : ''}`}>
             {/* Context usage ring (1.8.0): the number comes from the background's
                 `context_usage` frame — the same estimate the compaction threshold uses. */}
-            <ContextUsageIndicator usage={contextUsage} compaction={compaction} />
+            <ContextUsageIndicator usage={contextUsage} />
             <MentionPopover
               disabled={isDispatching}
               onSelect={addMention}

@@ -1251,11 +1251,6 @@ chat:
     compactionSkipped:
       toast: Context too full to compact ($1% used). Try dropping a large paste or
         starting a new conversation.
-    compactNow:
-      idle: Compact now
-      busy: Compacting…
-      empty: Need at least 2 turns to compact
-      noModel: Select a model first
     contextLimitPaused: "Paused: the context is full and what remains cannot be compacted any
       further. Start a new chat, fork from an earlier reply, or switch to a
       model with a larger context window."
@@ -1295,18 +1290,6 @@ chat:
     description: Edit this message and rerun the agent from this point. Everything
       after it will be discarded.
     submit: Rerun
-  context:
-    usage: Context usage
-    percent: $1%
-    headroom: $1 left
-    plenty: Plenty of room
-    tight: Getting tight — consider compacting
-    nearFull: Context nearly full
-    used: Used
-    cached: Cached
-    free: Free
-    total: Total
-    compactNow: Compact now
   workerTeamRoster:
     title: Worker team
     configuredCount: $1 / $2 configured
