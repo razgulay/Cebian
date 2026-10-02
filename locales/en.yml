@@ -1714,6 +1714,7 @@ canvas:
   pane:
     titleFallback: Canvas
     closeAria: Close canvas
+    download: Download HTML
     inspectOn: Pick an element
     inspectOff: Stop picking
     empty:

@@ -21,7 +21,7 @@
 //     也只能跑在 sandbox 里、烧用户自己 cookie / DOM —— 跨不到扩展域。
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { EyeOff, FileCode2, MousePointerClick } from 'lucide-react';
+import { Download, EyeOff, FileCode2, MousePointerClick } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -58,6 +58,23 @@ export interface CanvasPaneProps {
 /** 把 `string | null` 取个非空 fallback 给 `<iframe title>`，nullish 时用空串。 */
 function safeTitle(snapshotPath: string | null): string {
   return snapshotPath ?? '';
+}
+
+/** 下载文件名取 canvas 路径的 basename：`/workspaces/x/report.html` → `report.html`。
+ *  路径异常（无 basename）时退回 `canvas.html`，保证 `<a download>` 总有名字。 */
+function downloadName(path: string): string {
+  return path.split('/').pop() || 'canvas.html';
+}
+
+/** 把快照内容存成 .html 文件。内容本来就在内存里（BG 打开的 VFS 文件快照），
+ *  Blob + `<a download>` 一发即可，不需要走 IPC 或 background。 */
+function downloadHtml(path: string, content: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/html;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = downloadName(path);
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export function CanvasPane({ onClose }: CanvasPaneProps) {
@@ -117,6 +134,11 @@ export function CanvasPane({ onClose }: CanvasPaneProps) {
     setInspectEnabled(false);
   };
 
+  const handleDownload = () => {
+    if (!openFile) return;
+    downloadHtml(openFile.path, openFile.content);
+  };
+
   return (
     <div className="h-full w-full flex flex-col bg-background border-r">
       <div className="flex items-center justify-between px-3 py-2 border-b">
@@ -130,6 +152,20 @@ export function CanvasPane({ onClose }: CanvasPaneProps) {
           </span>
         </div>
         <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={t('canvas.pane.download')}
+                disabled={!openFile}
+                onClick={handleDownload}
+              >
+                <Download className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{t('canvas.pane.download')}</TooltipContent>
+          </Tooltip>
           {SUPPORTS_SANDBOX_SCRIPTS && (
             <Tooltip>
               <TooltipTrigger asChild>

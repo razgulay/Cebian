@@ -1568,6 +1568,7 @@ canvas:
   pane:
     titleFallback: 畫布
     closeAria: 關閉畫布
+    download: 下載 HTML
     inspectOn: 點選元素
     inspectOff: 停止點選
     empty:

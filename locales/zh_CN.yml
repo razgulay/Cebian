@@ -1569,6 +1569,7 @@ canvas:
   pane:
     titleFallback: 画布
     closeAria: 关闭画布
+    download: 下载 HTML
     inspectOn: 拾取元素
     inspectOff: 停止拾取
     empty:
