@@ -80,9 +80,16 @@ function render(html: string): void {
 /** 把用户 HTML 包进新的 `<!doctype html><html><head>…</head><body>...</body></html>`。
  *  head 里按序注入三件事：
  *   1. `<base target="_blank">` 让所有未显式带 `target=` 的 `<a>` 默认开新标签。
- *   2. override 脚本在 DOMContentLoaded 上把所有 `<a[href]>` 的 `target` 改写为
+ *   2. override 脚本：DOMContentLoaded 上把所有 `<a[href]>` 的 `target` 改写为
  *      `_blank` 并补 `rel="noopener noreferrer"`，吞掉 `<a target="_self">` /
- *      `<a target="_top">` 这两种会逃出 `<base>` 默认值的链接。
+ *      `<a target="_top">` 这两种会逃出 `<base>` 默认值的链接；外加一个
+ *      capture 阶段的 click 拦截器——rewrite 只在解析时跑一遍，拦不住
+ *      `<a target="_parent">`（会逃去代理页）和作者脚本事后插入的链接，而
+ *      靠默认导航弹窗还可能被 opener 替换打断、留下空白标签。拦截器只在
+ *      click 当下对 http(s) 链接 `preventDefault()` + `window.open`（真实
+ *      用户手势里调用，导航不会被 race 掉），其余 href（`#anchor` / `mailto:`）
+ *      保持既有默认行为。inspect 拾取模式激活时让路：拾取的 capture 监听
+ *      需要这一次 click，两个监听都 `preventDefault` 会既弹标签又误报拾取。
  *   3. 拾取模式 bootstrap（`inspectBootstrapScript`）：常驻、默认休眠，收到
  *      `canvas-inspect` 才激活（见 inspectBootstrapScript 注释）。
  *  用"包一层"而不是 regex 注入用户既有 `<head>`：用户 HTML 里的 `<!-- <head> 模板
@@ -92,8 +99,7 @@ function render(html: string): void {
  *  切换"View source"看到的都是未修改的原文。 */
 function withNewTabLinks(html: string): string {
   const baseTag = '<base target="_blank">';
-  // override 脚本刻意小、无依赖，避免给解析增加成本。`querySelectorAll` 不会扫到作者
-  // 脚本随后插入的 `<a>`，但那是作者脚本自己加的链接，已超出"预览不该自导航"的范围。
+  // override 脚本刻意小、无依赖，避免给解析增加成本。
   const overrideScript =
     '<script>' +
     '(function(){' +
@@ -106,6 +112,16 @@ function withNewTabLinks(html: string): string {
     '};' +
     "if(document.readyState!=='loading'){f();}" +
     "else{document.addEventListener('DOMContentLoaded',f);}" +
+    'document.addEventListener("click",function(e){' +
+    'if(window.__cebianInspectActive)return;' +
+    'var n=e.target;' +
+    'while(n&&n.nodeType===1&&n.tagName!=="A")n=n.parentElement;' +
+    'if(!n||n.tagName!=="A")return;' +
+    'var pr=n.protocol;' +
+    'if(pr!=="http:"&&pr!=="https:")return;' +
+    'e.preventDefault();' +
+    'window.open(n.href,"_blank","noopener,noreferrer");' +
+    '},true);' +
     '})();' +
     '</script>';
   return `<!doctype html><html><head>${baseTag}${overrideScript}${inspectBootstrapScript()}</head><body>${html}</body></html>`;
@@ -189,6 +205,7 @@ function inspectBootstrapScript(): string {
     '}' +
     'function start(){' +
     'if(state)return;state=true;' +
+    'window.__cebianInspectActive=true;' +
     'document.addEventListener("mousemove",move,true);' +
     'document.addEventListener("click",click,true);' +
     'document.addEventListener("keydown",key,true);' +
@@ -196,6 +213,7 @@ function inspectBootstrapScript(): string {
     '}' +
     'function stop(){' +
     'if(!state)return;state=false;cur=null;' +
+    'window.__cebianInspectActive=false;' +
     'document.removeEventListener("mousemove",move,true);' +
     'document.removeEventListener("click",click,true);' +
     'document.removeEventListener("keydown",key,true);' +
