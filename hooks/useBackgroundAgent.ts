@@ -762,6 +762,16 @@ case 'stream_ops':
 
     scheduleRetryRef.current = scheduleRetry;
 
+    // Canvas 链接在 SW 休眠断连窗口里排队时，channel 会触发这里：清掉退避
+    // 计时器、立即重连——点击是用户此刻的意图，不该等最长 30s 的退避计时器。
+    canvasChannel.setReconnectTrigger(() => {
+      if (unmounted) return;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
+      retryCount = 0;
+      if (portRef.current == null) connect();
+    });
+
     function connect() {
       if (unmounted) return;
       const sessionToRestore = sessionIdRef.current;
@@ -852,6 +862,7 @@ case 'stream_ops':
       mcpAppResourceChannel.setPort(null);
       sessionListChannel.setPort(null);
       canvasChannel.setPort(null);
+      canvasChannel.setReconnectTrigger(null);
       schedulerChannel.setPort(null);
       // Phase 2：组件卸载时取消节流 timer——否则 50ms 后仍会回调已卸载
       // 组件的 setState（StrictMode 双挂载时尤其明显）。

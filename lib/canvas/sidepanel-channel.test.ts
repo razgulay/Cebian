@@ -279,4 +279,30 @@ describe('sidepanel-channel: openFile queue across the SW idle window', () => {
     canvasChannel.setActiveSession(SESSION_A);
     expect(port.postMessage).not.toHaveBeenCalled();
   });
+
+  it('openFile while disconnected fires the reconnect trigger immediately', () => {
+    const trigger = vi.fn();
+    canvasChannel.setReconnectTrigger(trigger);
+    canvasChannel.openFile('/queued.html');
+    // 排队的同时立即要求重连——不等 retry backoff。
+    expect(trigger).toHaveBeenCalledOnce();
+  });
+
+  it('openFile with a live port does not fire the reconnect trigger', () => {
+    const trigger = vi.fn();
+    const port = fakePort();
+    canvasChannel.setPort(port);
+    canvasChannel.setActiveSession(SESSION_A);
+    canvasChannel.setReconnectTrigger(trigger);
+    canvasChannel.openFile('/direct.html');
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('setReconnectTrigger(null) clears the trigger (hook unmounted)', () => {
+    const trigger = vi.fn();
+    canvasChannel.setReconnectTrigger(trigger);
+    canvasChannel.setReconnectTrigger(null);
+    canvasChannel.openFile('/queued.html');
+    expect(trigger).not.toHaveBeenCalled();
+  });
 });

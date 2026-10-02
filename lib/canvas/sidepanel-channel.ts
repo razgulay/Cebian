@@ -68,6 +68,12 @@ let portRef: chrome.runtime.Port | null = null;
  *  连接周期整体结束）清空。 */
 let pendingOpenPath: string | null = null;
 
+/** 重连触发器，由 `useBackgroundAgent` 注册（清掉 retry backoff、立即 connect）。
+ *  SW 休眠后 retry 处于指数退避（最长 30s）——`openFile` 排队时调它：点击是
+ *  用户**此刻**的意图，没有理由让画布空等一个最长半分钟的计时器。触发器丢失
+ *  （hook 未挂载）无害——退避计时器仍会兜底重连，只是慢。 */
+let reconnectTrigger: (() => void) | null = null;
+
 // ─── helpers ───
 
 /** 当前 wire 事件是否应该被 channel 缓存：要么 activeSessionId 未锁，要么匹配。 */
@@ -161,6 +167,8 @@ export const canvasChannel = {
   openFile(path: string): void {
     if (portRef == null || activeSessionId === null) {
       pendingOpenPath = path;
+      // 立即重连而不是等 retry backoff——点击就是用户此刻的意图。
+      reconnectTrigger?.();
       return;
     }
     portRef.postMessage({
@@ -168,6 +176,13 @@ export const canvasChannel = {
       sessionId: activeSessionId,
       path,
     } satisfies ClientMessage);
+  },
+
+  /** 由 `useBackgroundAgent` 挂载（connect 的 effect 内注册、卸载时清 null）。
+   *  `openFile` 排队时调用——语义是「现在就连」，由 hook 负责清 backoff 计时器
+   *  并立即 connect；channel 不持有计时器，也不关心重试策略。 */
+  setReconnectTrigger(fn: (() => void) | null): void {
+    reconnectTrigger = fn;
   },
 
   /** 当前关心的 session id（由 setActiveSession 写入）。订阅者用来 fanout 时
