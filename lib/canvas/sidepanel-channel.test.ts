@@ -205,3 +205,78 @@ describe('sidepanel-channel: port lifecycle (setPort)', () => {
     expect(canvasChannel.isConnected()).toBe(false);
   });
 });
+
+// `openFile` 的排队重放——修复「SW 休眠断连窗口里点 chat 链接，画布开出空面板，
+// 再点一次才出内容」。channel 只暴露 setPort/setActiveSession 两个状态入口，
+// flush 就挂在这两处；fake port 只需要 postMessage 可观察。
+describe('sidepanel-channel: openFile queue across the SW idle window', () => {
+  beforeEach(reset);
+  afterEach(reset);
+
+  function fakePort(): chrome.runtime.Port {
+    return { postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+  }
+
+  it('queues openFile while disconnected, flushes when port + session are both ready', () => {
+    const port = fakePort();
+    // SW 在睡：port 未注册。此刻点击不能丢请求。
+    expect(() => canvasChannel.openFile('/queued.html')).not.toThrow();
+    canvasChannel.setPort(port);
+    // port 到了但 session 还没重新注入（重连路径稍后 subscribe）→ 还不能发。
+    expect(port.postMessage).not.toHaveBeenCalled();
+    canvasChannel.setActiveSession(SESSION_A);
+    expect(port.postMessage).toHaveBeenCalledOnce();
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'canvas_open',
+      sessionId: SESSION_A,
+      path: '/queued.html',
+    });
+  });
+
+  it('flush order does not matter (session injected first, port second)', () => {
+    const port = fakePort();
+    canvasChannel.setActiveSession(SESSION_A);
+    canvasChannel.openFile('/queued.html');
+    canvasChannel.setPort(port);
+    expect(port.postMessage).toHaveBeenCalledOnce();
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'canvas_open',
+      sessionId: SESSION_A,
+      path: '/queued.html',
+    });
+  });
+
+  it('openFile with a live port posts immediately (queue stays empty)', () => {
+    const port = fakePort();
+    canvasChannel.setPort(port);
+    canvasChannel.setActiveSession(SESSION_A);
+    canvasChannel.openFile('/direct.html');
+    expect(port.postMessage).toHaveBeenCalledOnce();
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'canvas_open',
+      sessionId: SESSION_A,
+      path: '/direct.html',
+    });
+  });
+
+  it('a newer queued request replaces the older one (single slot, latest wins)', () => {
+    canvasChannel.openFile('/old.html');
+    canvasChannel.openFile('/new.html');
+    const port = fakePort();
+    canvasChannel.setPort(port);
+    canvasChannel.setActiveSession(SESSION_A);
+    expect(port.postMessage).toHaveBeenCalledOnce();
+    expect(port.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/new.html' }),
+    );
+  });
+
+  it('setPort(null) drops the pending request (fresh connection period starts clean)', () => {
+    canvasChannel.openFile('/dropped.html');
+    canvasChannel.setPort(null);
+    const port = fakePort();
+    canvasChannel.setPort(port);
+    canvasChannel.setActiveSession(SESSION_A);
+    expect(port.postMessage).not.toHaveBeenCalled();
+  });
+});

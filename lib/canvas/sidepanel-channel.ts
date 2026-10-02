@@ -18,7 +18,9 @@
 //   2. `canvas_opened`       —— agent `canvas_open` 工具触发，广播给本 session 的 viewer
 //   3. `canvas_file_changed` —— VFS 写入命中正被打开的路径，广播给本 session 的 viewer
 //   sidepanel → BG:
-//   4. `canvas_open`         —— `openFile`：chat 链接指向 VFS `.html` 时的打开请求
+//   4. `canvas_open`         —— `openFile`：chat 链接指向 VFS `.html` 时的打开请求。
+//                               SW 休眠断连窗口里收到时**排队**（`pendingOpenPath`），
+//                               port + session 恢复后自动重放——面板不能开成空的。
 //
 // 三种消息在 channel 内部统一收敛成 `CanvasSnapshot`（见 `./types.ts`），
 // 订阅者只关心一个状态形状——不必自己判别是哪一种 wire 消息。原始 wire 消息
@@ -54,6 +56,18 @@ let lastSnapshot: CanvasSnapshot | null = null;
 
 let portRef: chrome.runtime.Port | null = null;
 
+/** port / session 未就绪窗口里收到的 `openFile` 请求（只留最近一个）。
+ *
+ *  为什么不能丢：`openFile` 的唯一调用点是 chat 链接拦截（MarkdownRenderer），
+ *  与 MV3 service worker 的休眠节奏无关——SW 一睡 port 就断，`setPort(null)`
+ *  顺带清掉 `activeSessionId`，此刻点击会把请求整个丢掉：画布面板照样弹出
+ *  （`canvasPanelOpen` 走 storage 写入，自带唤醒 SW 的效果），却没有任何文件
+ *  可渲染——用户看到「点链接 → 空画布，再点一次才出来」。这里排队等 port 与
+ *  session 双双就绪后由 `setPort` / `setActiveSession` 重放。只留一个槽位：
+ *  用户点的是当下那个链接，新请求覆盖旧请求是正确语义；`setPort(null)`（一轮
+ *  连接周期整体结束）清空。 */
+let pendingOpenPath: string | null = null;
+
 // ─── helpers ───
 
 /** 当前 wire 事件是否应该被 channel 缓存：要么 activeSessionId 未锁，要么匹配。 */
@@ -77,6 +91,20 @@ function fanoutSnapshot(snapshot: CanvasSnapshot): void {
   }
 }
 
+/** port 与 activeSessionId 双双就绪时重放排队中的 `canvas_open`。由
+ *  `setPort`（非 null）与 `setActiveSession`（注入了具体 session）触发——
+ *  哪边后就绪哪边触发，两处都调是无害的（未就绪时直接返回）。 */
+function flushPendingOpen(): void {
+  if (pendingOpenPath == null || portRef == null || activeSessionId === null) return;
+  const path = pendingOpenPath;
+  pendingOpenPath = null;
+  portRef.postMessage({
+    type: 'canvas_open',
+    sessionId: activeSessionId,
+    path,
+  } satisfies ClientMessage);
+}
+
 // ─── 公开 API ───
 
 export const canvasChannel = {
@@ -95,6 +123,12 @@ export const canvasChannel = {
     if (p == null) {
       lastSnapshot = null;
       activeSessionId = null;
+      // 一轮连接周期整体结束——排队中的请求一并作废（重连后由用户重新点击）。
+      pendingOpenPath = null;
+    } else {
+      // 重连完成：port 就绪了，session 若也已注入（重连路径会重新 subscribe）
+      // 就立即重放排队中的打开请求。
+      flushPendingOpen();
     }
   },
 
@@ -112,17 +146,23 @@ export const canvasChannel = {
     if (activeSessionId === sessionId) return;
     activeSessionId = sessionId;
     lastSnapshot = null;
+    // session 注入完成：port 若已重连，这里就是两边就绪的时机——重放排队中的
+    // 打开请求（SW 休眠窗口里点击 chat 链接排队的那个）。
+    flushPendingOpen();
   },
 
   /**
    * UI 主动请求把 VFS 文件打开到 canvas（chat 里 `#/…html` 链接的点击拦截）。
-   * fire-and-forget：BG 失败由路由层统一回 `error` ServerMessage（useBackgroundAgent
-   * 的错误路径兜底），本方法不等待、不回传结果。port 未连接或 session 未锁定
-   * （早期 mount / 非 chat 语境）时静默 no-op——调用方应在此之前用
-   * `getActiveSessionId()` 自查并回落默认导航行为。
+   * port 未连接或 session 未锁定（SW 休眠断连窗口）时**排队**而不是丢弃——
+   * port 与 session 恢复后由 `setPort` / `setActiveSession` 自动重放（只保留
+   * 最近一个请求）。这修掉了「第一次点开的是空画布」：此前这里是静默 no-op，
+   * 面板弹出来了、请求却没了。
    */
   openFile(path: string): void {
-    if (portRef == null || activeSessionId === null) return;
+    if (portRef == null || activeSessionId === null) {
+      pendingOpenPath = path;
+      return;
+    }
     portRef.postMessage({
       type: 'canvas_open',
       sessionId: activeSessionId,
