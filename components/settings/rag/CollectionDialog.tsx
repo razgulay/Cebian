@@ -108,8 +108,15 @@ export function CollectionDialog({
   // 被卸载——列表刷新导致行重挂，或用户中途离开设置页。只靠上面的
   // `open === false` 分支覆盖不到这些路径，结果就是索引继续跑、并在已卸载的
   // 组件上 setState。
+  //
+  // 只在**确实有索引在跑**时提示（`abortRef.current` 非空才非 idle）：平时卸载
+  // 一个关着的对话框是常态（列表刷新、折叠 section），不该弹 toast 打扰用户。
+  // 用户主动 Cancel 走的是上面的 `open === false` 分支，不经过这里。
   useEffect(() => () => {
-    abortRef.current?.abort();
+    if (abortRef.current) {
+      abortRef.current.abort();
+      toast.info(t('settings.rag.indexCancelled'));
+    }
     abortRef.current = null;
   }, []);
 

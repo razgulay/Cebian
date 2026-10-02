@@ -18,7 +18,6 @@ export {
   ragCollections,
   ragSettings,
   removeCollectionMeta,
-  renameCollectionMeta,
   updateRagSettings,
   upsertCollection,
 } from './settings';
@@ -28,7 +27,6 @@ export {
   deleteCollectionChunks,
   embeddingToVectorLiteral,
   query,
-  renameCollectionChunks,
   testConnection,
 } from './neon-client';
 export type { BootstrapWarning, ConnectionTestResult } from './neon-client';

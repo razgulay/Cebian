@@ -582,8 +582,8 @@ settings:
     progressEmbedding: Embedding $1 / $2
     progressInserting: 写入 $1 / $2
     index: 索引
-    cancel: 取消
     indexDone: 已索引 $1 块
+    indexCancelled: 索引已取消
     collectionsSourceHint: 磁盘上的文件夹是事实来源。请在那里修改文件，然后从文件夹更新。
     dataSourcesTitle: 数据来源
     dataSourcesHint: 数据库连接与嵌入模型——设置一次，重新索引后生效。
@@ -599,8 +599,11 @@ settings:
     rowStateStale: 有源不在最近一次索引中
     rowStateEmpty: 空——未索引任何内容
     rowStateModelMismatch: 用 $1 索引，而当前模型是 $2
-    collectionActions: $1 的操作
-    updateFromFolder: 从文件夹更新…
+    collectionExpand: 展开 $1
+    # $1 = 知识库数量，$2 = 总数（当前两者相同）
+    collectionsCount: $1 / $2 个知识库
+    collectionsCollapse: 折叠知识库
+    collectionsExpand: 展开知识库
     sourcesReadOnlyHint: 只读——请改磁盘上的文件后从文件夹更新。
     sourcesEmpty: 没有记录来源
     sourceMeta: '$1 块 · $2'
@@ -645,12 +648,6 @@ settings:
     collectionNamePlaceholder: 知识库名称
     nameExists: 该名称已被占用
     indexFailed: 索引失败
-    reindex: 从文件夹更新
-    renameCollection: 重命名知识库
-    renamePlaceholder: 输入新名称
-    renameSuccess: 已将「$1」重命名为「$2」
-    renameInUse: 已存在名为「$1」的知识库
-    deleteCollection: 删除知识库
     confirmDeleteTitle: 删除知识库？
     confirmDelete: 删除知识库「$1」及其在 Neon 中的 $2 个块？磁盘上的文件不受影响。
     deleteSuccess: 已删除「$1」

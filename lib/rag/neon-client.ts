@@ -472,30 +472,6 @@ export async function deleteChunksByPaths(
   return rows.length;
 }
 
-/** Rename a collection in Neon by rewriting the `collection` column
- *  on every matching chunk. pgvector doesn't expose a "rename
- *  collection" primitive (collection is just a TEXT label, not a
- *  schema object) so we run an in-place UPDATE. Idempotent — calling
- *  with `newName === oldName` is a no-op.
- *
- *  Returns the number of rows updated. Caller should ensure no
- *  collection with `newName` already exists; if it does, the UNIQUE
- *  constraint `(collection, source_path, chunk_index)` will fire and
- *  the UPDATE will fail atomically (no partial writes). */
-export async function renameCollectionChunks(
-  connectionString: string,
-  oldName: string,
-  newName: string,
-): Promise<number> {
-  if (oldName === newName) return 0;
-  const rows = await query<{ id: string }>(
-    connectionString,
-    'UPDATE rag_chunks SET collection = $1 WHERE collection = $2 RETURNING id',
-    [newName, oldName],
-  );
-  return rows.length;
-}
-
 /** Count chunks in a collection. Used to refresh the UI after
  *  indexing or deletion. */
 export async function countCollectionChunks(

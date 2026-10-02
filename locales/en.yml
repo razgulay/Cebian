@@ -847,8 +847,8 @@ settings:
     progressEmbedding: Embedding $1 / $2
     progressInserting: Inserting $1 / $2
     index: Index
-    cancel: Cancel
     indexDone: Indexed $1 chunks
+    indexCancelled: Indexing cancelled
     collectionsSourceHint: Your folder on disk is the source of truth. Edit files there, then update from the folder.
     dataSourcesTitle: Data sources
     dataSourcesHint: Database connection and embedding model — set once, then reindex to apply.
@@ -865,8 +865,11 @@ settings:
     rowStateStale: Sources not in the last index run
     rowStateEmpty: Empty — nothing indexed
     rowStateModelMismatch: 'Indexed with $1, but the current model is $2'
-    collectionActions: Actions for $1
-    updateFromFolder: Update from folder…
+    collectionExpand: Expand $1
+    # $1 = number of collections, $2 = total (currently the same value)
+    collectionsCount: $1 / $2 collections
+    collectionsCollapse: Collapse collections
+    collectionsExpand: Expand collections
     sourcesReadOnlyHint: Read-only — edit files on disk, then update from the folder.
     sourcesEmpty: No sources recorded
     sourceMeta: '$1 chunks · $2'
@@ -912,12 +915,6 @@ settings:
     collectionNamePlaceholder: Collection name
     nameExists: That name is already taken
     indexFailed: Indexing failed
-    reindex: Update from folder
-    renameCollection: Rename collection
-    renamePlaceholder: Type a new name
-    renameSuccess: Renamed "$1" → "$2"
-    renameInUse: A collection named "$1" already exists
-    deleteCollection: Delete collection
     confirmDeleteTitle: Delete collection?
     confirmDelete: Delete collection "$1" and its $2 chunks from Neon? Files on your
       disk are not affected.

@@ -1,32 +1,27 @@
 //
-// CollectionRow — 一个知识库在列表里的一行。
+// CollectionRow — 一个知识库在列表里的一行（Settings 与 sidebar 共用）。
 //
-// 三行布局（由密到疏）：
-//   1. dot + 名称 + chunk 占比条 + `⋮` 菜单
-//   2. 元信息：chunk 数 · 嵌入模型 · 索引时间
-//   3. 遗留源提示（仅当有源不在上次索引里时出现）
+// 结构照搬 `components/settings/mcp/MCPServerRow.tsx`：
+//   • 折叠态：状态点 + 名称 + 展开箭头（一行）。
+//   • 展开态：元信息、遗留源提示、只读来源清单，底部 Update / Delete 两个文字按钮。
 //
-// **源是只读的。** 点行体（不是 `⋮`）展开该 collection 的来源清单，清单里没有
-// 任何改名 / 删除 / 新增按钮——磁盘上的文件夹才是事实来源，要改就改磁盘再
-// Reindex。这里只把 `RagCollection.sources` 显示出来（此前它只写不读）。
+// **源是只读的。** 磁盘上的文件夹才是事实来源，要改就改磁盘再从文件夹更新。
+// 这里只把 `RagCollection.sources` 显示出来。
 //
-// `⋮` 菜单刻意只有两项：Reindex…、Delete collection。改名已从 UI 移除：名字在
-// 创建时由文件夹名推导（`CollectionDialog.tsx` 里的 `pickFolderName` /
-// `onPickFolder`），改名会让名字与磁盘不再对应。
+// 没有重命名入口：名字在创建时由文件夹名推导，改名会让名字与磁盘不再对应。
+//
+// `CollectionDialog` 必须渲染在 `AccordionItem` **外面**（同级，不是子节点）。
+// Radix 的 `AccordionContent` 在折叠时会卸载子树，而 `CollectionDialog` 的卸载
+// cleanup 会 `abort()` 正在跑的索引——放进 Content 里，用户一折叠行就把索引杀了。
+// MCP 用同样的办法处理它的编辑表单。
 //
 
 import { useState } from 'react';
-import { ChevronRight, Ellipsis, RefreshCw, Trash2 } from 'lucide-react';
+import { RefreshCw, Trash2 } from 'lucide-react';
+import { AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { t } from '@/lib/i18n';
-import { cn, formatBytes } from '@/lib/utils';
+import { formatBytes } from '@/lib/utils';
 import type { RagCollection, RagSettings } from '@/lib/rag';
 import { CollectionDialog } from './CollectionDialog';
 import { StatusDot, type StatusTone } from './StatusDot';
@@ -59,26 +54,10 @@ function rowState(
   return { tone: 'ok', label: t('settings.rag.rowStateOk') };
 }
 
-/** chunk 占比条：把这个 collection 的 chunk 数与最大的那个比。
- *  只表示相对大小，不是配额——纯粹让「哪个库大」一眼可见。 */
-function ProportionBar({ value, max }: { value: number; max: number }) {
-  const pct = max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 0;
-  return (
-    <span className="hidden sm:block h-1 w-16 shrink-0 overflow-hidden rounded-full bg-muted">
-      <span
-        className="block h-full rounded-full bg-violet-400"
-        style={{ width: `${pct}%` }}
-      />
-    </span>
-  );
-}
-
 export interface CollectionRowProps {
   collection: RagCollection;
   /** 用于判断模型是否与当前配置一致。 */
   currentModel: string;
-  /** 列表里最大的 chunkCount，用于占比条。 */
-  maxChunkCount: number;
   /** 更新对话框所需的配置。 */
   settings: RagSettings;
   /** 索引完成后的回调——由页面刷新列表。 */
@@ -89,12 +68,10 @@ export interface CollectionRowProps {
 export function CollectionRow({
   collection: c,
   currentModel,
-  maxChunkCount,
   settings,
   onIndexed,
   onDelete,
 }: CollectionRowProps) {
-  const [sourcesOpen, setSourcesOpen] = useState(false);
   /** 重新索引对话框**挂在这一行上**，而不是页面级的一个 section。
    *  这样「对哪个库操作」在视觉上不言自明，也不需要页面用 ref 传
    *  「当前要重索引谁」这种 side-channel。 */
@@ -102,97 +79,92 @@ export function CollectionRow({
   const state = rowState(c, currentModel);
 
   return (
-    <li className="px-3 py-2">
-      <div className="flex items-center gap-2">
-        {/* The row body is the button that opens the source list; the
-            `⋮` menu sits outside it so the two never collide. */}
-        <button
-          type="button"
-          onClick={() => setSourcesOpen((v) => !v)}
-          aria-expanded={sourcesOpen}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left hover:bg-accent/40 -mx-1 px-1 py-0.5"
-        >
-          <ChevronRight
-            aria-hidden
-            className={cn(
-              'size-3.5 shrink-0 text-muted-foreground transition-transform',
-              sourcesOpen && 'rotate-90',
-            )}
-          />
+    <>
+      <AccordionItem value={c.name} className="border-0">
+        <div className="flex items-center gap-2 min-w-0 text-sm py-1.5">
           <StatusDot tone={state.tone} label={state.label} />
-          <span className="min-w-0 flex-1 truncate text-sm">{c.name}</span>
-          <ProportionBar value={c.chunkCount} max={maxChunkCount} />
-        </button>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label={t('settings.rag.collectionActions', [c.name])}
-            >
-              <Ellipsis className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-44 max-w-[calc(100vw-1rem)]">
-            <DropdownMenuItem onSelect={() => setReindexOpen(true)}>
-              <RefreshCw className="size-3.5" />
-              {t('settings.rag.updateFromFolder')}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onSelect={() => onDelete(c)}>
-              <Trash2 className="size-3.5" />
-              {t('settings.rag.deleteCollection')}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      {/* Line 2: meta. */}
-      <p className="mt-0.5 pl-6 text-xs text-muted-foreground truncate">
-        {t('settings.rag.rowMeta', [
-          String(c.chunkCount),
-          c.embedModel,
-          new Date(c.updatedAt).toLocaleDateString(),
-        ])}
-      </p>
-
-      {/* Line 3: stale-source hint. Deliberately not called "deleted" — we
-          cannot tell a removed file from one simply not picked last time. */}
-      {(c.notInLastRun?.length ?? 0) > 0 && (
-        <p className="mt-0.5 pl-6 text-[0.7rem] text-amber-700 dark:text-amber-400 truncate">
-          {t('settings.rag.notInLastRun', [String(c.notInLastRun!.length)])}
-        </p>
-      )}
-
-      {/* Source list — read-only. */}
-      {sourcesOpen && (
-        <div className="mt-1.5 ml-6 rounded-md border border-border/60 p-2">
-          <p className="mb-1 text-[0.7rem] text-muted-foreground">
-            {t('settings.rag.sourcesReadOnlyHint')}
-          </p>
-          {c.sources.length === 0 ? (
-            <p className="text-xs text-muted-foreground">{t('settings.rag.sourcesEmpty')}</p>
-          ) : (
-            <ul className="max-h-40 space-y-0.5 overflow-y-auto">
-              {c.sources.map((s) => (
-                <li
-                  key={s.path}
-                  className="flex items-center justify-between gap-2 text-xs"
-                >
-                  <span className="min-w-0 flex-1 truncate font-mono" title={s.path}>
-                    {s.path}
-                  </span>
-                  <span className="shrink-0 text-muted-foreground">
-                    {t('settings.rag.sourceMeta', [String(s.chunkCount), formatBytes(s.size)])}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <span className="flex-1 min-w-0 text-foreground/80 truncate">{c.name}</span>
+          <AccordionTrigger
+            aria-label={t('settings.rag.collectionExpand', [c.name])}
+            className="py-0 px-1 flex-none gap-0 hover:no-underline [&>svg]:size-3.5"
+          />
         </div>
-      )}
 
+        <AccordionContent className="pb-2">
+          <div className="rounded-md bg-muted/30 p-2 space-y-1.5">
+            <div className="text-xs text-muted-foreground">
+              {t('settings.rag.rowMeta', [
+                String(c.chunkCount),
+                c.embedModel,
+                new Date(c.updatedAt).toLocaleDateString(),
+              ])}
+            </div>
+
+            {/* Stale-source hint — the cost of add-only being the default.
+                Deliberately NOT called "deleted": we cannot tell a removed
+                file from one simply not picked last time. */}
+            {(c.notInLastRun?.length ?? 0) > 0 && (
+              <div className="text-xs text-amber-700 dark:text-amber-400">
+                {t('settings.rag.notInLastRun', [String(c.notInLastRun!.length)])}
+              </div>
+            )}
+
+            <div className="space-y-1">
+              <p className="text-[0.7rem] text-muted-foreground">
+                {t('settings.rag.sourcesReadOnlyHint')}
+              </p>
+              {c.sources.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.rag.sourcesEmpty')}
+                </p>
+              ) : (
+                <ul className="max-h-40 space-y-0.5 overflow-y-auto">
+                  {c.sources.map((s) => (
+                    <li
+                      key={s.path}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono" title={s.path}>
+                        {s.path}
+                      </span>
+                      <span className="shrink-0 text-muted-foreground">
+                        {t('settings.rag.sourceMeta', [
+                          String(s.chunkCount),
+                          formatBytes(s.size),
+                        ])}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-1 pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs gap-1"
+                onClick={() => setReindexOpen(true)}
+              >
+                <RefreshCw className="size-3" />
+                {t('settings.rag.updateAction')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs gap-1 text-destructive hover:text-destructive"
+                onClick={() => onDelete(c)}
+              >
+                <Trash2 className="size-3" />
+                {t('common.delete')}
+              </Button>
+            </div>
+          </div>
+        </AccordionContent>
+      </AccordionItem>
+
+      {/* Sibling of AccordionItem, not a child — collapsing the row cannot
+          unmount it, so an in-flight index is never aborted. */}
       <CollectionDialog
         open={reindexOpen}
         onOpenChange={setReindexOpen}
@@ -200,6 +172,6 @@ export function CollectionRow({
         mode={{ kind: 'update', collectionName: c.name }}
         onIndexed={onIndexed}
       />
-    </li>
+    </>
   );
 }

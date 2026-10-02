@@ -29,6 +29,8 @@
 import { useCallback, useState } from 'react';
 import {
   Database,
+  Folder,
+  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -339,16 +341,57 @@ export function RagSection() {
              it never affects the everyday order. */}
       <SetupStepper settings={settings} collectionCount={collections.length} />
 
-      {/* 3. Collections — the day-to-day surface, so it comes first. */}
-      <CollectionList
-        collections={collections}
-        currentModel={settings.defaultEmbedModel}
-        canCreate={!!settings.neonConnectionString}
-        settings={settings}
-        onCreate={() => setNewOpen(true)}
-        onIndexed={refreshCollections}
-        onDelete={handleDeleteCollection}
-      />
+      {/* 3. Collections — the day-to-day surface, so it comes first.
+             The heading row (icon + title + count badge + two hint lines)
+             lives here; the list body (`CollectionList`) is shared with the
+             sidebar — same shape as MCP: different shells, one list. */}
+      <section className="space-y-3 rounded-lg border border-border p-4">
+        <div className="flex items-center gap-2">
+          <span
+            aria-hidden
+            className="inline-flex size-9 items-center justify-center rounded-md bg-orange-50 text-orange-600 dark:bg-orange-950/40 dark:text-orange-400 shrink-0"
+          >
+            <Folder className="size-4" />
+          </span>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <h3 className="text-sm font-medium">{t('settings.rag.collections')}</h3>
+              <span className="text-[0.65rem] text-muted-foreground tabular-nums">
+                {t('settings.rag.collectionsCount', [
+                  String(collections.length),
+                  String(collections.length),
+                ])}
+              </span>
+            </div>
+            {/* Two lines, both load-bearing: the first says how to USE a
+                collection in chat, the second says where the data actually
+                comes from (and that editing happens on disk, not here). */}
+            <p className="text-xs text-muted-foreground">{t('settings.rag.collectionsHint')}</p>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.rag.collectionsSourceHint')}
+            </p>
+          </div>
+        </div>
+
+        <CollectionList
+          collections={collections}
+          currentModel={settings.defaultEmbedModel}
+          settings={settings}
+          onIndexed={refreshCollections}
+          onDelete={handleDeleteCollection}
+        />
+
+        <div className="flex justify-center">
+          <Button
+            size="sm"
+            disabled={!settings.neonConnectionString}
+            onClick={() => setNewOpen(true)}
+          >
+            <Plus className="size-3.5" />
+            {t('settings.rag.newCollection')}
+          </Button>
+        </div>
+      </section>
 
       {/* 4. Retrieval & ranking. */}
       <RetrievalPanel settings={settings} onChange={patchSettings} />
