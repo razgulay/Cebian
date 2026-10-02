@@ -820,6 +820,13 @@ case 'stream_ops':
         } satisfies ClientMessage);
         if (sessionToRestore) {
           port.postMessage({ type: 'subscribe', sessionId: sessionToRestore } satisfies ClientMessage);
+          // Canvas Live Artifacts：重连必须**恢复** channel 的 session 绑定。
+          // `setPort(null)` 在断连时会把它清掉（连接级重置），而这里只重发了
+          // 裸 subscribe 消息——用户还停在同一个会话时没有任何东西会再调
+          // `setActiveSession`，绑定就一直缺失：chat 链接的 `canvas_open` 被
+          // 排队却永远等不到 flush，画布每次都开成空面板。与 BG 侧重新
+          // subscribe 的语义对齐——重连 = 重新绑定。
+          canvasChannel.setActiveSession(sessionToRestore);
         }
         // 会话列表通道：交出端口后 HistoryPanel 才能拉列表 / 删除，不必自己开端口。
         // 必须放在 hello 之后——它是三个 channel 里唯一会在 setPort 时同步发消息的
