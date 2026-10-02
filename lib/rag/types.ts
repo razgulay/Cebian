@@ -60,8 +60,9 @@ export interface RagSettings {
   /** Number of chunks returned after rerank. Must be ≤ vectorTopK. */
   rerankTopN: number;
 
-  /** **目前恒为 0——没有任何 UI 可以设置它。** 保留字段是为了不改动已持久化的
-   *  settings 结构，`ChatInput` 仍在读它。
+  /** **目前恒为 0——没有任何 UI 可以设置它，也没有任何调用方读它。**
+   *  保留字段是为了不改动已持久化的 settings 结构（旧版本可能存过非 0 值，
+   *  删字段就要迁移；留着它则完全无害）。
    *
    *  历史：这曾是「已 pin 的 RAG 提及在 top-1 分数低于阈值时不附带 envelope」的
    *  门槛。撤下 UI 的原因是分数标尺随检索模式变化（cosine 0–1 对 RRF 0–0.033），
