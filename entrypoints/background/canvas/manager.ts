@@ -31,7 +31,7 @@
 // 类型 / 纯 pub/sub 的桥模块。
 
 import { vfs, normalizePath, type VfsChangeEvent } from '@/lib/persistence/vfs';
-import { broadcastAll } from '../ipc/port-registry';
+import { broadcastAll, onPortConnect, post } from '../ipc/port-registry';
 import { canvasToolChannel } from '@/lib/canvas/tool-channel';
 import type { OpenCanvasFile } from '@/lib/canvas/types';
 
@@ -154,4 +154,23 @@ export function closeCanvas(sessionId: string): void {
 export function setupCanvas(): void {
   vfs.onChange(handleVfsChange);
   canvasToolChannel.setOpenCanvas(openCanvas);
+  // 首帧推送：`canvas_state` 的 wire 类型、sidepanel 处理器与测试早已就位，
+  // 但**发送端一直缺席**（telegram manager 的注释甚至声称 canvas 有「同款机制」
+  // ——实际从未实现）。没有它，sidepanel 的 ChatPage 挂在 Route 条件树里，
+  // `canvasOpen` 翻转会让整棵子树 remount：port 断开重连把 channel 的
+  // lastSnapshot 与 session 绑定一起清空，刚广播的 `canvas_opened` 随旧端口
+  // 一起丢失，新挂载的画布只能停在空态。port 一接入就把当前**所有**打开中的
+  // canvas 状态推过去（sidepanel 按 activeSessionId 过滤）——重挂载、重连、
+  // SW 重启都能从 BG 权威状态自愈。与 telegram 网关的 first-frame push
+  // 同一形状。
+  onPortConnect((port) => {
+    for (const [sessionId, file] of openBySession) {
+      post(port, {
+        type: 'canvas_state',
+        sessionId,
+        openPath: file.path,
+        content: file.content,
+      });
+    }
+  });
 }

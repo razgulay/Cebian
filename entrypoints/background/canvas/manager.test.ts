@@ -43,9 +43,22 @@ vi.mock('@/lib/persistence/vfs', () => ({
 }));
 
 const broadcastCalls: { msg: unknown }[] = [];
+let portConnectListener: ((port: unknown) => void) | null = null;
+const postedToPort: { port: unknown; msg: unknown }[] = [];
 vi.mock('../ipc/port-registry', () => ({
   broadcastAll: (msg: unknown) => {
     broadcastCalls.push({ msg });
+  },
+  // first-frame push（canvas_state on port connect）：捕获监听器与 per-port post，
+  // 测试直接触发「port 接入」并断言推给该 port 的载荷。
+  onPortConnect: (listener: (port: unknown) => void) => {
+    portConnectListener = listener;
+    return () => {
+      if (portConnectListener === listener) portConnectListener = null;
+    };
+  },
+  post: (port: unknown, msg: unknown) => {
+    postedToPort.push({ port, msg });
   },
 }));
 
@@ -68,6 +81,7 @@ describe('canvas BG manager', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     broadcastCalls.length = 0;
+    postedToPort.length = 0;
     vfsHandler = null;
     // 模块级 `openBySession` map 在测试文件内跨测试持久；按已知 session id
     // 关闭以隔离状态。新增测试若引入新 id，记得追加到 KNOWN_SESSIONS。
@@ -283,6 +297,46 @@ describe('canvas BG manager', () => {
 
       // 失败不应广播；下一次 write 触发时还会再尝试。
       expect(broadcastCalls).toHaveLength(0);
+    });
+  });
+
+  describe('first-frame push (canvas_state on port connect)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.clearAllMocks();
+      broadcastCalls.length = 0;
+      postedToPort.length = 0;
+      vfsHandler = null;
+      for (const id of KNOWN_SESSIONS) closeCanvas(id);
+    });
+
+    it('a newly connected port receives canvas_state for every open session', async () => {
+      setupCanvas();
+      mockRead().mockResolvedValue('hello');
+      await openCanvas('s1', '/foo.html');
+      broadcastCalls.length = 0;
+      postedToPort.length = 0;
+
+      const port = { name: 'test' };
+      portConnectListener!(port);
+
+      expect(postedToPort).toHaveLength(1);
+      expect(postedToPort[0]).toEqual({
+        port,
+        msg: {
+          type: 'canvas_state',
+          sessionId: 's1',
+          openPath: '/foo.html',
+          content: 'hello',
+        },
+      });
+    });
+
+    it('no open canvas → port connect pushes nothing', () => {
+      setupCanvas();
+      const port = { name: 'test' };
+      portConnectListener!(port);
+      expect(postedToPort).toHaveLength(0);
     });
   });
 });
