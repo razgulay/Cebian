@@ -839,17 +839,9 @@ settings:
     newCollection: New collection
     nameInvalid: Name must start with a letter or digit; letters, digits, dashes and
       underscores only.
-    folderLabel: Folder
-    folderPlaceholder: Choose a folder…
-    folderNewOption: + New folder…
-    folderNewPlaceholder: Type a name and press Enter
-    folderNoFolders: No folders yet — type a name above
     filesInsideFolder: Files in this folder
-    pickFiles: Pick files
-    pickFolder: Pick folder
     pickedCount: $1 files · $2
     pickedSkipped: $1 file(s) skipped — unsupported extension
-    reindexBanner: Adding files to "$1" — existing chunks will be replaced by the new ones.
     progressReading: Reading $1 / $2 — $3
     progressChunking: Chunked $1 chunks
     progressEmbedding: Embedding $1 / $2
@@ -857,15 +849,13 @@ settings:
     index: Index
     cancel: Cancel
     indexDone: Indexed $1 chunks
-    collectionsSourceHint: Your folder on disk is the source of truth. Edit files there, then Reindex.
+    collectionsSourceHint: Your folder on disk is the source of truth. Edit files there, then update from the folder.
     dataSourcesTitle: Data sources
     dataSourcesHint: Database connection and embedding model — set once, then reindex to apply.
     # $1 = configured dim, $2 = dim the model actually returns
     healthEmbedderDimMismatch: 'Model returns $2 dimensions, but $1 is configured'
     addFolder: Add folder
     addFolderHint: Pick a folder to index.
-    reindexTitle: Reindex collection
-    reindexHint: Re-pick the folder to refresh this collection.
     chooseFolder: Choose folder…
     chooseFolderHint: Indexing runs locally — files stay on your disk, vectors go to Neon.
     collectionName: Collection name
@@ -876,8 +866,8 @@ settings:
     rowStateEmpty: Empty — nothing indexed
     rowStateModelMismatch: 'Indexed with $1, but the current model is $2'
     collectionActions: Actions for $1
-    reindexMenu: Reindex…
-    sourcesReadOnlyHint: Read-only — edit files on disk, then reindex.
+    updateFromFolder: Update from folder…
+    sourcesReadOnlyHint: Read-only — edit files on disk, then update from the folder.
     sourcesEmpty: No sources recorded
     sourceMeta: '$1 chunks · $2'
     setupTitle: Get started
@@ -915,8 +905,14 @@ settings:
     dimCorrected: 'Embedding dimension corrected to $1 to match your model.'
     dimMismatch: 'Your model returns $2-dimension vectors, but the saved setting is $1. Update it so the database column matches the model.'
     dimMismatchUse: 'Use $1'
+    updateTitle: Update from folder
+    # $1 = collection name
+    updateHint: Re-pick the folder to refresh "$1". The browser does not keep the path, so it has to be chosen again.
+    updateAction: Update
+    collectionNamePlaceholder: Collection name
+    nameExists: That name is already taken
     indexFailed: Indexing failed
-    reindex: Re-index (re-pick files)
+    reindex: Update from folder
     renameCollection: Rename collection
     renamePlaceholder: Type a new name
     renameSuccess: Renamed "$1" → "$2"

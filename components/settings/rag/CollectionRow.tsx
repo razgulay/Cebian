@@ -11,7 +11,7 @@
 // Reindex。这里只把 `RagCollection.sources` 显示出来（此前它只写不读）。
 //
 // `⋮` 菜单刻意只有两项：Reindex…、Delete collection。改名已从 UI 移除：名字在
-// 创建时由文件夹名推导（`ReindexDialog.tsx` 里的 `pickFolderName` /
+// 创建时由文件夹名推导（`CollectionDialog.tsx` 里的 `pickFolderName` /
 // `onPickFolder`），改名会让名字与磁盘不再对应。
 //
 
@@ -28,7 +28,7 @@ import {
 import { t } from '@/lib/i18n';
 import { cn, formatBytes } from '@/lib/utils';
 import type { RagCollection, RagSettings } from '@/lib/rag';
-import { ReindexDialog } from './ReindexDialog';
+import { CollectionDialog } from './CollectionDialog';
 import { StatusDot, type StatusTone } from './StatusDot';
 
 /** 行的健康态：颜色与文案一次算出。
@@ -79,9 +79,8 @@ export interface CollectionRowProps {
   currentModel: string;
   /** 列表里最大的 chunkCount，用于占比条。 */
   maxChunkCount: number;
-  /** 重新索引对话框所需的配置与已存在的名字（用于预填与冲突校验）。 */
+  /** 更新对话框所需的配置。 */
   settings: RagSettings;
-  existingNames: string[];
   /** 索引完成后的回调——由页面刷新列表。 */
   onIndexed: () => void;
   onDelete: (c: RagCollection) => void;
@@ -92,7 +91,6 @@ export function CollectionRow({
   currentModel,
   maxChunkCount,
   settings,
-  existingNames,
   onIndexed,
   onDelete,
 }: CollectionRowProps) {
@@ -139,7 +137,7 @@ export function CollectionRow({
           <DropdownMenuContent align="end" className="w-44 max-w-[calc(100vw-1rem)]">
             <DropdownMenuItem onSelect={() => setReindexOpen(true)}>
               <RefreshCw className="size-3.5" />
-              {t('settings.rag.reindexMenu')}
+              {t('settings.rag.updateFromFolder')}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={() => onDelete(c)}>
@@ -195,12 +193,11 @@ export function CollectionRow({
         </div>
       )}
 
-      <ReindexDialog
+      <CollectionDialog
         open={reindexOpen}
         onOpenChange={setReindexOpen}
         settings={settings}
-        existingNames={existingNames}
-        initialName={c.name}
+        mode={{ kind: 'update', collectionName: c.name }}
         onIndexed={onIndexed}
       />
     </li>

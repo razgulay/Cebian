@@ -35,9 +35,6 @@ export function CollectionList({
 }: CollectionListProps) {
   // 占比条的基准。空列表时不会用到。
   const maxChunkCount = collections.reduce((m, c) => Math.max(m, c.chunkCount), 0);
-  // 在循环**外**算一次。放进 map 里会变成 n×n 次分配，而且每行都拿到一个新数组
-  // 引用，让行组件永远无法被 memo。
-  const existingNames = collections.map((c) => c.name);
 
   return (
     <section className="space-y-3 rounded-lg border border-border p-4">
@@ -79,7 +76,6 @@ export function CollectionList({
               currentModel={currentModel}
               maxChunkCount={maxChunkCount}
               settings={settings}
-              existingNames={existingNames}
               onIndexed={onIndexed}
               onDelete={onDelete}
             />

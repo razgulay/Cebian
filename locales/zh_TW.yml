@@ -574,17 +574,9 @@ settings:
     contextualHint: chunks 將帶上 LLM 生成的上下文前綴（每塊約 1 次 LLM 呼叫）。
     newCollection: 新增知識庫
     nameInvalid: 名稱必須以字母或數字開頭，只允許字母、數字、橫線、底線。
-    folderLabel: 資料夾
-    folderPlaceholder: 選擇資料夾…
-    folderNewOption: + 新增資料夾…
-    folderNewPlaceholder: 輸入名稱後按 Enter
-    folderNoFolders: 還沒有資料夾——請在上方輸入名稱
     filesInsideFolder: 此資料夾內的檔案
-    pickFiles: 選擇檔案
-    pickFolder: 選擇資料夾
     pickedCount: $1 個檔案 · $2
     pickedSkipped: 已略過 $1 個檔案（不支援的副檔名）
-    reindexBanner: 向「$1」新增檔案——已有 chunks 會被新檔案取代。
     progressReading: 讀取 $1 / $2 — $3
     progressChunking: 已分塊 $1 塊
     progressEmbedding: Embedding $1 / $2
@@ -592,14 +584,12 @@ settings:
     index: 索引
     cancel: 取消
     indexDone: 已索引 $1 塊
-    collectionsSourceHint: 磁碟上的資料夾是事實來源。請在那裡修改檔案，然後重新索引。
+    collectionsSourceHint: 磁碟上的資料夾是事實來源。請在那裡修改檔案，然後從資料夾更新。
     dataSourcesTitle: 資料來源
     dataSourcesHint: 資料庫連線與嵌入模型——設定一次，重新索引後生效。
     healthEmbedderDimMismatch: 模型輸出 $2 維，而設定為 $1 維
     addFolder: 新增資料夾
     addFolderHint: 選擇要索引的資料夾。
-    reindexTitle: 重新索引知識庫
-    reindexHint: 重新選擇資料夾以重新整理該知識庫。
     chooseFolder: 選擇資料夾…
     chooseFolderHint: 索引在本機進行——檔案留在你的磁碟上，只有向量送往 Neon。
     collectionName: 知識庫名稱
@@ -610,8 +600,8 @@ settings:
     rowStateEmpty: 空——未索引任何內容
     rowStateModelMismatch: 以 $1 索引，而目前模型是 $2
     collectionActions: $1 的操作
-    reindexMenu: 重新索引…
-    sourcesReadOnlyHint: 唯讀——請改磁碟上的檔案後重新索引。
+    updateFromFolder: 從資料夾更新…
+    sourcesReadOnlyHint: 唯讀——請改磁碟上的檔案後從資料夾更新。
     sourcesEmpty: 沒有記錄來源
     sourceMeta: '$1 塊 · $2'
     setupTitle: 開始使用
@@ -649,8 +639,13 @@ settings:
     dimCorrected: 已依模型實際輸出將嵌入維度更正為 $1。
     dimMismatch: 模型實際輸出 $2 維向量，而目前設定為 $1。請更新設定，使資料庫欄寬與模型一致。
     dimMismatchUse: 改用 $1
+    updateTitle: 從資料夾更新
+    updateHint: 重新選擇資料夾以重新整理「$1」。瀏覽器不保留路徑，所以需要再選一次。
+    updateAction: 更新
+    collectionNamePlaceholder: 知識庫名稱
+    nameExists: 該名稱已被使用
     indexFailed: 索引失敗
-    reindex: 重新索引（重新選檔案）
+    reindex: 從資料夾更新
     renameCollection: 重新命名知識庫
     renamePlaceholder: 輸入新名稱
     renameSuccess: 已將「$1」重新命名為「$2」

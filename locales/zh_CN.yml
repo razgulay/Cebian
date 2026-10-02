@@ -574,17 +574,9 @@ settings:
     contextualHint: chunks 将带上 LLM 生成的上下文前缀（每块约 1 次 LLM 调用）。
     newCollection: 新建知识库
     nameInvalid: 名称必须以字母或数字开头，只允许字母、数字、横线、下划线。
-    folderLabel: 文件夹
-    folderPlaceholder: 选择文件夹…
-    folderNewOption: + 新建文件夹…
-    folderNewPlaceholder: 输入名称后按回车
-    folderNoFolders: 还没有文件夹——在上方输入名称
     filesInsideFolder: 此文件夹内的文件
-    pickFiles: 选择文件
-    pickFolder: 选择文件夹
     pickedCount: $1 个文件 · $2
     pickedSkipped: 已跳过 $1 个文件（不支持的扩展名）
-    reindexBanner: 向「$1」添加文件——已有 chunks 会被新文件替换。
     progressReading: 读取 $1 / $2 — $3
     progressChunking: 已分块 $1 块
     progressEmbedding: Embedding $1 / $2
@@ -592,14 +584,12 @@ settings:
     index: 索引
     cancel: 取消
     indexDone: 已索引 $1 块
-    collectionsSourceHint: 磁盘上的文件夹是事实来源。请在那里修改文件，然后重新索引。
+    collectionsSourceHint: 磁盘上的文件夹是事实来源。请在那里修改文件，然后从文件夹更新。
     dataSourcesTitle: 数据来源
     dataSourcesHint: 数据库连接与嵌入模型——设置一次，重新索引后生效。
     healthEmbedderDimMismatch: 模型输出 $2 维，而配置为 $1 维
     addFolder: 添加文件夹
     addFolderHint: 选择要索引的文件夹。
-    reindexTitle: 重新索引知识库
-    reindexHint: 重新选择文件夹以刷新该知识库。
     chooseFolder: 选择文件夹…
     chooseFolderHint: 索引在本地进行——文件留在你的磁盘上，只有向量发往 Neon。
     collectionName: 知识库名称
@@ -610,8 +600,8 @@ settings:
     rowStateEmpty: 空——未索引任何内容
     rowStateModelMismatch: 用 $1 索引，而当前模型是 $2
     collectionActions: $1 的操作
-    reindexMenu: 重新索引…
-    sourcesReadOnlyHint: 只读——请改磁盘上的文件后重新索引。
+    updateFromFolder: 从文件夹更新…
+    sourcesReadOnlyHint: 只读——请改磁盘上的文件后从文件夹更新。
     sourcesEmpty: 没有记录来源
     sourceMeta: '$1 块 · $2'
     setupTitle: 开始使用
@@ -649,8 +639,13 @@ settings:
     dimCorrected: 已按模型实际输出把嵌入维度更正为 $1。
     dimMismatch: 模型实际输出 $2 维向量，而当前设置为 $1。请更新设置，使数据库列宽与模型一致。
     dimMismatchUse: 改用 $1
+    updateTitle: 从文件夹更新
+    updateHint: 重新选择文件夹以刷新「$1」。浏览器不保留路径，所以需要再选一次。
+    updateAction: 更新
+    collectionNamePlaceholder: 知识库名称
+    nameExists: 该名称已被占用
     indexFailed: 索引失败
-    reindex: 重新索引（重新选文件）
+    reindex: 从文件夹更新
     renameCollection: 重命名知识库
     renamePlaceholder: 输入新名称
     renameSuccess: 已将「$1」重命名为「$2」

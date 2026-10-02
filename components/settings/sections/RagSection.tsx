@@ -57,7 +57,7 @@ import { AdvancedPanel } from '@/components/settings/rag/AdvancedPanel';
 import { RetrievalPanel } from '@/components/settings/rag/RetrievalPanel';
 import { SetupStepper } from '@/components/settings/rag/SetupStepper';
 import { CollapsibleSection } from '@/components/settings/rag/CollapsibleSection';
-import { ReindexDialog } from '@/components/settings/rag/ReindexDialog';
+import { CollectionDialog } from '@/components/settings/rag/CollectionDialog';
 import { t } from '@/lib/i18n';
 import { debugLog } from '@/lib/debug/log';
 
@@ -412,12 +412,12 @@ export function RagSection() {
         <AdvancedPanel settings={settings} onChange={patchSettings} />
       </CollapsibleSection>
 
-      <ReindexDialog
+      <CollectionDialog
         open={newOpen}
         onOpenChange={setNewOpen}
         settings={settings}
         existingNames={collections.map((c) => c.name)}
-        initialName={null}
+        mode={{ kind: 'create' }}
         onIndexed={refreshCollections}
       />
     </div>
