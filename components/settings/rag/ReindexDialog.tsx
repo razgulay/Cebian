@@ -1,71 +1,37 @@
-// CollectionsSection — RAG Collections 列表 + New Collection 对话框。
-// 从 components/settings/sections/RagSection.tsx 抽出，自包含状态（rename / reindex /
-// new dialog），共享 ragCollections + ragSettings 两个 storage 项。/settings/rag 和
-// SidebarPanel 都挂这一个组件，写入同一 storage，两处 UI 实时同步。
 //
-// Connection / Embedder / Chunking / Rerank 等「配置块」仍留在 /settings/rag，因为
-// CollectionsSection 不渲染它们、也不依赖它们——sidebar 只关心 collections 本身。
+// ReindexDialog — 「新建 / 重新索引知识库」对话框。
+//
+// 一个 collection 的两种入口共用它：新建（`initialName` 为 null）与重新索引
+// （`initialName` 为已有名字，打开时预填、并显示提示横幅）。
+//
+// 文件偏长（~590 行）是刻意的：这是一条**顺序流程**——选文件 → 配置 → 跑 →
+// 报进度，拆成两半会得到两个都不能独立成立的部分。可复用的片段（文件选择器、
+// 进度条）已在本文件内提取为小组件。
+//
+// 源是只读的：对话框只负责挑选本地文件并写入索引，不提供增删改源的入口。
+//
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Database,
-  Plus,
-  Trash2,
-  RefreshCw,
-  Loader2,
-  FileText,
-  Folder,
-  FolderPlus,
-  ChevronDown,
-  Check,
-  FolderOpen,
-  Pencil,
-  X,
-} from 'lucide-react';
+import { Loader2, FileText, Folder, FolderPlus, ChevronDown, Check, FolderOpen, Database } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
+  Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
 } from '@/components/ui/command';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { showConfirm } from '@/lib/ui/dialog';
 import { formatBytes, cn } from '@/lib/utils';
-import { useStorageItem } from '@/hooks/useStorageItem';
 import {
-  buildEmbedder,
-  countCollectionChunks,
-  DEFAULT_RAG_SETTINGS,
-  deleteCollectionChunks,
-  indexCollection,
-  IndexCancelledError,
-  MixedModelError,
-  normalizeCollectionName,
-  ragCollections,
-  ragSettings,
-  removeCollectionMeta,
-  renameCollectionChunks,
-  renameCollectionMeta,
-  upsertCollection,
-  type IndexProgress,
-  type RagCollection,
-  type RagSettings,
+  buildEmbedder, indexCollection, IndexCancelledError, MixedModelError,
+  normalizeCollectionName, upsertCollection,
+  type IndexProgress, type RagCollection, type RagSettings,
 } from '@/lib/rag';
 import { t } from '@/lib/i18n';
-import { debugLog } from '@/lib/debug/log';
 
 const SUPPORTED_TEXT_EXT = ['.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.csv', '.tsv', '.log', '.xml', '.html', '.htm', '.tex'];
 const PDF_EXT = '.pdf';
@@ -79,315 +45,7 @@ function isIngestable(file: File): boolean {
   return SUPPORTED_TEXT_EXT.some((ext) => name.endsWith(ext));
 }
 
-/**
- * CollectionsSection — Collections 列表 + 新建 / 重命名 / 重新索引 / 删除。
- * 「New collection」按钮在未配置 Neon 连接串时禁用，与原 /settings/rag 一致。
- */
-export function CollectionsSection() {
-  const [settings] = useStorageItem(ragSettings, DEFAULT_RAG_SETTINGS);
-  const [collections, setCollections] = useStorageItem(ragCollections, [] as RagCollection[]);
-
-  // Rename-in-progress state. When `renamingName` is non-null, the
-  // matching row in the collections list switches to an inline editor.
-  // Only one rename at a time — keeps the UI focused and avoids two
-  // inputs competing for the same row space.
-  const [renamingName, setRenamingName] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState('');
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renameBusy, setRenameBusy] = useState(false);
-
-  const startRename = useCallback((name: string) => {
-    setRenamingName(name);
-    setRenameDraft(name);
-    setRenameError(null);
-  }, []);
-
-  const cancelRename = useCallback(() => {
-    setRenamingName(null);
-    setRenameDraft('');
-    setRenameError(null);
-  }, []);
-
-  const commitRename = useCallback(async () => {
-    if (!renamingName || renameBusy) return;
-    const trimmed = renameDraft.trim();
-    if (trimmed === renamingName) {
-      // No-op rename — exit edit mode without touching storage.
-      cancelRename();
-      return;
-    }
-    const slugified = normalizeCollectionName(trimmed);
-    if (!slugified) {
-      setRenameError(t('settings.rag.nameInvalid'));
-      return;
-    }
-    if (collections.some((c) => c.name === slugified)) {
-      setRenameError(t('settings.rag.renameInUse', [slugified]));
-      return;
-    }
-    setRenameBusy(true);
-    try {
-      if (settings.neonConnectionString) {
-        await renameCollectionChunks(settings.neonConnectionString, renamingName, slugified);
-      }
-      const next = await renameCollectionMeta(renamingName, slugified);
-      setCollections(next);
-      toast.success(t('settings.rag.renameSuccess', [renamingName, slugified]));
-      cancelRename();
-    } catch (err) {
-      setRenameError((err as Error).message);
-    } finally {
-      setRenameBusy(false);
-    }
-  }, [renamingName, renameDraft, renameBusy, collections, settings.neonConnectionString, setCollections, cancelRename]);
-
-  // New-collection modal
-  const [newOpen, setNewOpen] = useState(false);
-
-  // Refresh collection chunk counts from Neon on mount + after indexing.
-  // The local `chunkCount` field can drift if the user manually edits
-  // the table; this keeps the UI honest. We re-read the canonical list
-  // from storage before writing so the closure value doesn't go stale
-  // when `setCollections` triggers a re-render that re-runs this effect.
-  useEffect(() => {
-    let cancelled = false;
-    if (!settings.neonConnectionString) return;
-    (async () => {
-      const stored = await ragCollections.getValue();
-      // Fan out all collection-count probes in parallel — the previous
-      // `for...of` + `await` made each round trip sequential, so an N-collection
-      // refresh cost N× RTT on the network. `Promise.allSettled` keeps partial
-      // failures contained (one bad collection doesn't poison the others) and
-      // collapses N updates into a single `setCollections` call.
-      const settled = await Promise.allSettled(
-        stored.map(async (c) => {
-          const live = await countCollectionChunks(settings.neonConnectionString, c.name);
-          return { name: c.name, live };
-        }),
-      );
-      if (cancelled) return;
-      const updates = new Map<string, number>();
-      settled.forEach((r, i) => {
-        const c = stored[i];
-        if (!c) return;
-        if (r.status === 'fulfilled') {
-          if (r.value.live !== c.chunkCount) updates.set(c.name, r.value.live);
-        } else {
-          debugLog.warn('rag', 'count-chunks-failed', {
-            collection: c.name,
-            error: String(r.reason),
-          });
-        }
-      });
-      if (updates.size === 0) return;
-      setCollections(
-        stored.map((p) => (updates.has(p.name) ? { ...p, chunkCount: updates.get(p.name)! } : p)),
-      );
-    })();
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.neonConnectionString]);
-
-  const handleDeleteCollection = useCallback(
-    async (c: RagCollection) => {
-      const ok = await showConfirm({
-        title: t('settings.rag.confirmDeleteTitle'),
-        description: t('settings.rag.confirmDelete', [c.name, String(c.chunkCount)]),
-        destructive: true,
-      });
-      if (!ok) return;
-      try {
-        if (settings.neonConnectionString) {
-          await deleteCollectionChunks(settings.neonConnectionString, c.name);
-        }
-        const next = await removeCollectionMeta(c.name);
-        setCollections(next);
-        toast.success(t('settings.rag.deleteSuccess', [c.name]));
-      } catch (err) {
-        toast.error(`${t('settings.rag.deleteFailed')}: ${(err as Error).message}`);
-      }
-    },
-    [settings.neonConnectionString, setCollections],
-  );
-
-  const reindexCollection = useCallback(
-    async (c: RagCollection) => {
-      // Re-indexing requires the user to re-pick files — we don't store
-      // the originals (they live on the user's disk). Open the New
-      // Collection dialog pre-filled with the same name + a banner
-      // explaining the re-pick. For v1 we keep it simple: the re-index
-      // button just opens the New dialog pre-named.
-      setNewOpen(true);
-      // The dialog reads its own state; we stash a hint via a side-channel.
-      pendingReindexRef.current = c.name;
-    },
-    [],
-  );
-  const pendingReindexRef = useRef<string | null>(null);
-
-  return (
-    <section className="space-y-3 rounded-lg border border-border mx-3 mt-3 p-4">
-      {/* Title + description — stacked vertically so the long hint reads
-          full-width instead of being squeezed next to the title. The
-          "+ New collection" button is moved to the bottom of the section
-          so all the action affordances line up at the end. */}
-      <div className="space-y-1">
-        <h3 className="text-sm font-medium">{t('settings.rag.collections')}</h3>
-        <p className="text-xs text-muted-foreground">{t('settings.rag.collectionsHint')}</p>
-      </div>
-
-      {collections.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border py-6 text-center text-xs text-muted-foreground">
-          {t('settings.rag.noCollections')}
-        </div>
-      ) : (
-        <ul className="divide-y divide-border rounded-md border border-border">
-          {collections.map((c) => {
-            const isRenaming = renamingName === c.name;
-            return (
-              <li key={c.name} className="flex items-center gap-3 px-3 py-2">
-                <Database className="size-4 text-violet-400 shrink-0" />
-                {isRenaming ? (
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <Input
-                      autoFocus
-                      value={renameDraft}
-                      onChange={(e) => {
-                        setRenameDraft(e.target.value);
-                        if (renameError) setRenameError(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          void commitRename();
-                        } else if (e.key === 'Escape') {
-                          e.preventDefault();
-                          cancelRename();
-                        }
-                      }}
-                      disabled={renameBusy}
-                      placeholder={t('settings.rag.renamePlaceholder')}
-                      className="h-7 text-xs"
-                    />
-                    {renameError && (
-                      <p className="text-[0.7rem] text-destructive truncate">
-                        {renameError}
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm truncate">{c.name}</p>
-                    <p className="text-xs text-muted-foreground truncate">
-                      {c.chunkCount} chunks · {c.embedModel} ·{' '}
-                      {new Date(c.updatedAt).toLocaleDateString()}
-                    </p>
-                    {/* Orphan hint — the cost of add-only being the default.
-                        Deliberately NOT called "orphaned": we cannot tell a
-                        deleted file from one simply not picked last time. */}
-                    {(c.notInLastRun?.length ?? 0) > 0 && (
-                      <p className="text-[0.7rem] text-amber-700 dark:text-amber-400 truncate">
-                        {t('settings.rag.notInLastRun', [String(c.notInLastRun!.length)])}
-                      </p>
-                    )}
-                  </div>
-                )}
-                {isRenaming ? (
-                  <>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() => void commitRename()}
-                      disabled={renameBusy}
-                      title={t('settings.rag.renameCollection')}
-                    >
-                      <Check className="size-3.5" />
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={cancelRename}
-                      disabled={renameBusy}
-                      title={t('settings.rag.cancel')}
-                    >
-                      <X className="size-3.5" />
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() => startRename(c.name)}
-                      title={t('settings.rag.renameCollection')}
-                    >
-                      <Pencil className="size-3.5" />
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() => void reindexCollection(c)}
-                      title={t('settings.rag.reindex')}
-                    >
-                      <RefreshCw className="size-3.5" />
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => void handleDeleteCollection(c)}
-                      title={t('settings.rag.deleteCollection')}
-                    >
-                      <Trash2 className="size-3.5" />
-                    </Button>
-                  </>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      {/* "+ New collection" anchored at the bottom of the section so all
-          action affordances stack together (the empty-state hint fills the
-          middle when the list is empty). */}
-      <div className="flex justify-center">
-        <Button
-          size="sm"
-          disabled={!settings.neonConnectionString}
-          onClick={() => {
-            pendingReindexRef.current = null;
-            setNewOpen(true);
-          }}
-        >
-          <Plus className="size-3.5" />
-          {t('settings.rag.newCollection')}
-        </Button>
-      </div>
-
-      <NewCollectionDialog
-        open={newOpen}
-        onOpenChange={setNewOpen}
-        settings={settings}
-        existingNames={collections.map((c) => c.name)}
-        initialName={pendingReindexRef.current}
-        onCreated={(created) => {
-          // upsertCollection was already called inside the dialog; we
-          // just refresh local state from storage to be safe.
-          void (async () => {
-            const next = await ragCollections.getValue();
-            setCollections(next);
-            void created;
-          })();
-        }}
-      />
-    </section>
-  );
-}
-
-// ─── New-collection dialog ─────────────────────────────────────────
-
-interface NewCollectionDialogProps {
+export interface ReindexDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   settings: RagSettings;
@@ -396,17 +54,17 @@ interface NewCollectionDialogProps {
    *  collection. The user must still re-pick files (we don't keep the
    *  originals on disk). */
   initialName: string | null;
-  onCreated: (created: RagCollection) => void;
+  onIndexed: (updated: RagCollection) => void;
 }
 
-function NewCollectionDialog({
+export function ReindexDialog({
   open,
   onOpenChange,
   settings,
   existingNames,
   initialName,
-  onCreated,
-}: NewCollectionDialogProps) {
+  onIndexed,
+}: ReindexDialogProps) {
   // The folder this dialog operates on. `null` means "no folder chosen
   // yet — user must pick or create one". When non-null, `files` belong
   // to that folder (visually nested + indexed under that name).
@@ -447,9 +105,10 @@ function NewCollectionDialog({
     }
   }, [open, initialName]);
 
-  // 卸载时也要中止——与 `ReindexDialog` 保持一致。只靠上面的 `open === false`
-  // 分支覆盖不到「索引进行中用户离开/组件被卸载」这条路径，结果是索引继续跑、
-  // 并在已卸载的组件上 setState。
+  // 卸载时也要中止。这个对话框现在**挂在每一行上**（重新索引流程），因此比
+  // 以前的页面级版本更容易在索引进行中被卸载——例如列表刷新导致该行重挂，
+  // 或用户中途离开设置页。只靠上面的 `open === false` 分支覆盖不到这些路径，
+  // 结果就是索引继续跑、并在已卸载的组件上 setState。
   useEffect(() => () => {
     abortRef.current?.abort();
     abortRef.current = null;
@@ -457,9 +116,11 @@ function NewCollectionDialog({
 
   const ingestable = useMemo(() => files.filter(isIngestable), [files]);
   const skipped = files.length - ingestable.length;
+
   /** 当前生效的名字。两个来源：`folder`（选完文件夹自动推导）或 `draftNew`
-   *  （用户手改 / 走「挑文件」时手输）。必须同时看两者——用户一动手改，
-   *  `onChange` 就把 `folder` 置空，只看 `folder` 会让名字瞬间变空、按钮变灰。 */
+   *  （用户手改 / 走「挑文件」时手输）。**必须同时看两者**——用户一动手改，
+   *  `onChange` 就把 `folder` 置空，只看 `folder` 会让名字瞬间变空、Index 按钮
+   *  立刻变灰。 */
   const nameInput = draftNew || folder || '';
   const slug = normalizeCollectionName(nameInput);
   const nameValid = slug !== null;
@@ -565,10 +226,12 @@ function NewCollectionDialog({
           });
         },
       });
-      // 不为「新建」写入 0 chunk 的 collection——与 RagSection 的同名 guard 一致。
-      // 两个入口必须行为相同，否则用户从侧边栏仍能建出查不到东西的空 collection。
-      // 已存在的 collection 重索引到 0 chunk 则照常更新（sync 模式刚删空时 metadata
-      // 必须跟上）。
+      // 不为「新建」写入 0 chunk 的 collection。
+      //
+      // `indexCollection` 在**没有任何文件产出 chunk 时仍返回成功**（`chunkCount: 0`）
+      // ——典型场景是扫描版 PDF 没有文字层。以前这里照样 upsert，于是列表里留下一个
+      // 永远查不到东西的空 collection。新建时拒绝它；已存在的 collection 重索引到 0
+      // chunk 则照常更新（那可能是 sync 模式刚把内容删空，metadata 必须跟上）。
       if (result.chunkCount === 0 && !isExisting) {
         setProgress(null);
         setError(t('settings.rag.emptyIndexError'));
@@ -598,7 +261,7 @@ function NewCollectionDialog({
             ])
           : t('settings.rag.indexDone', [String(result.chunkCount)]),
       );
-      onCreated(collection);
+      onIndexed(collection);
       // Notify parent of updated list (parent also reads from storage).
       void next;
       onOpenChange(false);
@@ -625,7 +288,7 @@ function NewCollectionDialog({
       setRunning(false);
       abortRef.current = null;
     }
-  }, [slug, nameValid, ingestable, settings, syncMode, onCreated, onOpenChange]);
+  }, [slug, nameValid, ingestable, settings, syncMode, onIndexed, onOpenChange]);
 
   const progressLabel = (() => {
     if (!progress) return null;
@@ -693,9 +356,10 @@ function NewCollectionDialog({
         </DialogHeader>
 
         <div className="space-y-3">
-          {/* Primary action: pick a folder. The name derives from it, so this
-              is never disabled — it used to require a name first, which
-              inverted the dependency. */}
+          {/* Primary action: pick a folder. This is step one and the source
+              of the name, so it is never disabled — it used to be gated on
+              `!folder`, which required a name before you could pick files,
+              inverting the real dependency. */}
           <div className="space-y-1.5">
             <Button
               type="button"
@@ -712,9 +376,12 @@ function NewCollectionDialog({
             </p>
           </div>
 
-          {/* The name is an outcome, not a prerequisite. On the "pick files"
-              path there is no folder name, so this is the only naming entry
-              point and cannot be gated on `folder` alone. */}
+          {/* The name is an OUTCOME, not a prerequisite: it appears after a
+              folder is picked, pre-filled with the folder's slug. Still
+              editable — wanting a different name is legitimate, but that is
+              an adjustment, not a precondition. On the "pick files" path
+              (no folder name) this input is the only way to name it, so it
+              cannot be gated on `folder` alone. */}
           {(folder !== null || draftNew.length > 0 || files.length > 0) && (
             <div className="space-y-1.5">
               <Label className="text-xs">{t('settings.rag.collectionName')}</Label>
@@ -746,7 +413,9 @@ function NewCollectionDialog({
           )}
 
           {/* Only re-indexing needs "switch to a different existing
-              collection". */}
+              collection" — the create flow has no such concept. The two
+              flows used to share this dropdown, which conflated "pick a
+              target" with "invent a name". */}
           {isExisting && (
             <div className="space-y-1.5">
               <Label className="text-xs">{t('settings.rag.folderLabel')}</Label>
@@ -837,6 +506,17 @@ function NewCollectionDialog({
                 </span>
               </span>
             </label>
+          )}
+
+          {/* Contextual Retrieval cost hint — only when the master toggle
+              is on, so the user knows they're about to spend 1 LLM call
+              per chunk before clicking Index. Same amber styling as the
+              re-index banner so visually consistent with the "heads-up"
+              pattern. */}
+          {settings.contextualRetrievalEnabled && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+              {t('settings.rag.contextualHint')}
+            </div>
           )}
 
           {/* ─── Files inside the chosen folder ─── */}

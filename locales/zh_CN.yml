@@ -538,26 +538,16 @@ settings:
       headers: 自定义 Headers
   rag:
     title: 知识库 (RAG)
-    infrastructureTitle: 基础设施
     retrievalRankingTitle: 检索与排序
     connectionTitle: 连接
     connectionLabel: Neon 连接字符串
     connectionHint: Neon 连接字符串——从项目控制台获取。
-    testConnection: 测试连接
-    connectionOk: 已连接 — pgvector 就绪
-    connectionFailed: 连接失败
-    connectionStatusReady: 就绪
-    connectionStatusWarn: 缺少 pgvector
-    connectionStatusError: 连接失败
-    pgvectorMissing: 已连接，但缺少 pgvector 扩展。请到 Neon 控制台 → Extensions 启用。
-    bootstrapFailed: 建表失败
     embedderTitle: Embedding 模型
     embedderHint: OpenAI 兼容的 `/embeddings` 接口，默认 CLIProxyAPI 端口 8317。
     embedderBaseUrl: Base URL
     embedderApiKey: API Key（可选）
     embedderModel: 模型
     embedderDim: 维度
-    chunkingTitle: 分块
     chunkSize: 块大小（字符）
     chunkOverlap: 重叠（字符）
     collections: 知识库
@@ -581,17 +571,9 @@ settings:
     retrievalModeRecommendedBadge: 推荐
     retrievalModeHybridSubLabel: 结合向量相似度与关键词匹配，召回更全面。
     retrievalModeVector: 仅向量
-    hybridScoreWarning: 混合模式的相关性标尺（RRF）与纯向量不同；之前设的阈值可能过高，建议先调到 0 试试。
-    pinGateTitle: Pinned RAG 召回门槛
-    pinGateHint: 话题无关时跳过已 pin 的 envelope。0 = 始终附带。
-    pinMinScore: 最低相关性分数
-    pinMinScoreHint: 数值越低召回越多，越高越严格。建议从 0 开始尝试。
     contextualHint: chunks 将带上 LLM 生成的上下文前缀（每块约 1 次 LLM 调用）。
     newCollection: 新建知识库
-    newCollectionHint: 先选择文件夹（已有或新建），再把文件放进去。索引在本地完成——文件留在你磁盘上，向量写入 Neon。
-    newCollectionName: 知识库名称
     nameInvalid: 名称必须以字母或数字开头，只允许字母、数字、横线、下划线。
-    nameExists: 已存在名为「$1」的知识库。
     folderLabel: 文件夹
     folderPlaceholder: 选择文件夹…
     folderNewOption: + 新建文件夹…
@@ -610,15 +592,68 @@ settings:
     index: 索引
     cancel: 取消
     indexDone: 已索引 $1 块
+    collectionsSourceHint: 磁盘上的文件夹是事实来源。请在那里修改文件，然后重新索引。
+    dataSourcesTitle: 数据来源
+    dataSourcesHint: 数据库连接与嵌入模型——设置一次，重新索引后生效。
+    healthEmbedderDimMismatch: 模型输出 $2 维，而配置为 $1 维
+    addFolder: 添加文件夹
+    addFolderHint: 选择要索引的文件夹。
+    reindexTitle: 重新索引知识库
+    reindexHint: 重新选择文件夹以刷新该知识库。
+    chooseFolder: 选择文件夹…
+    chooseFolderHint: 索引在本地进行——文件留在你的磁盘上，只有向量发往 Neon。
+    collectionName: 知识库名称
+    nameDerivedHint: 由文件夹名推导而来——想改也可以。
+    rowMeta: '$1 块 · $2 · $3'
+    rowStateOk: 一致
+    rowStateStale: 有源不在最近一次索引中
+    rowStateEmpty: 空——未索引任何内容
+    rowStateModelMismatch: 用 $1 索引，而当前模型是 $2
+    collectionActions: $1 的操作
+    reindexMenu: 重新索引…
+    sourcesReadOnlyHint: 只读——请改磁盘上的文件后重新索引。
+    sourcesEmpty: 没有记录来源
+    sourceMeta: '$1 块 · $2'
+    setupTitle: 开始使用
+    stepConnect: 连接数据库
+    stepEmbedder: 配置嵌入模型
+    stepCollection: 创建知识库
+    advancedTitle: 高级
+    advancedHint: 分块与 Contextual Retrieval——设置一次，重新索引后生效。
+    healthDatabase: 数据库
+    healthEmbedder: 嵌入模型
+    healthCollections: 知识库
+    healthCheck: 检查
+    healthCheckAria: 检查$1
+    healthChecking: 检查中…
+    healthNotChecked: 尚未检查
+    healthDbOk: 已连接 · pgvector $1
+    healthDbNoVector: 已连接，但缺少 pgvector
+    healthEmbedderOk: 模型 $1 · $2 维
+    healthEmbedderError: 嵌入端点无响应
+    healthCollectionsOk: 所有知识库与索引一致
+    healthCollectionsDrift: 有 $1 个知识库与索引不一致——重新索引以同步
+    healthCollectionsEmpty: 还没有知识库
+    healthCollectionsError: 无法连接数据库核对知识库
+    indexDonePruned: 已索引 $1 块，并清理 $2 行旧数据。
+    syncToggle: 让知识库与本次选择一致
+    syncToggleHint: 关闭：只新增或更新本次选中的文件。开启：同时删除知识库中本次未选中的文件——删除前会先列出确切文件清单。
+    syncConfirmTitle: 从该知识库中移除文件？
+    syncConfirmBody: 下列文件存在于知识库中但不在本次选择里。索引成功后将删除它们：
+    syncConfirmChunks: $1 块
+    notInLastRun: 有 $1 个源不在最近一次索引中
+    mixedModelError: 该知识库里已存有另一种嵌入模型的向量。请把知识库中的文件全部重新索引，或开启同步以替换不再需要的文件。
+    emptyIndexError: 未能从所选文件中提取出任何文本，因此没有建立索引。扫描版 PDF 需要文字层——请先做 OCR 再重试。
+    bootstrapWarningHnsw: 无法创建向量检索索引：$1。关键词检索仍可用，但大集合上的向量检索会变慢。
+    embedderProbeFailed: 无法连接嵌入端点：$1。数据库已就绪，但在此问题解决前索引与检索都会失败。
+    dimCorrected: 已按模型实际输出把嵌入维度更正为 $1。
+    dimMismatch: 模型实际输出 $2 维向量，而当前设置为 $1。请更新设置，使数据库列宽与模型一致。
+    dimMismatchUse: 改用 $1
     indexFailed: 索引失败
     reindex: 重新索引（重新选文件）
     renameCollection: 重命名知识库
-    renameCollectionLabel: 新名称
     renamePlaceholder: 输入新名称
-    renameConfirm: 将「$1」重命名为「$2」？
-    renameConfirmHint: Neon 中已有的块会重新打上新的标签。Embedding 不会重新生成 —— 搜索结果完全不变。
     renameSuccess: 已将「$1」重命名为「$2」
-    renameFailed: 重命名失败
     renameInUse: 已存在名为「$1」的知识库
     deleteCollection: 删除知识库
     confirmDeleteTitle: 删除知识库？

@@ -26,6 +26,10 @@ export function onDialogChange(fn: Listener): () => void {
 export interface ConfirmOptions {
   title: string;
   description?: string;
+  /** Itemised list rendered below `description` as real block content (one
+   *  row per entry). Use this instead of embedding newlines in `description`:
+   *  that renders inside a single `<p>`, where they collapse. */
+  detailLines?: string[];
   /** Defaults to t('common.confirm'). */
   confirmText?: string;
   /** Defaults to t('common.cancel'). */

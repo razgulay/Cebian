@@ -1,143 +1,80 @@
 //
 // RagSection — settings UI for the RAG (knowledge base) system.
 //
-// Layout (5 work-stream cards in dependency order, Subtask U1):
-//   1. Infrastructure        — Neon connection + Embedding model.
-//   2. Ingestion Pipeline    — Chunking + nested Contextual Retrieval (Lớp 0).
-//   3. Retrieval & Ranking   — Retrieval mode radio + relevance gate + Rerank.
-//   4. Agentic Capability    — opt-in `rag_search` tool toggle (Subtask 4).
-//   5. Data Management       — Collections list (create / rename / re-index / delete).
+// 页面顺序（自上而下，按使用频率排）：
+//   1. Health strip        — 三枚状态指示，各有独立的检查按钮（`rag/HealthStrip`）
+//   2. Setup stepper       — 三步引导，有知识库后自动消失（`rag/SetupStepper`）
+//   3. Collections         — 知识库列表，日常操作的对象（`rag/CollectionList`）
+//   4. Retrieval & ranking — 检索模式 + Rerank + `rag_search` 开关（`rag/RetrievalPanel`）
+//   5. Data sources        — 连接串 + 嵌入模型，**默认折叠**（`rag/EmbedderForm`）
+//   6. Advanced            — 分块与 Contextual Retrieval，**默认折叠**（`rag/AdvancedPanel`）
 //
-// "Progressive disclosure": each opt-in feature (Contextual Retrieval,
-// Rerank, rag_search) sits behind a `<Switch>` so the section collapses
-// to title + 1-line hint when off. Retrieval mode uses a `RadioGroup`
-// because it's a mutually exclusive choice between two valid paths.
+// 第 5、6 项是「设置一次就不再动」的旋钮，所以折叠并排在日常操作之后。
+//
+// 这里只剩**页面级**状态与装配；各部分已拆到 `components/settings/rag/`。
+//
+// 三处刻意的行为约束：
+//   • 健康检查**只在点击时**发起请求，开页不跑（每项检查都是一次真实往返）。
+//   • 知识库的源是**只读**的：改磁盘上的文件再 Reindex，UI 不提供增删改源。
+//   • 检查（Check）是只读的：探测到嵌入宽度与设置不符时只提示，不代改设置。
+//
+// 改名已从本页移除——名字在创建时由文件夹名推导，改名会让名字与磁盘不符。
+// 相关性阈值也已移除：两种模式的分数刻度不同，见 `rag/RetrievalPanel` 的说明。
 //
 // New-collection flow opens a modal with: folder picker, file picker
 // (multi-file + folder), inline contextual-hint when CR is on, and a
 // live progress bar during indexing.
 //
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Switch } from '@/components/ui/switch';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Badge } from '@/components/ui/badge';
+import { useCallback, useState } from 'react';
 import {
   Database,
-  Plus,
-  Trash2,
-  RefreshCw,
-  Loader2,
-  FileText,
-  CheckCircle2,
-  Sparkles,
-  Folder,
-  FolderPlus,
-  ChevronDown,
-  Check,
-  FolderOpen,
-  Pencil,
-  X,
-  Layers,
-  SlidersHorizontal,
-  Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { showConfirm } from '@/lib/ui/dialog';
-import { formatBytes, cn } from '@/lib/utils';
 import { useStorageItem } from '@/hooks/useStorageItem';
 import {
   bootstrapSchema,
-  buildEmbedder,
   countCollectionChunks,
   deleteCollectionChunks,
-  indexCollection,
-  IndexCancelledError,
-  normalizeCollectionName,
   ragCollections,
   ragSettings,
   removeCollectionMeta,
-  renameCollectionChunks,
-  renameCollectionMeta,
   testConnection,
-  upsertCollection,
-  type IndexProgress,
+  probeEmbedder,
+  updateRagSettings,
+  type BootstrapWarning,
   type RagCollection,
   type RagSettings,
 } from '@/lib/rag';
+import { HealthStrip, type HealthState } from '@/components/settings/rag/HealthStrip';
+import { CollectionList } from '@/components/settings/rag/CollectionList';
+import { EmbedderForm } from '@/components/settings/rag/EmbedderForm';
+import { AdvancedPanel } from '@/components/settings/rag/AdvancedPanel';
+import { RetrievalPanel } from '@/components/settings/rag/RetrievalPanel';
+import { SetupStepper } from '@/components/settings/rag/SetupStepper';
+import { CollapsibleSection } from '@/components/settings/rag/CollapsibleSection';
+import { ReindexDialog } from '@/components/settings/rag/ReindexDialog';
 import { t } from '@/lib/i18n';
 import { debugLog } from '@/lib/debug/log';
 
-const SUPPORTED_TEXT_EXT = ['.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.csv', '.tsv', '.log', '.xml', '.html', '.htm', '.tex'];
-const PDF_EXT = '.pdf';
+/** 探测嵌入端点的外层上限。`postEmbeddings` 自身每次尝试已有 15s 超时，但那是
+ *  **单次**的——3 次尝试加退避最坏可拖到约 48s。这里给整个调用一个总上限，免得
+ *  端点挂住时按钮一直转。 */
+const EMBEDDER_PROBE_TIMEOUT_MS = 15_000;
 
-/** Decide if a picked file can be ingested. Used to filter FileList
- *  before we even attempt to read it. Unknown extensions are skipped
- *  silently — the user gets a toast count after the picker closes. */
-function isIngestable(file: File): boolean {
-  const name = file.name.toLowerCase();
-  if (name.endsWith(PDF_EXT)) return true;
-  return SUPPORTED_TEXT_EXT.some((ext) => name.endsWith(ext));
-}
-
-/** Connection-state chip — colored dot + short label next to Test.
- *  Mirrors the `size-2 rounded-full` dot pattern from
- *  `components/settings/mcp/MCPServerRow.tsx` so the connection
- *  state is read in 200ms instead of 1000ms. Returns null when idle
- *  (haven't tested yet) so we don't clutter the row before the
- *  first click. */
-function ConnectionStatusChip({
-  state,
-}: {
-  state:
-    | { kind: 'idle' }
-    | { kind: 'testing' }
-    | { kind: 'ok'; pgvector: boolean; version: string }
-    | { kind: 'err'; message: string };
-}) {
-  if (state.kind === 'idle' || state.kind === 'testing') return null;
-  if (state.kind === 'err') {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-destructive">
-        <span aria-hidden className="size-2 rounded-full bg-destructive shrink-0" />
-        {t('settings.rag.connectionStatusError')}
-      </span>
-    );
+/** 把 `BootstrapWarning` 映射成面向用户的文案。`code` 分支在这里——新增
+ *  一个 code 却沿用 HNSW 的文案，是那种不会报错的静默错误。 */
+function bootstrapWarningText(w: BootstrapWarning): string {
+  switch (w.code) {
+    case 'hnsw-index-failed':
+      return t('settings.rag.bootstrapWarningHnsw', [w.detail]);
+    case 'embedder-probe-failed':
+      return t('settings.rag.embedderProbeFailed', [w.detail]);
   }
-  if (!state.pgvector) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
-        <span aria-hidden className="size-2 rounded-full bg-amber-500 shrink-0" />
-        {t('settings.rag.connectionStatusWarn')}
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-      <span aria-hidden className="size-2 rounded-full bg-emerald-500 shrink-0" />
-      {t('settings.rag.connectionStatusReady')}
-    </span>
-  );
 }
 
 export function RagSection() {
@@ -173,138 +110,192 @@ export function RagSection() {
   } as RagSettings);
   const [collections, setCollections] = useStorageItem(ragCollections, [] as RagCollection[]);
 
-  // Rename-in-progress state. When `renamingName` is non-null, the
-  // matching row in the collections list switches to an inline editor.
-  // Only one rename at a time — keeps the UI focused and avoids two
-  // inputs competing for the same row space.
-  const [renamingName, setRenamingName] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState('');
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renameBusy, setRenameBusy] = useState(false);
-
-  const startRename = useCallback((name: string) => {
-    setRenamingName(name);
-    setRenameDraft(name);
-    setRenameError(null);
-  }, []);
-
-  const cancelRename = useCallback(() => {
-    setRenamingName(null);
-    setRenameDraft('');
-    setRenameError(null);
-  }, []);
-
-  const commitRename = useCallback(async () => {
-    if (!renamingName || renameBusy) return;
-    const trimmed = renameDraft.trim();
-    if (trimmed === renamingName) {
-      // No-op rename — exit edit mode without touching storage.
-      cancelRename();
-      return;
-    }
-    const slugified = normalizeCollectionName(trimmed);
-    if (!slugified) {
-      setRenameError(t('settings.rag.nameInvalid'));
-      return;
-    }
-    if (collections.some((c) => c.name === slugified)) {
-      setRenameError(t('settings.rag.renameInUse', [slugified]));
-      return;
-    }
-    setRenameBusy(true);
-    try {
-      if (settings.neonConnectionString) {
-        await renameCollectionChunks(settings.neonConnectionString, renamingName, slugified);
-      }
-      const next = await renameCollectionMeta(renamingName, slugified);
-      setCollections(next);
-      toast.success(t('settings.rag.renameSuccess', [renamingName, slugified]));
-      cancelRename();
-    } catch (err) {
-      setRenameError((err as Error).message);
-    } finally {
-      setRenameBusy(false);
-    }
-  }, [renamingName, renameDraft, renameBusy, collections, settings.neonConnectionString, setCollections, cancelRename]);
-
-  // Connection-test state. `null` = haven't tested yet.
-  const [testState, setTestState] = useState<
-    | { kind: 'idle' }
-    | { kind: 'testing' }
-    | { kind: 'ok'; pgvector: boolean; version: string }
-    | { kind: 'err'; message: string }
-  >({ kind: 'idle' });
+  /** 探测到的宽度与已保存值不符时置位。Test 只读，所以这里只**提示**；
+   *  用户点按钮才写回设置。 */
+  const [dimSuggestion, setDimSuggestion] = useState<
+    { probed: number; configured: number } | null
+  >(null);
 
   // New-collection modal
   const [newOpen, setNewOpen] = useState(false);
 
-  // Refresh collection chunk counts from Neon on mount + after indexing.
-  // The local `chunkCount` field can drift if the user manually edits
-  // the table; this keeps the UI honest. We re-read the canonical list
-  // from storage before writing so the closure value doesn't go stale
-  // when `setCollections` triggers a re-render that re-runs this effect.
-  useEffect(() => {
-    let cancelled = false;
-    if (!settings.neonConnectionString) return;
-    (async () => {
-      const stored = await ragCollections.getValue();
-      // Fan out all collection-count probes in parallel — the previous
-      // `for...of` + `await` made each round trip sequential, so an N-collection
-      // refresh cost N× RTT on the network. `Promise.allSettled` keeps partial
-      // failures contained (one bad collection doesn't poison the others) and
-      // collapses N updates into a single `setCollections` call.
-      const settled = await Promise.allSettled(
-        stored.map(async (c) => {
-          const live = await countCollectionChunks(settings.neonConnectionString, c.name);
-          return { name: c.name, live };
-        }),
-      );
-      if (cancelled) return;
-      const updates = new Map<string, number>();
-      settled.forEach((r, i) => {
-        const c = stored[i];
-        if (!c) return;
-        if (r.status === 'fulfilled') {
-          if (r.value.live !== c.chunkCount) updates.set(c.name, r.value.live);
-        } else {
-          debugLog.warn('rag', 'count-chunks-failed', {
-            collection: c.name,
-            error: String(r.reason),
-          });
-        }
-      });
-      if (updates.size === 0) return;
-      setCollections(
-        stored.map((p) => (updates.has(p.name) ? { ...p, chunkCount: updates.get(p.name)! } : p)),
-      );
-    })();
-    return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.neonConnectionString]);
+  /** 顶部三枚健康 pill 的状态。初始 `idle`——**开页不发任何请求**。
+   *  每次检查都是一次真实的 Neon / HTTP 往返，Neon 免费版冷启动要几秒，
+   *  所以只在用户点 Check 时才跑。 */
+  const [healthDb, setHealthDb] = useState<HealthState>({ kind: 'idle' });
+  const [healthEmbedder, setHealthEmbedder] = useState<HealthState>({ kind: 'idle' });
+  const [healthCollections, setHealthCollections] = useState<HealthState>({ kind: 'idle' });
 
-  const handleTest = useCallback(async () => {
-    setTestState({ kind: 'testing' });
+  /** 对账：本地 metadata 的 chunkCount vs Neon 实际行数。
+   *
+   *  从前这件事在 mount 时自动做（对每个 collection fan-out 一次查询）。
+   *  改成按需触发：进设置页不再打一串 Neon 请求，代价是数字可能显示为上次
+   *  索引时的值，直到用户主动核对。 */
+  const checkCollections = useCallback(async () => {
+    if (!settings.neonConnectionString) return;
+    setHealthCollections({ kind: 'checking' });
+    const stored = await ragCollections.getValue();
+    if (stored.length === 0) {
+      setHealthCollections({ kind: 'ok', detail: t('settings.rag.healthCollectionsEmpty') });
+      return;
+    }
+    const settled = await Promise.allSettled(
+      stored.map(async (c) => ({
+        name: c.name,
+        live: await countCollectionChunks(settings.neonConnectionString, c.name),
+      })),
+    );
+    const updates = new Map<string, number>();
+    let failures = 0;
+    settled.forEach((r, i) => {
+      const c = stored[i];
+      if (!c) return;
+      if (r.status === 'fulfilled') {
+        if (r.value.live !== c.chunkCount) updates.set(c.name, r.value.live);
+      } else {
+        failures++;
+        debugLog.warn('rag', 'count-chunks-failed', {
+          collection: c.name,
+          error: String(r.reason),
+        });
+      }
+    });
+    if (failures === settled.length) {
+      setHealthCollections({ kind: 'error', detail: t('settings.rag.healthCollectionsError') });
+      return;
+    }
+    // 对上了就顺手把本地数字修正——这正是这次检查的目的。
+    //
+    // **写入前重新读一次**，只把对上的计数并进去，而不是回写探测开始时那份快照。
+    // 中间隔着 N 次网络往返（Neon 冷启动要几秒），期间用户完全可能删掉或重命名
+    // 某个 collection；回写旧快照会把已删的 collection **复活**。旧实现在 effect
+    // 里至少有个 `cancelled` 守卫，换成按钮触发后连那个也没有了。
+    if (updates.size > 0) {
+      const fresh = await ragCollections.getValue();
+      setCollections(
+        fresh.map((p) => (updates.has(p.name) ? { ...p, chunkCount: updates.get(p.name)! } : p)),
+      );
+    }
+    setHealthCollections(
+      updates.size > 0
+        ? { kind: 'warn', detail: t('settings.rag.healthCollectionsDrift', [String(updates.size)]) }
+        : { kind: 'ok', detail: t('settings.rag.healthCollectionsOk') },
+    );
+  }, [settings.neonConnectionString, setCollections]);
+
+  /** Check Database：连得上吗、pgvector 在不在、schema 是否就绪。
+   *
+   *  仍会跑 `bootstrapSchema`（幂等），因为它需要真实宽度才能建列——而宽度
+   *  来自 Embedder 那枚 pill 的探测。这里用探测值（失败则回退到已保存值），
+   *  并把探测结果作为「嵌入端点不可达」的附加提示带出来，而不是静默吞掉。 */
+  const checkDatabase = useCallback(async () => {
+    setHealthDb({ kind: 'checking' });
+    // 建议先清空，免得它比产生它的那次探测活得更久。
+    setDimSuggestion(null);
     const result = await testConnection(settings.neonConnectionString);
     if (!result.ok) {
-      setTestState({ kind: 'err', message: result.error ?? 'Unknown error' });
-      toast.error(`${t('settings.rag.connectionFailed')}: ${result.error ?? 'unknown'}`);
+      setHealthDb({ kind: 'error', detail: result.error ?? 'Unknown error' });
       return;
     }
     if (!result.pgvector) {
-      setTestState({ kind: 'ok', pgvector: false, version: result.version });
-      toast.warning(t('settings.rag.pgvectorMissing'));
+      setHealthDb({ kind: 'warn', detail: t('settings.rag.healthDbNoVector') });
       return;
     }
-    setTestState({ kind: 'ok', pgvector: true, version: result.version });
-    // Bootstrap the schema now that we know pgvector is available —
-    // idempotent so re-running is safe.
+
+    // 探测真实宽度：列一旦建成 `vector(n)`，宽度不符的数据就再也写不进去，
+    // 所以列宽必须跟着模型走。探测失败则回退到已保存值，让数据库检查继续。
+    const probe = await probeEmbedder(settings, AbortSignal.timeout(EMBEDDER_PROBE_TIMEOUT_MS));
+    const dim = probe.ok ? probe.dim : settings.embedderDim;
+
     try {
-      await bootstrapSchema(settings.neonConnectionString);
-      toast.success(t('settings.rag.connectionOk'));
+      const { warnings } = await bootstrapSchema(settings.neonConnectionString, dim);
+      // 探测结果与已保存值不符时**只提示，不代改**——Check 是只读的，静默改写
+      // 用户设置是意外契约。用户点按钮才写。
+      if (probe.ok && probe.dim !== settings.embedderDim) {
+        setDimSuggestion({ probed: probe.dim, configured: settings.embedderDim });
+      }
+      const notices: BootstrapWarning[] = [...warnings];
+      if (!probe.ok) {
+        notices.push({ code: 'embedder-probe-failed', detail: probe.error ?? 'unknown error' });
+      }
+      if (notices.length > 0) {
+        // 非致命问题就地展示——service worker 里的 console.warn 基本看不见。
+        setHealthDb({
+          kind: 'warn',
+          detail: notices.map((n) => bootstrapWarningText(n)).join(' '),
+        });
+      } else {
+        setHealthDb({ kind: 'ok', detail: t('settings.rag.healthDbOk', [result.version]) });
+      }
     } catch (err) {
-      toast.warning(`${t('settings.rag.bootstrapFailed')}: ${(err as Error).message}`);
+      setHealthDb({ kind: 'error', detail: (err as Error).message });
     }
-  }, [settings.neonConnectionString]);
+  }, [
+    settings.neonConnectionString,
+    settings.embedderBaseUrl,
+    settings.embedderApiKey,
+    settings.defaultEmbedModel,
+    settings.embedderDim,
+  ]);
+
+  /** Check Embedder：端点可达吗、模型真实输出多宽。与数据库检查彼此独立——
+   *  模型配错和数据库连不上是两回事，混在一个按钮里无法区分。 */
+  const checkEmbedder = useCallback(async () => {
+    setHealthEmbedder({ kind: 'checking' });
+    // 与 checkDatabase 一样先清空：否则上一次留下的建议会活过一次结果不同的检查，
+    // 提示用户「改用 N」——而 N 可能已经是他手上就有的值。
+    setDimSuggestion(null);
+    const probe = await probeEmbedder(settings, AbortSignal.timeout(EMBEDDER_PROBE_TIMEOUT_MS));
+    if (!probe.ok) {
+      setHealthEmbedder({ kind: 'error', detail: probe.error ?? t('settings.rag.healthEmbedderError') });
+      return;
+    }
+    const mismatch = probe.dim !== settings.embedderDim;
+    setHealthEmbedder({
+      kind: mismatch ? 'warn' : 'ok',
+      // 宽度不符时必须**在这里**说清楚。一键采纳的横幅在「数据来源」折叠块里，
+      // 而那个块默认关着——只靠一个琥珀色圆点，用户看不到该怎么办。
+      detail: mismatch
+        ? t('settings.rag.healthEmbedderDimMismatch', [
+            String(settings.embedderDim),
+            String(probe.dim),
+          ])
+        : t('settings.rag.healthEmbedderOk', [probe.model, String(probe.dim)]),
+    });
+    // 宽度不符时给出与 Database 检查一致的一键采纳入口。
+    if (mismatch) {
+      setDimSuggestion({ probed: probe.dim, configured: settings.embedderDim });
+    }
+  }, [
+    settings.embedderBaseUrl,
+    settings.embedderApiKey,
+    settings.defaultEmbedModel,
+    settings.embedderDim,
+  ]);
+
+  /** 采纳探测到的宽度。只由显式按钮调用——检查本身是只读的，见
+   *  `checkDatabase` / `checkEmbedder` 里的说明。 */
+  const adoptProbedDim = useCallback(async () => {
+    if (!dimSuggestion) return;
+    const next = await updateRagSettings({ embedderDim: dimSuggestion.probed });
+    setSettings(next);
+    setDimSuggestion(null);
+    toast.success(t('settings.rag.dimCorrected', [String(dimSuggestion.probed)]));
+  }, [dimSuggestion, setSettings]);
+
+  /** 面板共用的写入入口：合并一个 patch 到当前 settings 再写回。
+   *  三个面板都只改自己那几个字段，不需要各自 setSettings({...settings, x})。 */
+  const patchSettings = useCallback(
+    (patch: Partial<RagSettings>) => setSettings({ ...settings, ...patch }),
+    [settings, setSettings],
+  );
+
+  /** 索引完成后刷新列表。对话框内部已经 upsert 过，这里只是从存储重读一遍
+   *  以确保与其它上下文一致。 */
+  const refreshCollections = useCallback(async () => {
+    const next = await ragCollections.getValue();
+    setCollections(next);
+  }, [setCollections]);
 
   const handleDeleteCollection = useCallback(
     async (c: RagCollection) => {
@@ -328,1097 +319,107 @@ export function RagSection() {
     [settings.neonConnectionString, setCollections],
   );
 
-  const reindexCollection = useCallback(
-    async (c: RagCollection) => {
-      // Re-indexing requires the user to re-pick files — we don't store
-      // the originals (they live on the user's disk). Open the New
-      // Collection dialog pre-filled with the same name + a banner
-      // explaining the re-pick. For v1 we keep it simple: the re-index
-      // button just opens the New dialog pre-named.
-      setNewOpen(true);
-      // The dialog reads its own state; we stash a hint via a side-channel.
-      pendingReindexRef.current = c.name;
-    },
-    [],
-  );
-  const pendingReindexRef = useRef<string | null>(null);
-
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
       <h2 className="text-base font-semibold">{t('settings.rag.title')}</h2>
 
-      {/* ─── Card 1: Hạ tầng / Infrastructure — Connection + Embedding model ───
-          Originally these were two separate sections in the pre-U1 file;
-          merged into one outer card per the approved "5 work-stream cards"
-          plan. Two inner sub-blocks each get an h4 to keep the visual
-          rhythm consistent with Cards 2 / 3's nested blocks. */}
-      <section className="space-y-4 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium flex items-center gap-2">
-          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400">
-            <Database className="size-4" />
-          </span>
-          {t('settings.rag.infrastructureTitle')}
-        </h3>
+      {/* 1. Health strip — three status indicators, each with its own check. */}
+      <HealthStrip
+        database={healthDb}
+        embedder={healthEmbedder}
+        collections={healthCollections}
+        dbDisabled={!settings.neonConnectionString}
+        onCheckDatabase={() => void checkDatabase()}
+        onCheckEmbedder={() => void checkEmbedder()}
+        onCheckCollections={() => void checkCollections()}
+      />
 
-        {/* Sub-block: Connection */}
-        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
-          <div className="flex items-center gap-2">
-            <Database className="size-4 text-muted-foreground" />
-            <h4 className="text-sm font-medium">{t('settings.rag.connectionTitle')}</h4>
-          </div>
-          <p className="text-xs text-muted-foreground">{t('settings.rag.connectionHint')}</p>
+      {/* 2. Setup guide — only while there are no collections yet. Sits right
+             under the health strip: it disappears the moment you have one, so
+             it never affects the everyday order. */}
+      <SetupStepper settings={settings} collectionCount={collections.length} />
 
-          <div className="space-y-1.5">
-            <Label htmlFor="rag-neon" className="text-xs">{t('settings.rag.connectionLabel')}</Label>
-            <Input
-              id="rag-neon"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="postgresql://user:pass@host/db?sslmode=require"
-              value={settings.neonConnectionString}
-              onChange={(e) => setSettings({ ...settings, neonConnectionString: e.target.value })}
-            />
-          </div>
+      {/* 3. Collections — the day-to-day surface, so it comes first. */}
+      <CollectionList
+        collections={collections}
+        currentModel={settings.defaultEmbedModel}
+        canCreate={!!settings.neonConnectionString}
+        settings={settings}
+        onCreate={() => setNewOpen(true)}
+        onIndexed={refreshCollections}
+        onDelete={handleDeleteCollection}
+      />
 
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!settings.neonConnectionString || testState.kind === 'testing'}
-              onClick={() => void handleTest()}
-            >
-              {testState.kind === 'testing' ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <CheckCircle2 className="size-3.5" />
-              )}
-              {t('settings.rag.testConnection')}
-            </Button>
-            <ConnectionStatusChip state={testState} />
-            {testState.kind === 'ok' && (
-              <span className="text-xs text-muted-foreground truncate">
-                v{testState.version}
-              </span>
-            )}
-            {testState.kind === 'err' && (
-              <span className="text-xs text-destructive truncate">
-                {testState.message}
-              </span>
-            )}
-          </div>
-        </div>
+      {/* 4. Retrieval & ranking. */}
+      <RetrievalPanel settings={settings} onChange={patchSettings} />
 
-        {/* Sub-block: Embedding model */}
-        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
-          <h4 className="text-sm font-medium">{t('settings.rag.embedderTitle')}</h4>
-          <p className="text-xs text-muted-foreground">{t('settings.rag.embedderHint')}</p>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5 col-span-2">
-              <Label className="text-xs">{t('settings.rag.embedderBaseUrl')}</Label>
-              <Input
-                value={settings.embedderBaseUrl}
-                onChange={(e) => setSettings({ ...settings, embedderBaseUrl: e.target.value })}
-                placeholder="http://localhost:8317/v1"
-              />
+      {/* 5. Data sources — connection + embedder. Set once, so it is collapsed
+             and sits below the things you touch daily. */}
+      <CollapsibleSection
+        title={t('settings.rag.dataSourcesTitle')}
+        hint={t('settings.rag.dataSourcesHint')}
+      >
+        <div className="space-y-3">
+          <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
+            <div className="flex items-center gap-2">
+              <Database className="size-4 text-muted-foreground" />
+              <h4 className="text-sm font-medium">{t('settings.rag.connectionTitle')}</h4>
             </div>
+            <p className="text-xs text-muted-foreground">{t('settings.rag.connectionHint')}</p>
+
             <div className="space-y-1.5">
-              <Label className="text-xs">{t('settings.rag.embedderApiKey')}</Label>
+              <Label htmlFor="rag-neon" className="text-xs">
+                {t('settings.rag.connectionLabel')}
+              </Label>
               <Input
+                id="rag-neon"
                 type="password"
                 autoComplete="off"
-                value={settings.embedderApiKey}
-                onChange={(e) => setSettings({ ...settings, embedderApiKey: e.target.value })}
+                spellCheck={false}
+                placeholder="postgresql://user:pass@host/db?sslmode=require"
+                value={settings.neonConnectionString}
+                onChange={(e) => patchSettings({ neonConnectionString: e.target.value })}
               />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">{t('settings.rag.embedderDim')}</Label>
-              <Input
-                type="number"
-                min={1}
-                max={4096}
-                value={settings.embedderDim}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  if (Number.isFinite(v) && v > 0) setSettings({ ...settings, embedderDim: v });
-                }}
-              />
-            </div>
-            <div className="space-y-1.5 col-span-2">
-              <Label className="text-xs">{t('settings.rag.embedderModel')}</Label>
-              <Input
-                value={settings.defaultEmbedModel}
-                onChange={(e) => setSettings({ ...settings, defaultEmbedModel: e.target.value })}
-                placeholder="text-embedding-3-small"
-              />
-            </div>
-          </div>
-        </div>
-      </section>
 
-      {/* ─── Card 2: Nạp tài liệu / Ingestion Pipeline — Chunking ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium flex items-center gap-2">
-          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-purple-50 text-purple-600 dark:bg-purple-950/40 dark:text-purple-400">
-            <Layers className="size-4" />
-          </span>
-          {t('settings.rag.chunkingTitle')}
-        </h3>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('settings.rag.chunkSize')}</Label>
-            <Input
-              type="number"
-              min={100}
-              max={4000}
-              step={100}
-              value={settings.chunkSize}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                if (Number.isFinite(v) && v >= 100) setSettings({ ...settings, chunkSize: v });
-              }}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('settings.rag.chunkOverlap')}</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1000}
-              step={20}
-              value={settings.chunkOverlap}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                if (Number.isFinite(v) && v >= 0) setSettings({ ...settings, chunkOverlap: v });
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Card 2 nested: Contextual Retrieval (Lớp 0). Off-by-default
-            per Anthropic recipe — zero extra LLM cost unless the user
-            opts in. Field wiring mirrors the Rerank card: a Switch +
-            collapse / expand grid of inputs. */}
-        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Sparkles className="size-4 text-muted-foreground" />
-              <div>
-                <h4 className="text-sm font-medium">
-                  {t('settings.rag.contextualRetrievalTitle')}
-                </h4>
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.rag.contextualRetrievalHint')}
+            {/* Probe width differs from the saved value — warn and offer an
+                explicit adopt button. Checking is read-only; it never rewrites
+                the user's settings on its own. */}
+            {dimSuggestion && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2">
+                <p className="flex-1 text-xs text-amber-700 dark:text-amber-400">
+                  {t('settings.rag.dimMismatch', [
+                    String(dimSuggestion.configured),
+                    String(dimSuggestion.probed),
+                  ])}
                 </p>
+                <Button size="xs" variant="outline" onClick={() => void adoptProbedDim()}>
+                  {t('settings.rag.dimMismatchUse', [String(dimSuggestion.probed)])}
+                </Button>
               </div>
-            </div>
-            <Switch
-              checked={settings.contextualRetrievalEnabled}
-              onCheckedChange={(v) =>
-                setSettings({ ...settings, contextualRetrievalEnabled: v })
-              }
-            />
+            )}
           </div>
 
-          {settings.contextualRetrievalEnabled && (
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div className="space-y-1.5 col-span-2">
-                <Label className="text-xs">{t('settings.rag.contextualLlmBaseUrl')}</Label>
-                <Input
-                  value={settings.contextualLlmBaseUrl}
-                  onChange={(e) =>
-                    setSettings({ ...settings, contextualLlmBaseUrl: e.target.value })
-                  }
-                  placeholder="http://localhost:8317/v1"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t('settings.rag.contextualLlmModel')}</Label>
-                <Input
-                  value={settings.contextualLlmModel}
-                  onChange={(e) =>
-                    setSettings({ ...settings, contextualLlmModel: e.target.value })
-                  }
-                  placeholder="gpt-4o-mini"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t('settings.rag.contextualLlmApiKey')}</Label>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  value={settings.contextualLlmApiKey}
-                  onChange={(e) =>
-                    setSettings({ ...settings, contextualLlmApiKey: e.target.value })
-                  }
-                />
-              </div>
-            </div>
-          )}
+          <EmbedderForm settings={settings} onChange={patchSettings} />
         </div>
-      </section>
+      </CollapsibleSection>
 
-      {/* ─── Card 3: Retrieval & Ranking ───
-          Outer h3 + 3 sub-blocks (each h4): Retrieval mode, Relevance gate,
-          Rerank. Matches the visual rhythm of Card 1 (h3 + 2 sub-blocks)
-          and Card 2 (h3 + nested CR sub-card). The retrieval-mode and
-          relevance-gate sub-blocks stay unbordered (always-on controls);
-          Rerank stays as a bordered nested sub-card (opt-in toggle). */}
-      <section className="space-y-4 rounded-lg border border-border p-4">
-        <h3 className="text-sm font-medium flex items-center gap-2">
-          <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
-            <SlidersHorizontal className="size-4" />
-          </span>
-          {t('settings.rag.retrievalRankingTitle')}
-        </h3>
+      {/* 6. Advanced — set-once knobs, collapsed by default. */}
+      <CollapsibleSection
+        title={t('settings.rag.advancedTitle')}
+        hint={t('settings.rag.advancedHint')}
+      >
+        <AdvancedPanel settings={settings} onChange={patchSettings} />
+      </CollapsibleSection>
 
-        {/* Sub-block: Retrieval mode radio. Hybrid is the recommended
-            default per the UI spec; flip to Vector-only via the radio. */}
-        <div className="space-y-2">
-          <h4 className="text-sm font-medium">{t('settings.rag.retrievalMode')}</h4>
-          <RadioGroup
-            value={settings.retrievalMode}
-            onValueChange={(v) =>
-              setSettings({ ...settings, retrievalMode: v as 'vector' | 'hybrid' })
-            }
-            className="gap-2"
-          >
-            <label
-              className={cn(
-                'flex w-full items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors',
-                settings.retrievalMode === 'hybrid'
-                  ? 'border-emerald-500 bg-emerald-50/30 ring-1 ring-emerald-500/20 dark:bg-emerald-950/20'
-                  : 'border-border hover:bg-accent/50',
-              )}
-            >
-              <RadioGroupItem value="hybrid" className="mt-0.5" />
-              <span className="flex-1 space-y-1">
-                <span className="flex items-center gap-2">
-                  <span className="text-sm font-medium">
-                    {t('settings.rag.retrievalModeHybrid')}
-                  </span>
-                  <Badge
-                    variant="outline"
-                    className="border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400 text-[0.65rem] h-4 px-1.5"
-                  >
-                    {t('settings.rag.retrievalModeRecommendedBadge')}
-                  </Badge>
-                </span>
-                <span className="block text-xs text-muted-foreground">
-                  {t('settings.rag.retrievalModeHybridSubLabel')}
-                </span>
-              </span>
-            </label>
-            <label
-              className={cn(
-                'flex w-full items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors',
-                settings.retrievalMode === 'vector'
-                  ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
-                  : 'border-border hover:bg-accent/50',
-              )}
-            >
-              <RadioGroupItem value="vector" className="mt-0.5" />
-              <span className="flex-1 space-y-1">
-                <span className="block text-sm font-medium">
-                  {t('settings.rag.retrievalModeVector')}
-                </span>
-              </span>
-            </label>
-          </RadioGroup>
-          {/* Hybrid-score-scale warning — only visible when the user has
-              both switched to Hybrid AND already set a non-zero threshold.
-              Cosine thresholds from the pre-Subtask-2 era sit in 0.3–0.5;
-              RRF tops out around 0.033, so a 0.35 gate would silently
-              filter every result. Nudge the user to start at 0. */}
-          {settings.retrievalMode === 'hybrid' && settings.pinMinScore > 0 && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              {t('settings.rag.hybridScoreWarning')}
-            </div>
-          )}
-        </div>
-
-        {/* Sub-block: Relevance gate. Moved here from a standalone card so
-            all retrieval-time controls sit together. Label renamed from
-            "Min cosine score to attach (0–1)" → "Min relevance score" so
-            it makes sense under both modes (cosine AND RRF). */}
-        <div className="space-y-1.5">
-          <h4 className="text-sm font-medium">{t('settings.rag.pinGateTitle')}</h4>
-          <p className="text-xs text-muted-foreground">{t('settings.rag.pinGateHint')}</p>
-          <div className="space-y-1.5 max-w-xs pt-1">
-            <Label className="text-xs">{t('settings.rag.pinMinScore')}</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.pinMinScore}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (Number.isFinite(v) && v >= 0 && v <= 1) {
-                  setSettings({ ...settings, pinMinScore: v });
-                }
-              }}
-            />
-            <p className="text-[0.7rem] text-muted-foreground">
-              {t('settings.rag.pinMinScoreHint')}
-            </p>
-          </div>
-        </div>
-
-        {/* Sub-block: Rerank (Lớp 2 — optional). Bordered sub-card because
-            it's an opt-in toggle — when off the user still sees the toggle
-            row but the inputs collapse, matching the opt-in pattern of
-            Card 2's nested Contextual Retrieval sub-card. */}
-        <div className="space-y-3 rounded-md border border-border/60 p-3 pt-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Sparkles className="size-4 text-muted-foreground" />
-              <div>
-                <h4 className="text-sm font-medium">{t('settings.rag.rerankTitle')}</h4>
-                <p className="text-xs text-muted-foreground">{t('settings.rag.rerankHint')}</p>
-              </div>
-            </div>
-            <Switch
-              checked={settings.rerankEnabled}
-              onCheckedChange={(v) => setSettings({ ...settings, rerankEnabled: v })}
-            />
-          </div>
-
-          {settings.rerankEnabled && (
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div className="space-y-1.5 col-span-2">
-                <Label className="text-xs">{t('settings.rag.rerankBaseUrl')}</Label>
-                <Input
-                  value={settings.rerankBaseUrl}
-                  onChange={(e) => setSettings({ ...settings, rerankBaseUrl: e.target.value })}
-                  placeholder="http://localhost:8317/v1"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t('settings.rag.rerankModel')}</Label>
-                <Input
-                  value={settings.rerankModel}
-                  onChange={(e) => setSettings({ ...settings, rerankModel: e.target.value })}
-                  placeholder="rerank-english-v3.0"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">{t('settings.rag.rerankTopN')}</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={settings.rerankTopN}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    if (Number.isFinite(v) && v > 0) setSettings({ ...settings, rerankTopN: v });
-                  }}
-                />
-              </div>
-              <div className="space-y-1.5 col-span-2">
-                <Label className="text-xs">{t('settings.rag.rerankApiKey')}</Label>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  value={settings.rerankApiKey}
-                  onChange={(e) => setSettings({ ...settings, rerankApiKey: e.target.value })}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* ─── Card 4: Agentic `rag_search` tool (Subtask 4 — opt-in) ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400 shrink-0">
-              <Bot className="size-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-medium">{t('settings.rag.ragSearchTitle')}</h3>
-              <p className="text-xs text-muted-foreground">
-                {t('settings.rag.ragSearchHint')}
-              </p>
-            </div>
-          </div>
-          <Switch
-            checked={settings.ragSearchEnabled}
-            onCheckedChange={(v) => setSettings({ ...settings, ragSearchEnabled: v })}
-          />
-        </div>
-      </section>
-
-      {/* ─── Collections ─── */}
-      <section className="space-y-3 rounded-lg border border-border p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span aria-hidden className="inline-flex size-9 items-center justify-center rounded-md bg-orange-50 text-orange-600 dark:bg-orange-950/40 dark:text-orange-400 shrink-0">
-              <Folder className="size-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-medium">{t('settings.rag.collections')}</h3>
-              <p className="text-xs text-muted-foreground">{t('settings.rag.collectionsHint')}</p>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            disabled={!settings.neonConnectionString}
-            onClick={() => {
-              pendingReindexRef.current = null;
-              setNewOpen(true);
-            }}
-          >
-            <Plus className="size-3.5" />
-            {t('settings.rag.newCollection')}
-          </Button>
-        </div>
-
-        {collections.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border py-6 text-center text-xs text-muted-foreground">
-            {t('settings.rag.noCollections')}
-          </div>
-        ) : (
-          <ul className="divide-y divide-border rounded-md border border-border">
-            {collections.map((c) => {
-              const isRenaming = renamingName === c.name;
-              return (
-                <li key={c.name} className="flex items-center gap-3 px-3 py-2">
-                  <Database className="size-4 text-violet-400 shrink-0" />
-                  {isRenaming ? (
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <Input
-                        autoFocus
-                        value={renameDraft}
-                        onChange={(e) => {
-                          setRenameDraft(e.target.value);
-                          if (renameError) setRenameError(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            void commitRename();
-                          } else if (e.key === 'Escape') {
-                            e.preventDefault();
-                            cancelRename();
-                          }
-                        }}
-                        disabled={renameBusy}
-                        placeholder={t('settings.rag.renamePlaceholder')}
-                        className="h-7 text-xs"
-                      />
-                      {renameError && (
-                        <p className="text-[0.7rem] text-destructive truncate">
-                          {renameError}
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm truncate">{c.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {c.chunkCount} chunks · {c.embedModel} ·{' '}
-                        {new Date(c.updatedAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  )}
-                  {isRenaming ? (
-                    <>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => void commitRename()}
-                        disabled={renameBusy}
-                        title={t('settings.rag.renameCollection')}
-                      >
-                        <Check className="size-3.5" />
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={cancelRename}
-                        disabled={renameBusy}
-                        title={t('settings.rag.cancel')}
-                      >
-                        <X className="size-3.5" />
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => startRename(c.name)}
-                        title={t('settings.rag.renameCollection')}
-                      >
-                        <Pencil className="size-3.5" />
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => void reindexCollection(c)}
-                        title={t('settings.rag.reindex')}
-                      >
-                        <RefreshCw className="size-3.5" />
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => void handleDeleteCollection(c)}
-                        title={t('settings.rag.deleteCollection')}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </Button>
-                    </>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      <NewCollectionDialog
+      <ReindexDialog
         open={newOpen}
         onOpenChange={setNewOpen}
         settings={settings}
         existingNames={collections.map((c) => c.name)}
-        initialName={pendingReindexRef.current}
-        onCreated={(created) => {
-          // upsertCollection was already called inside the dialog; we
-          // just refresh local state from storage to be safe.
-          void (async () => {
-            const next = await ragCollections.getValue();
-            setCollections(next);
-            void created;
-          })();
-        }}
+        initialName={null}
+        onIndexed={refreshCollections}
       />
     </div>
-  );
-}
-
-// ─── New-collection dialog ─────────────────────────────────────────
-
-interface NewCollectionDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  settings: RagSettings;
-  existingNames: string[];
-  /** When set, the dialog opens pre-named for a re-index of the named
-   *  collection. The user must still re-pick files (we don't keep the
-   *  originals on disk). */
-  initialName: string | null;
-  onCreated: (created: RagCollection) => void;
-}
-
-function NewCollectionDialog({
-  open,
-  onOpenChange,
-  settings,
-  existingNames,
-  initialName,
-  onCreated,
-}: NewCollectionDialogProps) {
-  // The folder this dialog operates on. `null` means "no folder chosen
-  // yet — user must pick or create one". When non-null, `files` belong
-  // to that folder (visually nested + indexed under that name).
-  const [folder, setFolder] = useState<string | null>(null);
-  // When the user picks "New folder…" from the dropdown, we switch to an
-  // inline text input bound to this state instead of selecting an
-  // existing name.
-  const [draftNew, setDraftNew] = useState('');
-  const [files, setFiles] = useState<File[]>([]);
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState<IndexProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // Whether `folder` names an existing collection (re-index flow) or a
-  // brand-new one (create flow). Used to gate the reindex banner.
-  const isExisting = folder !== null && existingNames.includes(folder);
-
-  // Reset on open so a re-open starts fresh.
-  useEffect(() => {
-    if (open) {
-      setFolder(initialName ?? null);
-      setDraftNew('');
-      setFiles([]);
-      setProgress(null);
-      setError(null);
-    } else {
-      // Cancel any in-flight index when the dialog closes.
-      abortRef.current?.abort();
-      abortRef.current = null;
-    }
-  }, [open, initialName]);
-
-  const ingestable = useMemo(() => files.filter(isIngestable), [files]);
-  const skipped = files.length - ingestable.length;
-  const slug = normalizeCollectionName(folder ?? '');
-  const nameValid = slug !== null;
-
-  const totalBytes = useMemo(
-    () => ingestable.reduce((s, f) => s + f.size, 0),
-    [ingestable],
-  );
-
-  /** Extract the top-level folder name from a `webkitdirectory` pick.
-   *  Files in a folder pick carry a `webkitRelativePath` like
-   *  `myfolder/sub/file.txt` — we want `myfolder`. Files picked via the
-   *  multi-file picker (no webkitdirectory) don't have a folder, so we
-   *  return null. */
-  const pickFolderName = useCallback((picked: FileList | null): string | null => {
-    if (!picked) return null;
-    for (let i = 0; i < picked.length; i++) {
-      const rel = picked[i]?.webkitRelativePath;
-      if (rel && rel.includes('/')) {
-        return rel.split('/')[0] ?? null;
-      }
-    }
-    return null;
-  }, []);
-
-  const onPickFiles = useCallback((picked: FileList | null) => {
-    if (!picked || picked.length === 0) return;
-    setFiles(Array.from(picked));
-  }, []);
-
-  const onPickFolder = useCallback((picked: FileList | null) => {
-    if (!picked || picked.length === 0) return;
-    const folderName = pickFolderName(picked);
-    if (folderName) {
-      // Auto-sync the selected folder to the picked folder name.
-      const slugified = normalizeCollectionName(folderName);
-      if (slugified) setFolder(slugified);
-      setDraftNew('');
-    }
-    setFiles(Array.from(picked));
-  }, [pickFolderName]);
-
-  const chooseExisting = useCallback((name: string) => {
-    setFolder(name);
-    setDraftNew('');
-    setFolderPickerOpen(false);
-  }, []);
-
-  const startNewFolder = useCallback(() => {
-    setFolder(null);
-    setDraftNew('');
-    setFolderPickerOpen(false);
-  }, []);
-
-  const commitDraft = useCallback(() => {
-    const slugified = normalizeCollectionName(draftNew);
-    if (slugified) {
-      setFolder(slugified);
-      setDraftNew('');
-    }
-  }, [draftNew]);
-
-  const handleIndex = useCallback(async () => {
-    if (!slug || !nameValid || ingestable.length === 0) return;
-    setRunning(true);
-    setError(null);
-    setProgress({ phase: 'reading', done: 0, total: ingestable.length });
-    abortRef.current = new AbortController();
-    try {
-      const embedder = buildEmbedder(settings);
-      const result = await indexCollection({
-        connectionString: settings.neonConnectionString,
-        collection: slug,
-        embedder,
-        files: ingestable,
-        chunkSize: settings.chunkSize,
-        chunkOverlap: settings.chunkOverlap,
-        onProgress: setProgress,
-        signal: abortRef.current.signal,
-        // Contextual Retrieval (Subtask 3) — opt-in, only ships the
-        // LLM endpoint config when the master toggle is on so we
-        // don't leak the key to the indexer when CR is off.
-        contextualEnabled: settings.contextualRetrievalEnabled,
-        contextualLlmBaseUrl: settings.contextualLlmBaseUrl,
-        contextualLlmApiKey: settings.contextualLlmApiKey,
-        contextualLlmModel: settings.contextualLlmModel,
-      });
-      const now = Date.now();
-      const collection: RagCollection = {
-        name: slug,
-        embedModel: settings.defaultEmbedModel,
-        embedDim: settings.embedderDim,
-        createdAt: now,
-        updatedAt: now,
-        chunkCount: result.chunkCount,
-        sources: result.files.map((f) => ({
-          path: f.path,
-          size: f.size,
-          chunkCount: f.chunks,
-        })),
-      };
-      const next = await upsertCollection(collection);
-      toast.success(t('settings.rag.indexDone', [String(result.chunkCount)]));
-      onCreated(collection);
-      // Notify parent of updated list (parent also reads from storage).
-      void next;
-      onOpenChange(false);
-    } catch (err) {
-      if (err instanceof IndexCancelledError) {
-        // Silent — user closed the dialog.
-      } else {
-        const msg = (err as Error).message ?? String(err);
-        setError(msg);
-        toast.error(`${t('settings.rag.indexFailed')}: ${msg}`);
-      }
-    } finally {
-      setRunning(false);
-      abortRef.current = null;
-    }
-  }, [slug, nameValid, ingestable, settings, onCreated, onOpenChange]);
-
-  const progressLabel = (() => {
-    if (!progress) return null;
-    const { phase, done, total, currentFile } = progress;
-    switch (phase) {
-      case 'reading':
-        return t('settings.rag.progressReading', [
-          String(done),
-          String(total),
-          currentFile ?? '',
-        ]);
-      case 'chunking':
-        return t('settings.rag.progressChunking', [String(total)]);
-      case 'embedding':
-        return t('settings.rag.progressEmbedding', [String(done), String(total)]);
-      case 'inserting':
-        return t('settings.rag.progressInserting', [String(done), String(total)]);
-    }
-  })();
-
-  // Render the folder picker button. Shows the active folder name (or
-  // the in-progress draft), a folder icon, and a chevron. Clicking
-  // opens a popover listing existing folders + "New folder…" option.
-  // When `folder` is null (user picked "New folder…"), we surface the
-  // current draft so the user has visual feedback that what they type
-  // in the inline input is being captured.
-  const folderTrigger = (
-    <Button
-      type="button"
-      variant="outline"
-      role="combobox"
-      aria-expanded={folderPickerOpen}
-      disabled={running}
-      className={cn(
-        'w-full justify-between font-normal',
-        !folder && !(draftNew.length > 0) && 'text-muted-foreground',
-      )}
-    >
-      <span className="flex items-center gap-2 truncate">
-        {folder ? (
-          <Folder className="size-3.5 shrink-0" />
-        ) : (
-          <FolderPlus className="size-3.5 shrink-0" />
-        )}
-        <span className="truncate">
-          {folder ?? (draftNew || t('settings.rag.folderPlaceholder'))}
-        </span>
-      </span>
-      <ChevronDown className="size-3.5 shrink-0 opacity-50" />
-    </Button>
-  );
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t('settings.rag.newCollection')}</DialogTitle>
-          <DialogDescription>{t('settings.rag.newCollectionHint')}</DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-3">
-          {/* ─── Folder picker ─── */}
-          <div className="space-y-1.5">
-            <Label className="text-xs">{t('settings.rag.folderLabel')}</Label>
-            <Popover open={folderPickerOpen} onOpenChange={setFolderPickerOpen}>
-              <PopoverTrigger asChild>{folderTrigger}</PopoverTrigger>
-              <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                <Command>
-                  <CommandInput
-                    placeholder={t('settings.rag.folderNewPlaceholder')}
-                    value={draftNew}
-                    onValueChange={setDraftNew}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        commitDraft();
-                        setFolderPickerOpen(false);
-                      }
-                    }}
-                  />
-                  <CommandList>
-                    <CommandEmpty>
-                      {existingNames.length === 0
-                        ? t('settings.rag.folderNoFolders')
-                        : null}
-                    </CommandEmpty>
-                    {existingNames.length > 0 && (
-                      <CommandGroup>
-                        {existingNames.map((name) => (
-                          <CommandItem
-                            key={name}
-                            value={name}
-                            keywords={[name]}
-                            onSelect={() => chooseExisting(name)}
-                          >
-                            <FolderOpen className="size-3.5 text-violet-400" />
-                            <span className="truncate">{name}</span>
-                            <Check
-                              className={cn(
-                                'ml-auto',
-                                folder === name ? 'opacity-100' : 'opacity-0',
-                              )}
-                            />
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    )}
-                    <CommandGroup>
-                      <CommandItem
-                        value="__new__"
-                        keywords={['new', 'create', t('settings.rag.folderNewOption')]}
-                        onSelect={startNewFolder}
-                      >
-                        <FolderPlus className="size-3.5" />
-                        <span>{t('settings.rag.folderNewOption')}</span>
-                      </CommandItem>
-                    </CommandGroup>
-                  </CommandList>
-                </Command>
-              </PopoverContent>
-            </Popover>
-            {/* Inline new-folder input — shows whenever the user has
-                picked "New folder…" (folder is null) regardless of
-                whether they've typed anything yet. The previous
-                condition gated on `draftNew.length > 0`, which left
-                the user staring at a closed popover with no visible
-                affordance to type. autoFocus so the cursor lands
-                here immediately after picking "New folder…". Enter
-                commits, blur also commits (so clicking outside the
-                dialog still saves the name). Persists alongside the
-                dropdown so the user can switch back to an existing
-                folder without losing their draft. */}
-            {folder === null && (
-              <Input
-                autoFocus
-                value={draftNew}
-                onChange={(e) => setDraftNew(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    commitDraft();
-                  }
-                }}
-                onBlur={() => commitDraft()}
-                placeholder={t('settings.rag.folderNewPlaceholder')}
-                disabled={running}
-              />
-            )}
-            {folder === null && draftNew.length > 0 && !nameValid && (
-              <p className="text-[0.7rem] text-destructive">
-                {t('settings.rag.nameInvalid')}
-              </p>
-            )}
-            {folder && !nameValid && (
-              <p className="text-[0.7rem] text-destructive">
-                {t('settings.rag.nameInvalid')}
-              </p>
-            )}
-          </div>
-
-          {/* Re-index banner — only when an existing folder is active. */}
-          {isExisting && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              {t('settings.rag.reindexBanner', [folder])}
-            </div>
-          )}
-
-          {/* Contextual Retrieval cost hint — only when the master toggle
-              is on, so the user knows they're about to spend 1 LLM call
-              per chunk before clicking Index. Same amber styling as the
-              re-index banner so visually consistent with the "heads-up"
-              pattern. */}
-          {settings.contextualRetrievalEnabled && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              {t('settings.rag.contextualHint')}
-            </div>
-          )}
-
-          {/* ─── Files inside the chosen folder ─── */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs">
-                {folder
-                  ? `${t('settings.rag.folderLabel')} / ${folder}`
-                  : t('settings.rag.filesInsideFolder')}
-              </Label>
-              <div className="flex flex-wrap gap-1">
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  disabled={running || !folder}
-                  onClick={() => fileInputRef.current?.click()}
-                  title={t('settings.rag.pickFiles')}
-                >
-                  <FileText className="size-3" />
-                  {t('settings.rag.pickFiles')}
-                </Button>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  disabled={running || !folder}
-                  onClick={() => folderInputRef.current?.click()}
-                  title={t('settings.rag.pickFolder')}
-                >
-                  <FolderOpen className="size-3" />
-                  {t('settings.rag.pickFolder')}
-                </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept={[...SUPPORTED_TEXT_EXT, PDF_EXT].join(',')}
-                  className="hidden"
-                  onChange={(e) => {
-                    onPickFiles(e.target.files);
-                    e.target.value = '';
-                  }}
-                />
-                <input
-                  ref={folderInputRef}
-                  type="file"
-                  multiple
-                  // @ts-expect-error webkitdirectory is non-standard but
-                  // supported in all Chromium-based browsers we ship to.
-                  webkitdirectory=""
-                  className="hidden"
-                  onChange={(e) => {
-                    onPickFolder(e.target.files);
-                    e.target.value = '';
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Nested file list — visually inside the folder. Empty state
-                nudges the user to pick files; the buttons above are
-                disabled until a folder is selected. */}
-            {files.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border py-6 text-center text-xs text-muted-foreground">
-                {folder
-                  ? t('settings.rag.filesInsideFolder')
-                  : t('settings.rag.folderPlaceholder')}
-              </div>
-            ) : (
-              <div className="rounded-md border border-border overflow-hidden">
-                {/* Folder header row */}
-                <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-1.5 text-xs">
-                  <Folder className="size-3.5 text-violet-400 shrink-0" />
-                  <span className="font-mono truncate">{folder ?? '—'}</span>
-                  <span className="ml-auto text-muted-foreground">
-                    {t('settings.rag.pickedCount', [
-                      String(ingestable.length),
-                      formatBytes(totalBytes),
-                    ])}
-                  </span>
-                </div>
-                {/* File list, indented to look nested */}
-                <ul className="max-h-40 overflow-y-auto py-1 text-xs">
-                  {files.slice(0, 50).map((f) => (
-                    <li
-                      key={f.name + f.size}
-                      className="flex items-center gap-2 px-3 py-0.5 font-mono text-[0.7rem]"
-                    >
-                      <FileText
-                        className={cn(
-                          'size-3 shrink-0',
-                          isIngestable(f) ? 'text-foreground/70' : 'text-amber-500',
-                        )}
-                      />
-                      <span className="truncate">{f.name}</span>
-                      <span className="ml-auto text-muted-foreground shrink-0">
-                        {formatBytes(f.size)}
-                      </span>
-                    </li>
-                  ))}
-                  {files.length > 50 && (
-                    <li className="px-3 py-0.5 text-muted-foreground/70">
-                      …{files.length - 50} more
-                    </li>
-                  )}
-                </ul>
-                {skipped > 0 && (
-                  <div className="border-t border-border bg-amber-500/5 px-3 py-1 text-[0.7rem] text-amber-600 dark:text-amber-400">
-                    {t('settings.rag.pickedSkipped', [String(skipped)])}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {progress && (
-            <div className="rounded-md border border-border p-2 space-y-1.5">
-              <div className="flex items-center gap-2 text-xs">
-                <Loader2 className="size-3.5 animate-spin" />
-                <span className="flex-1 truncate">{progressLabel}</span>
-              </div>
-              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                <div
-                  className="h-full bg-primary transition-all"
-                  style={{
-                    width: `${
-                      progress.total > 0
-                        ? Math.round((progress.done / progress.total) * 100)
-                        : 0
-                    }%`,
-                  }}
-                />
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <p className="text-xs text-destructive">{error}</p>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            disabled={running}
-          >
-            {t('settings.rag.cancel')}
-          </Button>
-          <Button
-            disabled={!slug || !nameValid || ingestable.length === 0 || running}
-            onClick={() => void handleIndex()}
-          >
-            {running ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Database className="size-3.5" />
-            )}
-            {t('settings.rag.index')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

@@ -60,14 +60,16 @@ export interface RagSettings {
   /** Number of chunks returned after rerank. Must be ≤ vectorTopK. */
   rerankTopN: number;
 
-  /** Minimum cosine similarity (top-1 score) for a pinned RAG mention
-   *  to attach its envelope. When the top hit scores below this, the
-   *  resolver drops the attachment silently — the user still sends
-   *  their message, the LLM just doesn't get RAG context this turn.
-   *  Only applies to PINNED RAG mentions (one-shot mentions always
-   *  attach — the user explicitly opted in for that message).
-   *  Default 0 (no gate). Typical Jina cosine similarity sits in
-   *  0.3–0.9 for relevant hits; 0.2–0.4 for off-topic. */
+  /** **目前恒为 0——没有任何 UI 可以设置它。** 保留字段是为了不改动已持久化的
+   *  settings 结构，`ChatInput` 仍在读它。
+   *
+   *  历史：这曾是「已 pin 的 RAG 提及在 top-1 分数低于阈值时不附带 envelope」的
+   *  门槛。撤下 UI 的原因是分数标尺随检索模式变化（cosine 0–1 对 RRF 0–0.033），
+   *  不存在一个两种模式都正确的默认值；旧的 0.35 是 cosine 时代的数字，切到 hybrid
+   *  后会静默过滤掉全部结果。过滤职责现在交给 Rerank。
+   *
+   *  因此 `RetrieveOptions.minScore` 的过滤分支当前不可达；将来若要做按模式区分的
+   *  阈值，从这里重新接上。 */
   pinMinScore: number;
 
   // ─── Retrieval strategy (Subtask 2) ───────────────────────────────
@@ -170,6 +172,10 @@ export interface RagCollection {
   /** Per-source breakdown — file name + chunk count + size. Display only;
    *  the source files themselves stay on the user's disk. */
   sources: RagCollectionSource[];
+  /** 存在于 Neon、但不在最近一次索引选择里的源。**不等于「已从磁盘删除」**：
+   *  我们不追踪磁盘状态，分不出「文件删了」与「这次没选」。UI 用它提示用户
+   *  何时该用同步模式清理。缺省 = 上次索引时无遗留（或该字段引入前索引的）。 */
+  notInLastRun?: { path: string; chunks: number }[];
 }
 
 export interface RagCollectionSource {
