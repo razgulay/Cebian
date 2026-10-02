@@ -93,6 +93,14 @@ export interface RetrieveOptions {
   settings?: Pick<RagSettings, 'retrievalMode'>;
 }
 
+/** 查询嵌入的超时上限。
+ *
+ *  这条路在**发送消息时**同步跑（mention resolver），所以端点卡住会直接卡住
+ *  聊天输入框。`embedder.embed` 自身已有 15s 单次超时与重试（见 `embedder.ts`），
+ *  这里再包一层的实际作用是**限制总预算**：外层信号先建好，重试循环看到它中止
+ *  就停止，于是「15s × 3 次 + 退避」不会拖成将近一分钟。 */
+const RETRIEVE_EMBED_TIMEOUT_MS = 15_000;
+
 export async function retrieve(opts: RetrieveOptions): Promise<RetrievedChunk[]> {
   const { connectionString, collection, query: q, embedder, topK, minScore = 0 } = opts;
 
@@ -100,7 +108,9 @@ export async function retrieve(opts: RetrieveOptions): Promise<RetrievedChunk[]>
   if (!trimmed) return [];
   if (topK <= 0) return [];
 
-  const [queryEmb] = await embedder.embed([trimmed]);
+  const [queryEmb] = await embedder.embed([
+    trimmed,
+  ], AbortSignal.timeout(RETRIEVE_EMBED_TIMEOUT_MS));
   if (!queryEmb) return [];
 
   // Resolve the effective retrieval mode. Priority: explicit `mode`

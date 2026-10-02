@@ -538,26 +538,16 @@ settings:
       headers: 自訂 Headers
   rag:
     title: 知識庫 (RAG)
-    infrastructureTitle: 基礎設施
     retrievalRankingTitle: 檢索與排序
     connectionTitle: 連線
     connectionLabel: Neon 連線字串
     connectionHint: Neon 連線字串——從專案控制台取得。
-    testConnection: 測試連線
-    connectionOk: 已連線 — pgvector 就緒
-    connectionFailed: 連線失敗
-    connectionStatusReady: 就緒
-    connectionStatusWarn: 缺少 pgvector
-    connectionStatusError: 連線失敗
-    pgvectorMissing: 已連線，但缺少 pgvector 擴充。請至 Neon 控制台 → Extensions 啟用。
-    bootstrapFailed: 建表失敗
     embedderTitle: Embedding 模型
     embedderHint: OpenAI 相容的 `/embeddings` 介面，預設 CLIProxyAPI 連接埠 8317。
     embedderBaseUrl: Base URL
     embedderApiKey: API Key（選填）
     embedderModel: 模型
     embedderDim: 維度
-    chunkingTitle: 分塊
     chunkSize: 塊大小（字元）
     chunkOverlap: 重疊（字元）
     collections: 知識庫
@@ -581,46 +571,83 @@ settings:
     retrievalModeRecommendedBadge: 推薦
     retrievalModeHybridSubLabel: 結合向量相似度與關鍵字比對，召回更全面。
     retrievalModeVector: 僅向量
-    hybridScoreWarning: 混合模式的相關性標尺（RRF）與純向量不同；之前設的門檻可能過高，建議先調到 0 試試。
-    pinGateTitle: Pinned RAG 召回門檻
-    pinGateHint: 話題無關時跳過已 pin 的 envelope。0 = 始終附帶。
-    pinMinScore: 最低相關性分數
-    pinMinScoreHint: 數值越低召回越多，越高越嚴格。建議從 0 開始嘗試。
     contextualHint: chunks 將帶上 LLM 生成的上下文前綴（每塊約 1 次 LLM 呼叫）。
     newCollection: 新增知識庫
-    newCollectionHint: 先選擇資料夾（已有或新建），再把檔案放進去。索引用本地完成——檔案留在你磁碟上，向量寫入 Neon。
-    newCollectionName: 知識庫名稱
     nameInvalid: 名稱必須以字母或數字開頭，只允許字母、數字、橫線、底線。
-    nameExists: 已存在名為「$1」的知識庫。
-    folderLabel: 資料夾
-    folderPlaceholder: 選擇資料夾…
-    folderNewOption: + 新增資料夾…
-    folderNewPlaceholder: 輸入名稱後按 Enter
-    folderNoFolders: 還沒有資料夾——請在上方輸入名稱
     filesInsideFolder: 此資料夾內的檔案
-    pickFiles: 選擇檔案
-    pickFolder: 選擇資料夾
     pickedCount: $1 個檔案 · $2
     pickedSkipped: 已略過 $1 個檔案（不支援的副檔名）
-    reindexBanner: 向「$1」新增檔案——已有 chunks 會被新檔案取代。
     progressReading: 讀取 $1 / $2 — $3
     progressChunking: 已分塊 $1 塊
     progressEmbedding: Embedding $1 / $2
     progressInserting: 寫入 $1 / $2
     index: 索引
-    cancel: 取消
     indexDone: 已索引 $1 塊
+    indexCancelled: 索引已取消
+    collectionsSourceHint: 磁碟上的資料夾是事實來源。請在那裡修改檔案，然後從資料夾更新。
+    dataSourcesTitle: 資料來源
+    dataSourcesHint: 資料庫連線與嵌入模型——設定一次，重新索引後生效。
+    healthEmbedderDimMismatch: 模型輸出 $2 維，而設定為 $1 維
+    addFolder: 新增資料夾
+    addFolderHint: 選擇要索引的資料夾。
+    chooseFolder: 選擇資料夾…
+    chooseFolderHint: 索引在本機進行——檔案留在你的磁碟上，只有向量送往 Neon。
+    collectionName: 知識庫名稱
+    nameDerivedHint: 由資料夾名稱推導而來——想改也可以。
+    rowMeta: '$1 塊 · $2 · $3'
+    rowStateOk: 一致
+    rowStateStale: 有來源不在最近一次索引中
+    rowStateEmpty: 空——未索引任何內容
+    rowStateModelMismatch: 以 $1 索引，而目前模型是 $2
+    collectionExpand: 展開 $1
+    # $1 = 知識庫數量，$2 = 總數（目前兩者相同）
+    collectionsCount: $1 / $2 個知識庫
+    collectionsCollapse: 收合知識庫
+    collectionsExpand: 展開知識庫
+    sourcesReadOnlyHint: 唯讀——請改磁碟上的檔案後從資料夾更新。
+    sourcesEmpty: 沒有記錄來源
+    sourceMeta: '$1 塊 · $2'
+    setupTitle: 開始使用
+    stepConnect: 連接資料庫
+    stepEmbedder: 設定嵌入模型
+    stepCollection: 建立知識庫
+    advancedTitle: 進階
+    advancedHint: 分塊與 Contextual Retrieval——設定一次，重新索引後生效。
+    healthDatabase: 資料庫
+    healthEmbedder: 嵌入模型
+    healthCollections: 知識庫
+    healthCheck: 檢查
+    healthCheckAria: 檢查$1
+    healthChecking: 檢查中…
+    healthNotChecked: 尚未檢查
+    healthDbOk: 已連線 · pgvector $1
+    healthDbNoVector: 已連線，但缺少 pgvector
+    healthEmbedderOk: 模型 $1 · $2 維
+    healthEmbedderError: 嵌入端點無回應
+    healthCollectionsOk: 所有知識庫與索引一致
+    healthCollectionsDrift: 有 $1 個知識庫與索引不一致——重新索引以同步
+    healthCollectionsEmpty: 還沒有知識庫
+    healthCollectionsError: 無法連線資料庫核對知識庫
+    indexDonePruned: 已索引 $1 塊，並清理 $2 行舊資料。
+    syncToggle: 讓知識庫與本次選擇一致
+    syncToggleHint: 關閉：只新增或更新本次選取的檔案。開啟：同時刪除知識庫中本次未選取的檔案——刪除前會先列出確切檔案清單。
+    syncConfirmTitle: 從該知識庫中移除檔案？
+    syncConfirmBody: 下列檔案存在於知識庫中但不在本次選擇裡。索引成功後將刪除它們：
+    syncConfirmChunks: $1 塊
+    notInLastRun: 有 $1 個來源不在最近一次索引中
+    mixedModelError: 該知識庫裡已存有另一種嵌入模型的向量。請將知識庫中的檔案全部重新索引，或開啟同步以取代不再需要的檔案。
+    emptyIndexError: 未能從所選檔案中擷取出任何文字，因此沒有建立索引。掃描版 PDF 需要文字層——請先做 OCR 再重試。
+    bootstrapWarningHnsw: 無法建立向量檢索索引：$1。關鍵字檢索仍可用，但大集合上的向量檢索會變慢。
+    embedderProbeFailed: 無法連線嵌入端點：$1。資料庫已就緒，但在此問題解決前索引與檢索都會失敗。
+    dimCorrected: 已依模型實際輸出將嵌入維度更正為 $1。
+    dimMismatch: 模型實際輸出 $2 維向量，而目前設定為 $1。請更新設定，使資料庫欄寬與模型一致。
+    dimMismatchUse: 改用 $1
+    updateTitle: 從資料夾更新
+    updateHint: 重新選擇資料夾以重新整理「$1」。瀏覽器不保留路徑，所以需要再選一次。
+    updateAction: 更新
+    collectionNamePlaceholder: 知識庫名稱
+    nameExists: 該名稱已被使用
     indexFailed: 索引失敗
-    reindex: 重新索引（重新選檔案）
-    renameCollection: 重新命名知識庫
-    renameCollectionLabel: 新名稱
-    renamePlaceholder: 輸入新名稱
-    renameConfirm: 將「$1」重新命名為「$2」？
-    renameConfirmHint: Neon 中已有的區塊會重新打上新的標籤。Embedding 不會重新生成 —— 搜尋結果完全不變。
-    renameSuccess: 已將「$1」重新命名為「$2」
-    renameFailed: 重新命名失敗
-    renameInUse: 已存在名為「$1」的知識庫
-    deleteCollection: 刪除知識庫
     confirmDeleteTitle: 刪除知識庫？
     confirmDelete: 刪除知識庫「$1」及其在 Neon 中的 $2 個區塊？磁碟上的檔案不受影響。
     deleteSuccess: 已刪除「$1」

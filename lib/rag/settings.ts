@@ -96,34 +96,6 @@ export async function patchCollectionCount(name: string, chunkCount: number): Pr
   await ragCollections.setValue(next);
 }
 
-/** Rename a collection in the local index. Returns the next array; if
- *  `newName` already exists, throws — caller should treat that as a
- *  conflict (the user picked a name that's already taken) before
- *  hitting the Neon UPDATE which would also fail. */
-export async function renameCollectionMeta(
-  oldName: string,
-  newName: string,
-): Promise<RagCollection[]> {
-  if (oldName === newName) return await ragCollections.getValue();
-  const current = await ragCollections.getValue();
-  if (current.some((c) => c.name === newName)) {
-    throw new Error(`Collection "${newName}" already exists`);
-  }
-  const idx = current.findIndex((c) => c.name === oldName);
-  if (idx < 0) {
-    throw new Error(`Collection "${oldName}" not found`);
-  }
-  const next = current.slice();
-  const existing = next[idx]!;
-  next[idx] = {
-    ...existing,
-    name: newName,
-    updatedAt: Date.now(),
-  };
-  await ragCollections.setValue(next);
-  return next;
-}
-
 // Re-export so callers only need to import from one module.
 export { DEFAULT_RAG_SETTINGS };
 export type { RagCollection, RagSettings };

@@ -799,20 +799,10 @@ settings:
     identityEmojiPlaceholder: 🦞
   rag:
     title: Knowledge (RAG)
-    infrastructureTitle: Infrastructure
     retrievalRankingTitle: Retrieval & Ranking
     connectionTitle: Connection
     connectionLabel: Neon connection string
     connectionHint: Neon connection string — get it from your project dashboard.
-    testConnection: Test connection
-    connectionOk: Connected — pgvector ready
-    connectionFailed: Connection failed
-    connectionStatusReady: Ready
-    connectionStatusWarn: pgvector missing
-    connectionStatusError: Connection failed
-    pgvectorMissing: Connected, but pgvector extension is missing. Enable it in your
-      Neon console → Extensions.
-    bootstrapFailed: Schema bootstrap failed
     embedderTitle: Embedding model
     embedderHint: OpenAI-compatible `/embeddings` endpoint. Defaults to CLIProxyAPI
       on port 8317.
@@ -820,7 +810,6 @@ settings:
     embedderApiKey: API key (optional)
     embedderModel: Model
     embedderDim: Dimension
-    chunkingTitle: Chunking
     chunkSize: Chunk size (chars)
     chunkOverlap: Overlap (chars)
     collections: Collections
@@ -845,51 +834,87 @@ settings:
     retrievalModeRecommendedBadge: Recommended
     retrievalModeHybridSubLabel: Combines vector similarity with keyword match for best recall.
     retrievalModeVector: Vector only
-    hybridScoreWarning: Hybrid mode uses a different relevance scale (RRF). Your
-      previous threshold may need lowering — try 0 to start.
-    pinGateTitle: Pinned RAG relevance gate
-    pinGateHint: Skip pinned envelopes when the question looks off-topic. 0 = always attach.
-    pinMinScore: Min relevance score
-    pinMinScoreHint: Lower = more results, higher = stricter relevance. Try 0 to start.
     contextualHint: Chunks will be indexed with LLM-generated context prefixes (~1
       LLM call per chunk).
     newCollection: New collection
-    newCollectionHint: Pick a folder (existing or new), then drop files into it.
-      Indexing runs locally — files stay on your disk, vectors go to Neon.
-    newCollectionName: Collection name
     nameInvalid: Name must start with a letter or digit; letters, digits, dashes and
       underscores only.
-    nameExists: A collection named "$1" already exists.
-    folderLabel: Folder
-    folderPlaceholder: Choose a folder…
-    folderNewOption: + New folder…
-    folderNewPlaceholder: Type a name and press Enter
-    folderNoFolders: No folders yet — type a name above
     filesInsideFolder: Files in this folder
-    pickFiles: Pick files
-    pickFolder: Pick folder
     pickedCount: $1 files · $2
     pickedSkipped: $1 file(s) skipped — unsupported extension
-    reindexBanner: Adding files to "$1" — existing chunks will be replaced by the new ones.
     progressReading: Reading $1 / $2 — $3
     progressChunking: Chunked $1 chunks
     progressEmbedding: Embedding $1 / $2
     progressInserting: Inserting $1 / $2
     index: Index
-    cancel: Cancel
     indexDone: Indexed $1 chunks
+    indexCancelled: Indexing cancelled
+    collectionsSourceHint: Your folder on disk is the source of truth. Edit files there, then update from the folder.
+    dataSourcesTitle: Data sources
+    dataSourcesHint: Database connection and embedding model — set once, then reindex to apply.
+    # $1 = configured dim, $2 = dim the model actually returns
+    healthEmbedderDimMismatch: 'Model returns $2 dimensions, but $1 is configured'
+    addFolder: Add folder
+    addFolderHint: Pick a folder to index.
+    chooseFolder: Choose folder…
+    chooseFolderHint: Indexing runs locally — files stay on your disk, vectors go to Neon.
+    collectionName: Collection name
+    nameDerivedHint: Derived from the folder name — edit if you want.
+    rowMeta: '$1 chunks · $2 · $3'
+    rowStateOk: Consistent
+    rowStateStale: Sources not in the last index run
+    rowStateEmpty: Empty — nothing indexed
+    rowStateModelMismatch: 'Indexed with $1, but the current model is $2'
+    collectionExpand: Expand $1
+    # $1 = number of collections, $2 = total (currently the same value)
+    collectionsCount: $1 / $2 collections
+    collectionsCollapse: Collapse collections
+    collectionsExpand: Expand collections
+    sourcesReadOnlyHint: Read-only — edit files on disk, then update from the folder.
+    sourcesEmpty: No sources recorded
+    sourceMeta: '$1 chunks · $2'
+    setupTitle: Get started
+    stepConnect: Connect your database
+    stepEmbedder: Configure the embedder
+    stepCollection: Create a collection
+    advancedTitle: Advanced
+    advancedHint: Chunking and Contextual Retrieval — set once, then reindex to apply.
+    healthDatabase: Database
+    healthEmbedder: Embedder
+    healthCollections: Collections
+    healthCheck: Check
+    healthCheckAria: Check $1
+    healthChecking: Checking…
+    healthNotChecked: Not checked yet
+    healthDbOk: 'Connected · pgvector $1'
+    healthDbNoVector: Connected, but pgvector is missing
+    healthEmbedderOk: 'Model $1 · $2 dimensions'
+    healthEmbedderError: Embedding endpoint did not respond
+    healthCollectionsOk: All collections match the index
+    healthCollectionsDrift: '$1 collection(s) differ from the index — reindex to sync'
+    healthCollectionsEmpty: No collections yet
+    healthCollectionsError: Could not reach the database to verify collections
+    indexDonePruned: 'Indexed $1 chunks, removed $2 stale rows.'
+    syncToggle: Sync collection with this selection
+    syncToggleHint: 'Off: only add or update the files picked here. On: also delete files already in the collection that are not picked this time — you will see the exact list before anything is removed.'
+    syncConfirmTitle: Remove files from this collection?
+    syncConfirmBody: 'These files are in the collection but not in this selection. They will be deleted after indexing succeeds:'
+    syncConfirmChunks: $1 chunks
+    notInLastRun: $1 source(s) not in the last index run
+    mixedModelError: This collection already holds vectors from a different embedding model. Re-index every file in the collection, or turn on sync to replace the ones you no longer need.
+    emptyIndexError: No text could be extracted from the selected files, so nothing was indexed. Scanned PDFs need a text layer — run OCR on them first, then try again.
+    bootstrapWarningHnsw: 'Vector search index could not be created: $1. Keyword search still works, but vector search will be slow on large collections.'
+    embedderProbeFailed: 'Could not reach the embedding endpoint: $1. The database is ready, but indexing and retrieval will fail until this is fixed.'
+    dimCorrected: 'Embedding dimension corrected to $1 to match your model.'
+    dimMismatch: 'Your model returns $2-dimension vectors, but the saved setting is $1. Update it so the database column matches the model.'
+    dimMismatchUse: 'Use $1'
+    updateTitle: Update from folder
+    # $1 = collection name
+    updateHint: Re-pick the folder to refresh "$1". The browser does not keep the path, so it has to be chosen again.
+    updateAction: Update
+    collectionNamePlaceholder: Collection name
+    nameExists: That name is already taken
     indexFailed: Indexing failed
-    reindex: Re-index (re-pick files)
-    renameCollection: Rename collection
-    renameCollectionLabel: New name
-    renamePlaceholder: Type a new name
-    renameConfirm: Rename "$1" to "$2"?
-    renameConfirmHint: Existing chunks in Neon will be re-tagged with the new name.
-      Embeddings are not regenerated — search results stay identical.
-    renameSuccess: Renamed "$1" → "$2"
-    renameFailed: Rename failed
-    renameInUse: A collection named "$1" already exists
-    deleteCollection: Delete collection
     confirmDeleteTitle: Delete collection?
     confirmDelete: Delete collection "$1" and its $2 chunks from Neon? Files on your
       disk are not affected.

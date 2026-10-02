@@ -42,7 +42,6 @@ import {
   isImageFile, isTextFile, isPdfFile,
   type Attachment,
 } from '@/lib/agent/attachments';
-import { ragSettings as ragSettingsStorage } from '@/lib/rag';
 import { resolveMentions, resolveMentionToAttachment, PIN_AUTO_UNPIN_THRESHOLD, type AttachableMentionChip, type MentionChip, type PinnedMention, type ResolvedMentionAttachment } from '@/lib/agent/mention-resolver';
 import { recordingToAttachment } from '@/lib/recorder/to-attachment';
 import { recorderChannel } from '@/lib/recorder/sidepanel-channel';
@@ -241,9 +240,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const [providers] = useStorageItem(providerCredentials, {});
   const [customProviderList] = useStorageItem(customProvidersStorage, []);
   const [isExpandInline] = useStorageItem(expandPromptsInline, false);
-  // RAG settings: read fresh inside handleSend via `ragSettings.getValue()`
-  // rather than the hook, so a settings change between renders and the
-  // send click is picked up (handleSend isn't a render-bound function).
 
   // 当前模型解析成 pi-ai Model（内置 + 自定义统一走 useResolvedModel）。是否支持
   // 图片 / 支持哪些思考档 等能力派生共用这一次解析。`useContextUsage` 走同一份
@@ -786,34 +782,24 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       // and shouldn't block the send. The pin remains in place so a later
       // message can succeed once the VFS re-hydrates.
       //
-      // PINNED RAG ONLY: when settings.pinMinScore > 0, the resolver drops
-      // the RAG attachment when every retrieved chunk scores below the
-      // threshold (off-topic question). The LLM still gets the user's
-      // outgoing text, just without RAG context for this turn — a soft
-      // "skip the pin if irrelevant" behavior. One-shot mention chips
-      // always attach regardless of the gate (the user explicitly opted
-      // in for that message).
+      // 这里**不传** `minScore`：相关性阈值已从 UI 撤下——分数标尺随检索模式
+      // 变化（cosine 0–1 对 RRF 0–0.033），不存在两种模式都正确的默认值，过滤
+      // 职责交给 Rerank。详见 `lib/rag/types.ts` 的 `pinMinScore` 说明。
       //
-      // `pinned: true` opts out of that silent-drop behavior — the user
-      // has explicitly pinned this collection for the chat, so we always
-      // emit the envelope (with `count="0" reason="no_match|empty"` when
-      // nothing matched). Without this, the LLM has no signal that the
-      // collection was queried and falls back to fs_* tools to look up
-      // "what files are in phaply?" — fs_* only sees VFS, so it returns
-      // unrelated content and the LLM mislabels it as RAG.
+      // `pinned: true` 让解析器**始终**产出 envelope，即使 chunks=0 也带
+      // `reason="no_match|empty"`——用户明确 pin 了这个 collection，就该收到
+      // 一个「查过了、没命中」的信号。没有它，LLM 不知道 collection 被查询过，
+      // 会退回去用 fs_* 工具找 "what files are in phaply?"；fs_* 只看得到 VFS，
+      // 于是返回无关内容，LLM 误标为 RAG。
       const pinnedItems = pinnedRef.current;
       const resolvedPinned: ResolvedMentionAttachment[] = [];
       if (pinnedItems.length > 0) {
-        const pinRagSettings = await ragSettingsStorage.getValue();
-        const pinRagMinScore = pinRagSettings.pinMinScore > 0 ? pinRagSettings.pinMinScore : undefined;
         const settledPinned = await Promise.allSettled(
           pinnedItems.map((p) =>
             resolveMentionToAttachment(
               p,
               text,
-              p.kind === 'rag-collection'
-                ? { minScore: pinRagMinScore, pinned: true }
-                : undefined,
+              p.kind === 'rag-collection' ? { pinned: true } : undefined,
             ),
           ),
         );

@@ -18,7 +18,6 @@ export {
   ragCollections,
   ragSettings,
   removeCollectionMeta,
-  renameCollectionMeta,
   updateRagSettings,
   upsertCollection,
 } from './settings';
@@ -28,17 +27,22 @@ export {
   deleteCollectionChunks,
   embeddingToVectorLiteral,
   query,
-  renameCollectionChunks,
   testConnection,
 } from './neon-client';
-export type { ConnectionTestResult } from './neon-client';
+export type { BootstrapWarning, ConnectionTestResult } from './neon-client';
 export type { Embedder, EmbedderConfig } from './embedder';
 export { OpenAICompatEmbedder } from './embedder';
-export { chunkText, ChunkOptionsError, contentHash, extractPdfTextFromFile } from './chunker';
-export type { ChunkOptions } from './chunker';
+export {
+  chunkDocument,
+  ChunkOptionsError,
+  contentHash,
+  extractPdfTextFromFile,
+} from './chunker';
+export type { ChunkOptions, DocumentChunk } from './chunker';
 export {
   indexCollection,
   IndexCancelledError,
+  MixedModelError,
 } from './indexer';
 export type { IndexOptions, IndexProgress, IndexResult } from './indexer';
 export { retrieve } from './retriever';
@@ -53,6 +57,8 @@ export type { Reranker, RerankInput, RerankResult } from './reranker';
  *  (chat send-time retrieval). Keeps the model/dim/apiKey wiring in
  *  one place so a settings change propagates without code edits. */
 import { OpenAICompatEmbedder } from './embedder';
+import { probeEmbeddingDim } from './embedder';
+import type { EmbedderProbeResult } from './embedder';
 import type { RagSettings } from './types';
 export function buildEmbedder(settings: RagSettings): OpenAICompatEmbedder {
   return new OpenAICompatEmbedder({
@@ -60,6 +66,21 @@ export function buildEmbedder(settings: RagSettings): OpenAICompatEmbedder {
     apiKey: settings.embedderApiKey,
     model: settings.defaultEmbedModel,
     dim: settings.embedderDim,
+  });
+}
+
+/** Probe the embedding endpoint for the width its model actually returns.
+ *
+ *  这是 dim 的唯一权威来源：`settings.embedderDim` 是用户手填的数字，可能与
+ *  模型实际输出不符（Cebian 默认 1536，而不少本地模型是 1024），而列宽必须
+ *  由模型决定。调用方应在 bootstrap 前用它拿到真实 dim，而不是直接读设置。
+ *  端点不可用时返回 `ok: false`，不抛错。 */
+export function probeEmbedder(settings: RagSettings, signal?: AbortSignal): Promise<EmbedderProbeResult> {
+  return probeEmbeddingDim({
+    baseUrl: settings.embedderBaseUrl,
+    apiKey: settings.embedderApiKey,
+    model: settings.defaultEmbedModel,
+    signal,
   });
 }
 

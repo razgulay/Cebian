@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   asString,
   isValidSessionId,
@@ -8,6 +8,8 @@ import {
   oneLine,
   truncate,
   omitUndefinedDeep,
+  retryAsync,
+  withTimeout,
 } from '@/lib/utils';
 
 describe('asString', () => {
@@ -159,5 +161,143 @@ describe('omitUndefinedDeep', () => {
     const out = omitUndefinedDeep(cyclic);
     expect(Object.hasOwn(out, 'drop')).toBe(false);
     expect(out.self).toBe(cyclic);
+  });
+});
+
+describe('withTimeout', () => {
+  it('无外部 signal 时返回一个会超时的 signal', async () => {
+    const s = withTimeout(10);
+    expect(s.aborted).toBe(false);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(s.aborted).toBe(true);
+  });
+
+  it('外部 signal 中止时，合成 signal 也中止', () => {
+    const outer = new AbortController();
+    const s = withTimeout(60_000, outer.signal);
+    expect(s.aborted).toBe(false);
+    outer.abort();
+    expect(s.aborted).toBe(true);
+  });
+
+  it('外部 signal 已中止时，合成 signal 立即是中止态', () => {
+    const outer = new AbortController();
+    outer.abort();
+    expect(withTimeout(60_000, outer.signal).aborted).toBe(true);
+  });
+});
+
+describe('retryAsync', () => {
+  /** 记录退避序列、跳过真实延时。 */
+  function spySleep() {
+    const waits: number[] = [];
+    return {
+      waits,
+      sleep: async (ms: number) => {
+        waits.push(ms);
+      },
+    };
+  }
+
+  it('首次成功时不重试', async () => {
+    const fn = vi.fn().mockResolvedValue('ok');
+    const { sleep, waits } = spySleep();
+    await expect(retryAsync(fn, { attempts: 3, baseDelayMs: 10, sleep })).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('失败后重试，直到成功', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue('ok');
+    const { sleep, waits } = spySleep();
+    await expect(retryAsync(fn, { attempts: 5, baseDelayMs: 10, sleep })).resolves.toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(3);
+    expect(waits).toHaveLength(2);
+  });
+
+  it('尝试次数用尽后抛出最后一次的错误', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('first'))
+      .mockRejectedValueOnce(new Error('second'))
+      .mockRejectedValue(new Error('last'));
+    const { sleep } = spySleep();
+    await expect(retryAsync(fn, { attempts: 3, baseDelayMs: 10, sleep })).rejects.toThrow('last');
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it('attempts: 1 表示不重试', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('once'));
+    const { sleep, waits } = spySleep();
+    await expect(retryAsync(fn, { attempts: 1, baseDelayMs: 10, sleep })).rejects.toThrow('once');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('shouldRetry 返回 false → 立即抛出，不消耗剩余尝试', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('fatal'));
+    const { sleep, waits } = spySleep();
+    const shouldRetry = vi.fn().mockReturnValue(false);
+    await expect(
+      retryAsync(fn, { attempts: 5, baseDelayMs: 10, shouldRetry, sleep }),
+    ).rejects.toThrow('fatal');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('shouldRetry 收到错误与尝试序号', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('e'));
+    const { sleep } = spySleep();
+    const shouldRetry = vi.fn().mockReturnValue(true);
+    await expect(
+      retryAsync(fn, { attempts: 3, baseDelayMs: 10, shouldRetry, sleep }),
+    ).rejects.toThrow();
+    expect(shouldRetry.mock.calls.map((c) => c[1])).toEqual([1, 2]);
+  });
+
+  it('signal 已中止时不再重试', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('aborted'));
+    const { sleep, waits } = spySleep();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      retryAsync(fn, { attempts: 5, baseDelayMs: 10, signal: ctrl.signal, sleep }),
+    ).rejects.toThrow('aborted');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('退避按指数增长（含 jitter，故只断言区间）', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('e'));
+    const { sleep, waits } = spySleep();
+    await expect(retryAsync(fn, { attempts: 4, baseDelayMs: 100, sleep })).rejects.toThrow();
+    expect(waits).toHaveLength(3);
+    // 每步是 base * 2^(n-1) 的 [1,2) 倍。
+    expect(waits[0]).toBeGreaterThanOrEqual(100);
+    expect(waits[0]).toBeLessThan(200);
+    expect(waits[1]).toBeGreaterThanOrEqual(200);
+    expect(waits[1]).toBeLessThan(400);
+    expect(waits[2]).toBeGreaterThanOrEqual(400);
+    expect(waits[2]).toBeLessThan(800);
+  });
+
+  it('sleep 收到本次失败的 err（供 Retry-After 之类的实现使用）', async () => {
+    const err = new Error('with hint');
+    const fn = vi.fn().mockRejectedValue(err);
+    const seen: unknown[] = [];
+    await expect(
+      retryAsync(fn, {
+        attempts: 2,
+        baseDelayMs: 10,
+        sleep: async (_ms, _sig, e) => {
+          seen.push(e);
+        },
+      }),
+    ).rejects.toThrow();
+    expect(seen).toEqual([err]);
   });
 });

@@ -62,6 +62,19 @@ export function ConfirmOutlet() {
           {options.description && (
             <AlertDialogDescription>{options.description}</AlertDialogDescription>
           )}
+          {/* Itemised list, rendered as real block content. `description` is a
+              single <p> where newlines collapse, so a list of filenames passed
+              through it would read as one run-on paragraph — exactly the case
+              where the user must be able to scan what is about to be deleted. */}
+          {options.detailLines && options.detailLines.length > 0 && (
+            <ul className="text-sm text-muted-foreground max-h-48 overflow-y-auto space-y-0.5">
+              {options.detailLines.map((line) => (
+                <li key={line} className="font-mono text-xs break-all">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>

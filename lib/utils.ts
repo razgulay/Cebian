@@ -5,6 +5,86 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/**
+ * 把一个可选的外部 signal 与一个超时 signal 合成一个。
+ *
+ * `AbortSignal.any` 是 Chrome 116+ / Node 18+，Cebian 目标 Chrome MV3 远超该
+ * 底线，直接用平台 API。仓库里已有几处同样写法（providers/oauth、scheduler），
+ * 那些是模块私有的；这里是共享入口，新代码用它，别再各写一份。
+ *
+ * 传 `signal` 为 `undefined` 时只返回超时 signal。
+ */
+export function withTimeout(ms: number, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+export interface RetryOptions {
+  /** 总尝试次数（含首次）。`1` 表示不重试。 */
+  attempts: number;
+  /** 首次重试前的等待；之后按 2 的幂增长。 */
+  baseDelayMs: number;
+  /** 返回 `false` 则立即把原错误抛出去，不再重试。默认全部重试。 */
+  shouldRetry?: (err: unknown, attempt: number) => boolean;
+  /** 外部取消信号。已中止时不再重试。 */
+  signal?: AbortSignal;
+  /** 等待实现，测试可注入以跳过真实延时。收到本次失败的 `err`，因此可实现
+   *  「服务端说等多久就等多久」（例如 HTTP `Retry-After`）。 */
+  sleep?: (ms: number, signal: AbortSignal | undefined, err: unknown) => Promise<void>;
+}
+
+/** 可被 signal 打断的 sleep。`signal` 已中止或等待期间中止都会立刻 reject。
+ *
+ *  导出是为了让需要自定义等待时长的调用方（例如按 `Retry-After` 等）复用它，
+ *  而不是各自重写一遍取消语义——重写的版本很容易漏掉「已中止」的提前检查，
+ *  或在成功路径上忘记摘掉监听器。 */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * 带指数退避 + jitter 的重试。
+ *
+ * jitter 取 `[base, 2*base)` 之间的随机值而非固定值：多个并发请求（批量索引
+ * 时的嵌入调用）如果退避步调一致，重试会同时打回服务端，等于没有退避。
+ *
+ * 全部尝试失败时抛出**最后一次**的错误——保留最贴近当前状态的上下文。
+ * `signal` 中止时立即抛出，不消耗剩余尝试。
+ */
+export async function retryAsync<T>(fn: () => Promise<T>, opts: RetryOptions): Promise<T> {
+  const { attempts, baseDelayMs, shouldRetry, signal } = opts;
+  const sleep = opts.sleep ?? abortableSleep;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (signal?.aborted) throw err;
+      if (attempt === attempts) break;
+      if (shouldRetry && !shouldRetry(err, attempt)) throw err;
+      // 2^(attempt-1) 倍步长，再叠加 [1,2) 的抖动。
+      const backoff = baseDelayMs * 2 ** (attempt - 1);
+      await sleep(backoff * (1 + Math.random()), signal, err);
+    }
+  }
+  throw lastErr;
+}
+
 /** 把一个不可信的值当字符串取：是 string 就原样返回，否则回退到 `fallback`。用于规整
  *  来自 IPC / 备份 / 外部 JSON 等不受类型约束的输入。 */
 export function asString(value: unknown, fallback: string): string {
