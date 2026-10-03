@@ -21,7 +21,7 @@ import { Type } from 'typebox';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { TOOL_RAG_INSPECT } from '@/lib/tools/names';
 import { query } from '@/lib/rag/neon-client';
-import { ragSettings } from '@/lib/rag';
+import { listKnownCollectionNames, ragSettings } from '@/lib/rag';
 
 const RagInspectParameters = Type.Object({
   collection: Type.String({
@@ -89,11 +89,20 @@ export const ragInspectTool: AgentTool<typeof RagInspectParameters> = {
     ]);
 
     if (fileRows.length === 0) {
+      // C2：0 行区分不出「不存在」与「空」（Neon 没有 registry 表），措辞必须
+      // 两个都覆盖——旧文案断言 "exists but is empty" 对打错的名字是错的。
+      // 本地 meta 只用来建议名字（标注 known on this device），不参与判断。
+      const known = await listKnownCollectionNames();
+      const tail = known.length > 0
+        ? ` Collections known on this device: ${known.join(', ')}.`
+        : '';
       return {
         content: [
           {
             type: 'text',
-            text: `Collection '${params.collection}' exists but is empty (no chunks indexed yet).`,
+            text:
+              `No chunks found for collection '${params.collection}' — the collection may not ` +
+              `exist or has zero indexed chunks.${tail}`,
           },
         ],
         details: {},

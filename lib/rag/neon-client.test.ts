@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** 用 `vi.mock` 换掉 driver，而不是 `vi.spyOn(neonClient, 'query')`：
  *  `bootstrapSchema` 在模块内部直接调用 `query`，spy 命名空间拦不住
@@ -9,7 +9,7 @@ vi.mock('@neondatabase/serverless', () => ({
   neon: () => ({ query: queryMock }),
 }));
 
-const { bootstrapSchema, isRetryableDbError, QUERY_TIMEOUT_MS, query } = await import('./neon-client');
+const { bootstrapSchema, isRetryableDbError, QUERY_TIMEOUT_MS, query, readCollectionEmbedIdentity, describeEmbedderMismatch, warnLegacyEmbedRows } = await import('./neon-client');
 
 /** `bootstrapSchema` 的语句顺序与容错是本模块的核心保证，所以这里断言的是
  *  **语句序列**而不是单条 SQL 的形状。
@@ -286,5 +286,88 @@ describe('query — 超时不触发重试', () => {
       query('postgresql://user:pass@host.tld/db', 'CREATE INDEX x ON y (z)', [], { retry: false }),
     ).rejects.toThrow();
     expect(calls).toBe(1);
+  });
+});
+
+// ─── 读取路径守卫：身份读取 + 纯比较 + legacy 警告 ──────────────────
+describe('readCollectionEmbedIdentity', () => {
+  // 上面 retry describe 没有 afterEach——进入本 describe 时 mock 可能带着
+  // 历史调用计数，beforeEach 清一次保证 called-times 断言可靠。
+  beforeEach(() => {
+    queryMock.mockReset();
+  });
+  afterEach(() => {
+    queryMock.mockReset();
+  });
+
+  it('一次往返取回 total / identified / 去重 pairs', async () => {
+    queryMock.mockResolvedValueOnce([
+      { total: 12, identified: 9, pairs: [{ model: 'bge', dim: 4 }] },
+    ]);
+    const id = await readCollectionEmbedIdentity('postgresql://cs-identity-a', 'coll');
+    expect(id).toEqual({ total: 12, identified: 9, pairs: [{ model: 'bge', dim: 4 }] });
+    // 聚合必须是单条语句；参数是 collection 名。
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    const sql = queryMock.mock.calls[0]![0] as string;
+    expect(sql).toContain("DISTINCT metadata->>'embedModel'");
+    // dim 缺失的行必须进不了 CTE（否则 dim=NULL 会被比较器误报 mismatch）。
+    expect(sql).toContain("metadata->>'embedDim' IS NOT NULL");
+    expect(sql).toContain('AS total');
+    expect(sql).toContain('AS identified');
+    // 聚合必须在子查询内部（标量子查询形态在 ≥2 pair 时会抛 21000）。
+    expect(sql).toContain('(SELECT json_agg(x) FROM ids x)');
+    expect(sql).not.toContain('json_agg((SELECT x FROM ids x))');
+    expect(queryMock.mock.calls[0]![1]).toEqual(['coll']);
+  });
+
+  it('空行（collection 不存在）→ 全零，不抛错', async () => {
+    queryMock.mockResolvedValueOnce([]);
+    const id = await readCollectionEmbedIdentity('postgresql://cs-identity-b', 'coll');
+    expect(id).toEqual({ total: 0, identified: 0, pairs: [] });
+  });
+
+  it('60s 内第二个调用走缓存，不重复往返', async () => {
+    queryMock.mockResolvedValue([{ total: 1, identified: 1, pairs: [] }]);
+    await readCollectionEmbedIdentity('postgresql://cs-identity-cache', 'coll');
+    await readCollectionEmbedIdentity('postgresql://cs-identity-cache', 'coll');
+    expect(queryMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('describeEmbedderMismatch', () => {
+  const current = { model: 'bge-small', dim: 4 };
+
+  it('全部相符 → null', () => {
+    expect(describeEmbedderMismatch([{ model: 'bge-small', dim: 4 }], current)).toBeNull();
+    expect(describeEmbedderMismatch([], current)).toBeNull();
+  });
+
+  it('同维度、不同模型 → 报错并点名两侧模型', () => {
+    const msg = describeEmbedderMismatch([{ model: 'jina-v3', dim: 4 }], current);
+    expect(msg).toContain('jina-v3');
+    expect(msg).toContain('bge-small');
+    expect(msg).toContain('re-index');
+  });
+
+  it('同模型、不同维度 → 同样报错（提前于 SQL 的宽度错误）', () => {
+    const msg = describeEmbedderMismatch([{ model: 'bge-small', dim: 8 }], current);
+    expect(msg).toContain('dim=8');
+    expect(msg).toContain('dim=4');
+  });
+});
+
+describe('warnLegacyEmbedRows', () => {
+  it('每个 collection 只警告一次（跨调用去重）', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      warnLegacyEmbedRows('coll-warn-dedup', 6);
+      warnLegacyEmbedRows('coll-warn-dedup', 6);
+      warnLegacyEmbedRows('coll-warn-other', 1);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(String(spy.mock.calls[0]![0])).toContain('coll-warn-dedup');
+      expect(String(spy.mock.calls[0]![0])).toContain('6 chunk');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

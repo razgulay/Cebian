@@ -5,12 +5,14 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 // values via the exported vi.fn handles. `vi.hoisted` is required
 // because the vi.mock factories below run at module-eval time, before
 // top-level vi.fn() bindings would be initialized.
-const { ragSettingsGetValue, queryMock } = vi.hoisted(() => ({
+const { ragSettingsGetValue, queryMock, knownNamesMock } = vi.hoisted(() => ({
   ragSettingsGetValue: vi.fn(),
   queryMock: vi.fn(),
+  knownNamesMock: vi.fn(),
 }));
 vi.mock('@/lib/rag/settings', () => ({
   ragSettings: { getValue: ragSettingsGetValue },
+  listKnownCollectionNames: knownNamesMock,
 }));
 
 vi.mock('@/lib/rag/neon-client', () => ({
@@ -23,6 +25,8 @@ describe('ragInspectTool', () => {
   beforeEach(() => {
     ragSettingsGetValue.mockReset();
     queryMock.mockReset();
+    knownNamesMock.mockReset();
+    knownNamesMock.mockResolvedValue(['phaply', 'docs']);
   });
 
   afterEach(() => {
@@ -37,19 +41,36 @@ describe('ragInspectTool', () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
-  it('reports an empty collection', async () => {
+  it('reports zero rows honestly (may not exist OR empty) with known-name hints', async () => {
     ragSettingsGetValue.mockResolvedValue({ neonConnectionString: 'postgresql://test' });
-    // Both queries return empty rows — file GROUP BY returns 0 rows
-    // (collection has no chunks), metadata peek is never reached.
+    // File GROUP BY returns 0 rows — the collection is missing or empty;
+    // the tool can no longer claim "exists" (C2 fix).
     queryMock.mockResolvedValueOnce([]);
     const result = await ragInspectTool.execute(
       'call-2',
-      { collection: 'phaply' } as never,
+      { collection: 'phap_ly' } as never,
       undefined,
     );
     const text = (result.content[0] as { type: 'text'; text: string }).text;
-    expect(text).toContain('exists but is empty');
-    expect(text).toContain('phaply');
+    expect(text).toContain('may not exist or has zero indexed chunks');
+    expect(text).not.toContain('exists but is empty');
+    expect(text).toContain('phap_ly');
+    expect(text).toContain('known on this device');
+    expect(text).toContain('phaply'); // suggested known name
+  });
+
+  it('reports zero rows without a name list when local meta is empty', async () => {
+    ragSettingsGetValue.mockResolvedValue({ neonConnectionString: 'postgresql://test' });
+    queryMock.mockResolvedValueOnce([]);
+    knownNamesMock.mockResolvedValue([]);
+    const result = await ragInspectTool.execute(
+      'call-2b',
+      { collection: 'nope' } as never,
+      undefined,
+    );
+    const text = (result.content[0] as { type: 'text'; text: string }).text;
+    expect(text).toContain('may not exist or has zero indexed chunks');
+    expect(text).not.toContain('known on this device');
   });
 
   it('lists files + chunk counts + embedder model + dimension', async () => {

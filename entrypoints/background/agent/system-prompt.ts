@@ -90,19 +90,19 @@ User & skills:
 When the user message carries an \`<attached-rag-context>\` block, the chunks inside were retrieved from a named vector collection (Neon pgvector) and re-ranked when the user enabled rerank in Settings. Follow this protocol:
 
 1. **Treat the chunks as the primary source.** They were already retrieved by semantic similarity (Lớp 1) and optionally re-scored by a cross-encoder (Lớp 2) against the user's own outgoing text. Do NOT call \`fs_*\` tools to "look up" the same content — the answer is already in front of you. Reaching for \`fs_*\` will read VFS, not the RAG collection, and will return unrelated content.
-2. **Cite the source path + chunk index in your answer.** Each \`<chunk>\` has \`path="..."\` and \`index="..."\`. Reference them inline so the user can verify (\`according to <path> (chunk N)…\`). The \`score\` attribute is the reranker's confidence when rerank is enabled, or the raw cosine similarity otherwise — it's an ordering signal, not a fact to quote.
-3. **If the chunks are insufficient, say so.** When the envelope shows \`count="0"\` (with \`reason="no_match"\` or \`reason="empty"\`) or all scores are low, tell the user what happened (\`the collection "<name>" doesn't have anything matching this query\` / \`the collection "<name>" is empty\`) rather than fabricating. Don't reach for \`fs_*\` as a fallback — it reads VFS, not RAG.
+2. **Cite the source path + chunk index in your answer.** Each \`<chunk>\` has \`path="..."\` and \`index="..."\`. Reference them inline so the user can verify (\`according to <path> (chunk N)…\`). Chunks arrive in relevance order — there is no numeric score, so never invent or quote one.
+3. **If the chunks are insufficient, say so.** When the envelope shows \`count="0"\` (with \`reason="no_match"\`, \`reason="empty"\`, or \`reason="model_mismatch"\`), tell the user what happened (\`the collection "<name>" doesn't have anything matching this query\` / \`the collection "<name>" is empty\`) rather than fabricating. If \`reason="model_mismatch"\`, the collection was indexed with a different embedding model than the one currently configured — tell the user to re-index it or switch the embedder back in Settings → Knowledge; do NOT retry the query. Don't reach for \`fs_*\` as a fallback — it reads VFS, not RAG.
 4. **For metadata questions about a collection (file list, chunk count, embedder model), call \`rag_inspect\`.** RAG collections are NOT mirrored to VFS — \`fs_list\`/\`fs_search\`/\`fs_read_file\` only see the virtual filesystem under \`/home/user/...\`. If you need to know what files are in \`<attached-rag-context collection="phaply">\`, call \`rag_inspect({ collection: "phaply" })\`; it returns the file paths + chunk counts from Neon plus the embedder model and dimension used at index time. Do NOT guess from \`fs_search("**/*phaply*")\` — that searches VFS, which doesn't contain the collection.
 {{RAG_SEARCH_WORKFLOW_STEP}}
 
 Example:
 
 <attached-rag-context collection="research-papers" count="2">
-  <chunk path="papers/attention.pdf" index="3" score="0.87">The attention mechanism computes a weighted sum…</chunk>
-  <chunk path="papers/transformer.md" index="0" score="0.81">A transformer is a deep learning model…</chunk>
+  <chunk path="papers/attention.pdf" index="3">The attention mechanism computes a weighted sum…</chunk>
+  <chunk path="papers/transformer.md" index="0">A transformer is a deep learning model…</chunk>
 </attached-rag-context>
 
-→ "According to papers/attention.pdf (chunk 3, score 0.87), the attention mechanism … A transformer is described in papers/transformer.md (chunk 0, score 0.81) as …"
+→ "According to papers/attention.pdf (chunk 3), the attention mechanism … A transformer is described in papers/transformer.md (chunk 0) as …"
 
 ### Pinned Attachments
 

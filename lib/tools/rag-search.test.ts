@@ -16,6 +16,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/lib/rag/settings', () => ({
   ragSettings: { getValue: vi.fn() },
+  listKnownCollectionNames: vi.fn(),
 }));
 
 vi.mock('@/lib/rag/embedder', () => {
@@ -39,16 +40,26 @@ vi.mock('@/lib/rag/hybrid-search', () => ({
   hybridRagSearch: vi.fn(),
 }));
 
-vi.mock('@/lib/rag/neon-client', () => ({
-  query: vi.fn(),
-  embeddingToVectorLiteral: vi.fn().mockReturnValue('[0.1,0.2]'),
-  bootstrapSchema: vi.fn(),
-}));
+vi.mock('@/lib/rag/neon-client', async (importOriginal) => {
+  // Keep the REAL `describeEmbedderMismatch` (pure comparator) so the
+  // guard tests below exercise actual model/dim comparison logic; only
+  // the IO surface (`query`, identity read, legacy warn) is mocked.
+  const actual = await importOriginal<typeof import('@/lib/rag/neon-client')>();
+  return {
+    ...actual,
+    query: vi.fn(),
+    embeddingToVectorLiteral: vi.fn().mockReturnValue('[0.1,0.2]'),
+    bootstrapSchema: vi.fn(),
+    readCollectionEmbedIdentity: vi.fn(),
+    warnLegacyEmbedRows: vi.fn(),
+  };
+});
 
-import { ragSearchTool } from './rag-search';
-import { ragSettings } from '@/lib/rag/settings';
+import { createRagSearchTool } from './rag-search';
+import { ragSettings, listKnownCollectionNames } from '@/lib/rag/settings';
 import { hybridRagSearch } from '@/lib/rag/hybrid-search';
 import * as EmbedderModule from '@/lib/rag/embedder';
+import { readCollectionEmbedIdentity, warnLegacyEmbedRows, query } from '@/lib/rag/neon-client';
 
 // The imports above are the **mocked** module surfaces — every call
 // here resolves to the `vi.fn()` we returned from the factory.
@@ -61,6 +72,23 @@ const mockedHybridSearch = hybridRagSearch as unknown as ReturnType<typeof vi.fn
 const mockedEmbedder = (EmbedderModule as unknown as {
   __sharedEmbed: ReturnType<typeof vi.fn>;
 }).__sharedEmbed;
+const mockedIdentity = readCollectionEmbedIdentity as unknown as ReturnType<typeof vi.fn>;
+const mockedWarnLegacy = warnLegacyEmbedRows as unknown as ReturnType<typeof vi.fn>;
+const mockedKnownNames = listKnownCollectionNames as unknown as ReturnType<typeof vi.fn>;
+
+/** Singleton under test with the old (switch-only) gate — `unlocked: false`
+ *  reproduces pre-pin behavior; a dedicated test below drives `unlocked: true`. */
+const ragSearchTool = createRagSearchTool(false);
+
+/** Identity blob matching `baseSettings` (bge-small / dim 4) — the "clean,
+ *  fully identified collection" default every existing test relies on. */
+function stubCleanIdentity() {
+  mockedIdentity.mockResolvedValue({
+    total: 5,
+    identified: 5,
+    pairs: [{ model: 'bge-small', dim: 4 }],
+  });
+}
 
 /** Default settings blob — every test spreads it and overrides what
  *  it cares about. The shape mirrors `RagSettings` but we only type
@@ -88,6 +116,11 @@ describe('ragSearchTool', () => {
     mockedGetValue.mockReset();
     mockedHybridSearch.mockReset();
     mockedEmbedder.mockReset();
+    mockedIdentity.mockReset();
+    mockedWarnLegacy.mockReset();
+    mockedKnownNames.mockReset();
+    stubCleanIdentity();
+    mockedKnownNames.mockResolvedValue(['phaply', 'docs']);
   });
 
   afterEach(() => {
@@ -140,8 +173,124 @@ describe('ragSearchTool', () => {
     const text = (result.content[0] as { type: 'text'; text: string }).text;
     expect(text).toContain('<rag-search-result');
     expect(text).toContain('collection="phaply"');
-    expect(text).toContain('count="0"');
+    // Clean identity (total=5) → data exists, nothing matched.
+    expect(text).toContain('count="0" reason="no_match"');
     expect(text).toContain('(no matching chunks');
+  });
+
+  it('escapes the collection attribute in the empty-result envelope too', async () => {
+    // The `collection` param comes from the LLM and is NOT validated
+    // against real collections, so it can carry any string — the empty
+    // branch must escape it exactly like the hit branch (B fix).
+    mockedGetValue.mockResolvedValue(baseSettings);
+    stubEmbedderSuccess();
+    mockedHybridSearch.mockResolvedValueOnce([]);
+    const result = await ragSearchTool.execute(
+      'call-4b',
+      { collection: 'a"b&c', query: 'q' } as never,
+      undefined,
+    );
+    const text = (result.content[0] as { type: 'text'; text: string }).text;
+    expect(text).toContain('collection="a&quot;b&amp;c"');
+    // Raw unescaped form must not survive into the envelope.
+    expect(text).not.toContain('collection="a"b&c"');
+  });
+
+  it('returns reason="collection_not_found" with known-name hints BEFORE embedding when the collection has zero rows', async () => {
+    // Fast path (ST3 feedback): a missing/empty collection returns the
+    // envelope immediately — no embed API call, no doomed search round-trip.
+    mockedGetValue.mockResolvedValue(baseSettings);
+    stubEmbedderSuccess();
+    mockedHybridSearch.mockResolvedValueOnce([]);
+    mockedIdentity.mockResolvedValue({ total: 0, identified: 0, pairs: [] });
+    const result = await ragSearchTool.execute(
+      'call-4c',
+      { collection: 'phap_ly', query: 'q' } as never,
+      undefined,
+    );
+    const text = (result.content[0] as { type: 'text'; text: string }).text;
+    expect(text).toContain('count="0" reason="collection_not_found"');
+    expect(text).toContain('known on this device');
+    expect(text).toContain('phaply'); // suggested known name
+    // Fast-path contract: nothing downstream of the identity read runs.
+    expect(mockedEmbedder).not.toHaveBeenCalled();
+    expect(mockedHybridSearch).not.toHaveBeenCalled();
+    // Zero-extra-round-trip contract: no additional Neon query may be
+    // issued on this path (e.g. a countCollectionChunks regression).
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('reports collection_not_found without a name list when local meta is empty', async () => {
+    mockedGetValue.mockResolvedValue(baseSettings);
+    stubEmbedderSuccess();
+    mockedHybridSearch.mockResolvedValueOnce([]);
+    mockedIdentity.mockResolvedValue({ total: 0, identified: 0, pairs: [] });
+    mockedKnownNames.mockResolvedValue([]);
+    const result = await ragSearchTool.execute(
+      'call-4d',
+      { collection: 'a&b', query: 'q' } as never,
+      undefined,
+    );
+    const text = (result.content[0] as { type: 'text'; text: string }).text;
+    expect(text).toContain('reason="collection_not_found"');
+    expect(text).not.toContain('known on this device');
+    // No dangling instruction: nothing was listed, so the envelope must
+    // NOT tell the LLM to pick from a list.
+    expect(text).not.toContain('Use one of the listed names');
+    expect(text).toContain('Ask the user for the correct collection name');
+    // Body-side escaping of the collection name (escapeText — `&` → `&amp;`).
+    expect(text).toContain('no collection named "a&amp;b"');
+  });
+
+  it('throws BEFORE embedding when the collection was indexed with a different embedder (same dim)', async () => {
+    // Same dim (4) but a different model — exactly the case dim
+    // validation cannot catch; the identity guard must, before the
+    // embed API call is spent.
+    mockedGetValue.mockResolvedValue(baseSettings);
+    mockedIdentity.mockResolvedValue({
+      total: 10,
+      identified: 10,
+      pairs: [{ model: 'jina-embeddings-v3', dim: 4 }],
+    });
+    await expect(
+      ragSearchTool.execute('call-6', { collection: 'phaply', query: 'q' } as never, undefined),
+    ).rejects.toThrow(/jina-embeddings-v3[\s\S]*bge-small/);
+    expect(mockedEmbedder).not.toHaveBeenCalled();
+    expect(mockedHybridSearch).not.toHaveBeenCalled();
+  });
+
+  it('proceeds with a one-time legacy warn when some chunks lack model metadata', async () => {
+    mockedGetValue.mockResolvedValue(baseSettings);
+    stubEmbedderSuccess();
+    mockedHybridSearch.mockResolvedValueOnce([]);
+    mockedIdentity.mockResolvedValue({
+      total: 10,
+      identified: 4,
+      pairs: [{ model: 'bge-small', dim: 4 }],
+    });
+    const result = await ragSearchTool.execute(
+      'call-7',
+      { collection: 'phaply', query: 'q' } as never,
+      undefined,
+    );
+    expect((result.content[0] as { type: string }).type).toBe('text');
+    expect(mockedWarnLegacy).toHaveBeenCalledTimes(1);
+    expect(mockedWarnLegacy).toHaveBeenCalledWith('phaply', 6);
+    expect(mockedHybridSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs when the session is pin-unlocked even with the global switch off', async () => {
+    const unlockedTool = createRagSearchTool(true);
+    mockedGetValue.mockResolvedValue({ ...baseSettings, ragSearchEnabled: false });
+    stubEmbedderSuccess();
+    mockedHybridSearch.mockResolvedValueOnce([]);
+    const result = await unlockedTool.execute(
+      'call-8',
+      { collection: 'phaply', query: 'q' } as never,
+      undefined,
+    );
+    expect((result.content[0] as { type: string }).type).toBe('text');
+    expect(mockedHybridSearch).toHaveBeenCalledTimes(1);
   });
 
   it('returns a structured envelope with chunk XML when hybrid search hits', async () => {
@@ -183,8 +332,10 @@ describe('ragSearchTool', () => {
     expect(text).toContain('query="attention mechanism"');
     expect(text).toContain('count="2"');
 
-    // First chunk — context prefix surfaces, score formatted as float
+    // First chunk — context prefix surfaces, no numeric score (order is
+    // the only ranking signal in the envelope).
     expect(text).toContain('<chunk source="/papers/a.md" index="3"');
+    expect(text).not.toContain('score=');
     expect(text).toContain('context="Section on attention mechanisms."');
     expect(text).toContain('>The transformer attention mechanism');
 

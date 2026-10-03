@@ -7,7 +7,15 @@
 import { CEBIAN_PROMPTS_DIR } from '@/lib/persistence/vfs-paths';
 import { vfs } from '@/lib/persistence/vfs';
 import { parseFrontmatter } from '@/lib/content/frontmatter';
-import { ragSettings, buildEmbedder, buildReranker, retrieve } from '@/lib/rag';
+import {
+  ragSettings,
+  buildEmbedder,
+  buildReranker,
+  retrieve,
+  readCollectionEmbedIdentity,
+  describeEmbedderMismatch,
+  warnLegacyEmbedRows,
+} from '@/lib/rag';
 import type {
   DirectoryMentionAttachment,
   FileMentionAttachment,
@@ -267,6 +275,35 @@ export async function resolveMentionToAttachment(
       if (!settings.neonConnectionString) return null;
       const queryText = userQuery?.trim() ?? '';
       if (!queryText) return null;
+      // C1 guard：读路径的 (model, dim) 对账（写路径在 planIndex 已有同款）。
+      // 错配时**不抛错**——本函数的失败是静默的（pin 会累计失败计数并在 3 次
+      // 后自动解除，见 PIN_AUTO_UNPIN_THRESHOLD），抛错等于让一次可修复的配置
+      // 错误悄悄拆掉用户的 pin。改为发一个空 envelope，让 LLM 明确告知用户
+      // 「collection 是用另一个 embedder 索引的，需要 re-index 或换回去」。
+      // 分支与 rag_search 同表：total===0 放行；mismatch 优先；identified <
+      // total（legacy 行）放行 + 一次性 warn。
+      const identity = await readCollectionEmbedIdentity(
+        settings.neonConnectionString,
+        chip.collection,
+      );
+      if (identity.total > 0) {
+        const mismatch = describeEmbedderMismatch(identity.pairs, {
+          model: settings.defaultEmbedModel,
+          dim: settings.embedderDim,
+        });
+        if (mismatch) {
+          return {
+            type: 'rag-context',
+            collection: chip.collection,
+            query: queryText,
+            chunks: [],
+            reason: 'model_mismatch',
+          };
+        }
+        if (identity.identified < identity.total) {
+          warnLegacyEmbedRows(chip.collection, identity.total - identity.identified);
+        }
+      }
       const chunks = await retrieve({
         connectionString: settings.neonConnectionString,
         collection: chip.collection,

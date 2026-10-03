@@ -13,6 +13,7 @@ export type {
 } from './types';
 export {
   DEFAULT_RAG_SETTINGS,
+  listKnownCollectionNames,
   normalizeCollectionName,
   patchCollectionCount,
   ragCollections,
@@ -25,11 +26,19 @@ export {
   bootstrapSchema,
   countCollectionChunks,
   deleteCollectionChunks,
+  describeEmbedderMismatch,
   embeddingToVectorLiteral,
   query,
+  readCollectionEmbedIdentity,
   testConnection,
+  warnLegacyEmbedRows,
 } from './neon-client';
-export type { BootstrapWarning, ConnectionTestResult } from './neon-client';
+export type {
+  BootstrapWarning,
+  CollectionEmbedIdentity,
+  ConnectionTestResult,
+  EmbedIdentityPair,
+} from './neon-client';
 export type { Embedder, EmbedderConfig } from './embedder';
 export { OpenAICompatEmbedder } from './embedder';
 export {

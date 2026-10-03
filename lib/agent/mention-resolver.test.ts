@@ -5,10 +5,20 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 // `vi.hoisted` is required because the vi.mock factory below runs at
 // module-eval time, before the top-level vi.fn() bindings would be
 // initialized.
-const { retrieveMock, ragSettingsGetValue, countCollectionChunksMock } = vi.hoisted(() => ({
+const {
+  retrieveMock,
+  ragSettingsGetValue,
+  countCollectionChunksMock,
+  readCollectionEmbedIdentityMock,
+  describeEmbedderMismatchMock,
+  warnLegacyEmbedRowsMock,
+} = vi.hoisted(() => ({
   retrieveMock: vi.fn(),
   ragSettingsGetValue: vi.fn(),
   countCollectionChunksMock: vi.fn(),
+  readCollectionEmbedIdentityMock: vi.fn(),
+  describeEmbedderMismatchMock: vi.fn(),
+  warnLegacyEmbedRowsMock: vi.fn(),
 }));
 vi.mock('@/lib/rag', () => ({
   retrieve: retrieveMock,
@@ -16,6 +26,9 @@ vi.mock('@/lib/rag', () => ({
   buildReranker: () => null,
   ragSettings: { getValue: ragSettingsGetValue },
   countCollectionChunks: countCollectionChunksMock,
+  readCollectionEmbedIdentity: readCollectionEmbedIdentityMock,
+  describeEmbedderMismatch: describeEmbedderMismatchMock,
+  warnLegacyEmbedRows: warnLegacyEmbedRowsMock,
 }));
 
 import { resolveMentionToAttachment } from './mention-resolver';
@@ -31,7 +44,18 @@ describe('resolveMentionToAttachment — pinned RAG path', () => {
     retrieveMock.mockReset();
     ragSettingsGetValue.mockReset();
     countCollectionChunksMock.mockReset();
+    readCollectionEmbedIdentityMock.mockReset();
+    describeEmbedderMismatchMock.mockReset();
+    warnLegacyEmbedRowsMock.mockReset();
     ragSettingsGetValue.mockResolvedValue({ neonConnectionString: 'postgresql://test' });
+    // Clean, fully-identified collection by default — every existing
+    // test relies on the guard passing through.
+    readCollectionEmbedIdentityMock.mockResolvedValue({
+      total: 10,
+      identified: 10,
+      pairs: [],
+    });
+    describeEmbedderMismatchMock.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -112,6 +136,37 @@ describe('resolveMentionToAttachment — pinned RAG path', () => {
     );
     expect(out).toBeNull();
     expect(retrieveMock).not.toHaveBeenCalled();
+  });
+
+  it('emits reason="model_mismatch" WITHOUT retrieving when the collection was indexed with another embedder', async () => {
+    // The pin path must NOT throw — failures here are silent and count
+    // toward auto-unpin; a fixable config error would silently tear
+    // down the user's pin. The envelope tells the LLM what to say.
+    describeEmbedderMismatchMock.mockReturnValue(
+      'This collection was indexed with embedding model "old-model" ...',
+    );
+    const out = await resolveMentionToAttachment(ragChip, 'phaply', { pinned: true });
+    expect(out).not.toBeNull();
+    expect(out?.type).toBe('rag-context');
+    expect((out as { reason?: string }).reason).toBe('model_mismatch');
+    expect((out as { chunks: unknown[] }).chunks).toEqual([]);
+    expect(retrieveMock).not.toHaveBeenCalled();
+  });
+
+  it('proceeds to retrieval with a legacy warn when some chunks lack model metadata', async () => {
+    readCollectionEmbedIdentityMock.mockResolvedValue({
+      total: 10,
+      identified: 4,
+      pairs: [],
+    });
+    retrieveMock.mockResolvedValue([
+      { sourcePath: '/x.md', chunkIndex: 0, content: 'hi', score: 0.9 },
+    ]);
+    const out = await resolveMentionToAttachment(ragChip, 'phaply', { pinned: true });
+    expect(out).not.toBeNull();
+    expect((out as { chunks: unknown[] }).chunks.length).toBe(1);
+    expect(warnLegacyEmbedRowsMock).toHaveBeenCalledTimes(1);
+    expect(retrieveMock).toHaveBeenCalledTimes(1);
   });
 });
 

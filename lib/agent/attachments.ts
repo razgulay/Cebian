@@ -147,8 +147,9 @@ export interface FileMentionAttachment {
 /** Top-K chunks retrieved from a RAG collection at send-time. The LLM
  *  receives them inside `<attached-rag-context>` as `<chunk>` blocks —
  *  one per retrieved chunk, each carrying the source path + chunk
- *  index + score. The agent sees only what the retriever picked, not
- *  the whole collection, keeping prompt budget bounded.
+ *  index (no numeric score — order conveys the ranking). The agent
+ *  sees only what the retriever picked, not the whole collection,
+ *  keeping prompt budget bounded.
  *
  *  When `chunks` is empty, `reason` explains why so the LLM can
  *  decide between answering "no matches" (LLM should NOT fall back
@@ -170,14 +171,44 @@ export interface RagContextAttachment {
     sourcePath: string;
     chunkIndex: number;
     content: string;
-    score: number;
   }[];
   /** Why `chunks` is empty. `no_match` = retriever ran but minScore
    *  filtered everything out (or the collection had no relevant hits);
    *  `empty` = the collection has zero indexed chunks. Undefined when
-   *  chunks.length > 0 (omitted from the XML). */
-  reason?: 'no_match' | 'empty';
+   *  chunks.length > 0 (omitted from the XML).
+   *  `model_mismatch` = collection 是用另一个 embedder 索引的（读取守卫拦下，
+   *  未执行检索）——envelope 提示 LLM 让用户 re-index 或把 embedder 换回去。 */
+  reason?: 'no_match' | 'empty' | 'model_mismatch';
   pinned?: boolean;
+}
+
+// ─── Pinned-RAG unlock evidence（rag_search 自动启用的证据）───────────────
+//
+// 会话 ghim 了 RAG collection 时，rag_search 工具对该会话解锁（即使全局开关
+// 关闭）。证据有两形态、走同一判定：
+//   • structured——send 路径：attachment 数组里有 `pinned="true"` 的
+//     rag-context（后台 send handler 直接读 ClientMessage.attachments）；
+//   • text——retry/edit 路径：原 user message 的文本里带 `<attached-rag-context
+//     … pinned="true" …>` envelope（回卷路径手里只有树上的消息文本）。
+// 正则锚定在我们的 wire contract 上（system prompt 教过、bubble parser 也按
+// 这个形状走文本），`<attached-… pinned="true">` 的其它种类（directory/file）
+// 不会误命中——tag 名不同。
+//
+// 债务（记录在案）：上面两个函数是同一判定的两个入口（结构化遍历 vs 文本
+// regex），存在漂移面——envelope 形状改了而 regex 没跟上时，retry 路径会静默
+// 失去证据。统一做法：structured 侧也走 `buildTextPrefix` 序列化后过同一
+// regex（单一事实源）。本轮不做。
+
+/** send 路径：attachment 数组里是否有 pinned 的 RAG context。 */
+export function hasPinnedRagContext(
+  attachments: readonly Attachment[] | undefined,
+): boolean {
+  return attachments?.some((a) => a.type === 'rag-context' && a.pinned === true) ?? false;
+}
+
+/** retry/edit 路径：user message 文本里是否带 pinned 的 rag-context envelope。 */
+export function textHasPinnedRagContext(text: string): boolean {
+  return /<attached-rag-context\b[^>]*\bpinned="true"/.test(text);
 }
 
 export type Attachment =
@@ -419,19 +450,16 @@ export function buildTextPrefix(attachments: Attachment[]): string {
     }
 
     if (a.type === 'rag-context') {
-      // Each retrieved chunk becomes a <chunk> child of <attached-rag-context>.
-      // Score is included so the agent can see the retriever's confidence
-      // ordering. Empty result → still emit the envelope so the agent knows
-      // the collection was queried (vs silently dropped). When `reason` is
-      // set, add it as an attribute + a short inline hint so the agent can
-      // distinguish "no matches above the relevance threshold" from
-      // "collection is empty" without guessing. The hint names the
-      // `rag_inspect` tool so the agent has a fallback path that doesn't
-      // involve fs_*.
+      // 每个 chunk 渲染成 <attached-rag-context> 的一个 <chunk> 子元素。
+      // envelope 不带数值分数：hybrid（默认）模式下它是几乎无意义的 RRF 常数，
+      // 给 LLM 一个数字只会诱导跨调用比较或自行设阈值（pinMinScore 的教训）——
+      // 顺序本身就是排名信号。空结果也要发 envelope，让 agent 知道 collection
+      // 被查过（而不是被静默丢弃）。`reason` 存在时作为属性 + 一句内联提示，
+      // 让 agent 不用猜就能区分「没有命中」与「collection 为空」；提示里点名
+      // `rag_inspect`，给 agent 一条不经过 fs_* 的兜底路径。
       const chunkBlocks = a.chunks.map((c) => {
-        const score = c.score.toFixed(4);
         return (
-          `  <chunk path="${escapeXml(c.sourcePath, { forAttribute: true })}" index="${c.chunkIndex}" score="${score}">\n` +
+          `  <chunk path="${escapeXml(c.sourcePath, { forAttribute: true })}" index="${c.chunkIndex}">\n` +
           `${escapeXml(c.content)}\n` +
           `  </chunk>`
         );
@@ -450,7 +478,9 @@ export function buildTextPrefix(attachments: Attachment[]): string {
         const hint =
           reason === 'empty'
             ? 'This collection has no indexed chunks yet. Use rag_inspect to confirm, or ask the user to pick files and re-index.'
-            : 'No chunks matched the user\'s outgoing text above the relevance threshold. Use rag_inspect to see what files are in this collection, or ask the user to refine the question.';
+            : reason === 'model_mismatch'
+              ? 'This collection was indexed with a different embedding model than the one currently configured, so it cannot be searched reliably. Do NOT retry the query — instead tell the user to re-index the collection with the current embedder, or to switch the embedder back in Settings → Knowledge.'
+              : 'No chunks matched the user\'s outgoing text above the relevance threshold. Use rag_inspect to see what files are in this collection, or ask the user to refine the question.';
         blocks.push(
           `<attached-rag-context${pinnedAttr} collection="${escapeXml(a.collection, { forAttribute: true })}" count="0" reason="${reason}">\n${escapeXml(hint)}\n</attached-rag-context>`,
         );

@@ -47,20 +47,23 @@ import { ragSettings } from '@/lib/rag';
  */
 /**
  * Compose the two conditional RAG-search placeholders in the system
- * prompt. Both are empty strings when `settings.ragSearchEnabled` is
- * false (the default) so the prompt stays byte-identical to pre-
- * Subtask-4. When the user has the toggle on, we surface the tool
- * in the Tools roster AND add a step-5 to the RAG Workflow so the
- * LLM knows when to reach for `rag_search` instead of fabricating
- * answers from stale pre-injected chunks.
+ * prompt. Both are empty strings when the effective flag is off —
+ * effective = `settings.ragSearchEnabled`（全局开关）OR `ragSearchUnlocked`
+ * （本会话因 ghim 了 RAG collection 而解锁，证据随每次 send 的 attachment
+ * 到达，见 `lib/agent/attachments.ts` 的 `hasPinnedRagContext`）。全局开关
+ * 关闭且未解锁时 prompt 保持 byte-identical to pre-Subtask-4. When the
+ * effective flag is on, we surface the tool in the Tools roster AND add a
+ * step-5 to the RAG Workflow so the LLM knows when to reach for
+ * `rag_search` instead of fabricating answers from stale pre-injected
+ * chunks.
  *
- * The two must agree with `lib/tools/index.ts` which only pushes the
- * tool into the session's tool array when the same flag is on. If
- * the prompt mentions `rag_search` but the tool isn't in the tool
- * list, the LLM hallucinates a call; if the tool exists but the
- * prompt never explains when to use it, the LLM never picks it.
- * Reading the same `ragSettings` blob here keeps the two sides in
- * sync within a single `composeSystemPrompt` call.
+ * The two must agree with `lib/tools/index.ts` which pushes the tool into
+ * the session's tool array under the same effective flag. If the prompt
+ * mentions `rag_search` but the tool isn't in the tool list, the LLM
+ * hallucinates a call; if the tool exists but the prompt never explains
+ * when to use it, the LLM never picks it. The send path feeds BOTH sides
+ * the same turn snapshot (see session-manager) so they stay in lockstep
+ * within a single dispatch.
  */
 function buildRagSearchToolLine(enabled: boolean): string {
   // OFF: substitute to empty string. The Subtask-4 placeholder sits
@@ -258,6 +261,7 @@ async function composeSystemPrompt(
   memoryEnabled?: boolean,
   workerTeamOn?: boolean,
   personaOn?: boolean,
+  ragSearchUnlocked?: boolean,
 ): Promise<string> {
   // personaOn / workerTeamOn 是同源 snapshot：与 lib/tools/index.ts 的 buildSessionToolArray
   // 共享同一个 storage flag，但有「调用方预读 / 实时读」两种走法。per-subtask 1 模式：
@@ -291,13 +295,19 @@ async function composeSystemPrompt(
       MEMORY_LIMITATION: memoryLimitationLine(enabled),
       MEMORY_SECTION: enabled ? `\n${MEMORY_INSTRUCTIONS}\n` : '',
       // Subtask 4 — agentic `rag_search` tool. Both placeholders stay
-      // empty when off (prompt byte-identical to pre-Subtask-4). The
-      // gate flag is read here once per `composeSystemPrompt` call;
-      // `buildRagSearchToolLine` / `buildRagSearchWorkflowStep` read
-      // `currentRagSettings` so a flipped toggle is picked up on the
-      // next prompt rebuild (every dispatch — see `factory.ts`).
-      RAG_SEARCH_TOOL_LINE: buildRagSearchToolLine(currentRagSettings.ragSearchEnabled),
-      RAG_SEARCH_WORKFLOW_STEP: buildRagSearchWorkflowStep(currentRagSettings.ragSearchEnabled),
+      // empty when the effective flag is off (prompt byte-identical to
+      // pre-Subtask-4). Effective flag = global toggle OR 本会话 pin 解锁
+      // （调用方从本轮 attachment 证据算出，同一 snapshot 也喂给了
+      // buildSessionToolArray——两侧必须一致，否则幻觉调用或永不调用）。
+      // `buildRagSearchToolLine` / `buildRagSearchWorkflowStep` read the
+      // resolved flag so a flipped toggle or pin change is picked up on
+      // the next prompt rebuild (every dispatch).
+      RAG_SEARCH_TOOL_LINE: buildRagSearchToolLine(
+        currentRagSettings.ragSearchEnabled || ragSearchUnlocked === true,
+      ),
+      RAG_SEARCH_WORKFLOW_STEP: buildRagSearchWorkflowStep(
+        currentRagSettings.ragSearchEnabled || ragSearchUnlocked === true,
+      ),
       // Worker Team 总开关。true 时 buildSystemPrompt 才 push
       // `<available-workers>` L1 块（与 lib/tools/index.ts 是否 push
       // `delegate_task` 工具同源），false 时两边都撤，避免 LLM 看到

@@ -11,22 +11,22 @@ describe('buildTextPrefix — RAG context attachments', () => {
         sourcePath: 'papers/attention.pdf',
         chunkIndex: 3,
         content: 'The attention mechanism computes a weighted sum…',
-        score: 0.8732,
       },
       {
         sourcePath: 'papers/transformer.md',
         chunkIndex: 0,
         content: 'A transformer is a deep learning model…',
-        score: 0.8124,
       },
     ],
   };
 
-  it('renders chunks inside <attached-rag-context> with score + path', () => {
+  it('renders chunks inside <attached-rag-context> with path (no numeric score)', () => {
     const xml = buildTextPrefix([ragAttachment]);
     expect(xml).toContain('<attached-rag-context collection="research-papers" count="2">');
-    expect(xml).toContain('<chunk path="papers/attention.pdf" index="3" score="0.8732">');
-    expect(xml).toContain('<chunk path="papers/transformer.md" index="0" score="0.8124">');
+    expect(xml).toContain('<chunk path="papers/attention.pdf" index="3">');
+    expect(xml).toContain('<chunk path="papers/transformer.md" index="0">');
+    // Score is internal-only — it must never leak into the envelope.
+    expect(xml).not.toContain('score=');
     expect(xml).toContain('The attention mechanism computes a weighted sum…');
     expect(xml).toContain('A transformer is a deep learning model…');
     expect(xml).toContain('</attached-rag-context>');
@@ -66,6 +66,23 @@ describe('buildTextPrefix — RAG context attachments', () => {
     expect(xml).toContain('rag_inspect');
   });
 
+  it('emits reason="model_mismatch" hint telling the LLM to stop and inform the user', () => {
+    const mismatch: Attachment = {
+      type: 'rag-context',
+      collection: 'phaply',
+      query: 'q',
+      chunks: [],
+      reason: 'model_mismatch',
+    };
+    const xml = buildTextPrefix([mismatch]);
+    expect(xml).toContain('reason="model_mismatch"');
+    expect(xml).toContain('different embedding model');
+    expect(xml).toContain('Do NOT retry the query');
+    // The mismatch hint must NOT fall through to the no_match wording
+    // ("refine the question" is unique to that branch).
+    expect(xml).not.toContain('refine the question');
+  });
+
   it('escapes XML-unsafe characters in chunk content', () => {
     const dangerous: Attachment = {
       type: 'rag-context',
@@ -76,7 +93,6 @@ describe('buildTextPrefix — RAG context attachments', () => {
           sourcePath: 'a&b<c>.md',
           chunkIndex: 0,
           content: 'if (a < b && c > d) { return "<x>"; }',
-          score: 0.5,
         },
       ],
     };

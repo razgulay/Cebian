@@ -486,6 +486,124 @@ export async function countCollectionChunks(
   return parseInt(rows[0]?.count ?? '0', 10);
 }
 
+// ─── 嵌入身份守卫（读取路径）────────────────────────────────────────
+//
+// 写路径在 `planIndex` 里守 (model, dim)（见 plan.ts「模型混用」），但读取路径
+// （`retrieve` / `rag_search`）此前没有任何检查：换到另一个**同维度**的模型后，
+// query 会在新空间里嵌入、与旧空间的向量算 cosine——分数无意义且不报任何错。
+// 下面这条聚合查询就是给读取路径补上同一道守卫的数据源：一次往返同时拿到
+// 「总行数 / 已识别行数 / 去重 (model, dim) 组合」，空结果分支还要用 total 来
+// 区分「collection 不存在/为空」与「没有命中」。
+//
+// pairs 的聚合必须写成 `(SELECT json_agg(x) FROM ids x)`（聚合在子查询内部），
+// 不能写成 `json_agg((SELECT x FROM ids x))`：外层 SELECT 无 FROM 时后者是
+// **标量子查询**，ids 有 ≥2 行会直接抛 `more than one row returned by a
+// subquery`（SQLSTATE 21000）——恰好是 mixed-model 这个守卫最该处理的形态。
+// 聚合放进子查询后恒返回一行，任意行数都安全。
+//
+// CTE 同时要求 embedModel 与 embedDim 非空：只有 model 没记录 dim 的行，读出
+// `dim = NULL` 后在比较器里会 `null !== n` → 误报 mismatch。这种行被归入
+// legacy（不可验证），由 `identified` 的 FILTER 同口径统计、走 warn 分支。
+
+/** 一对已识别的嵌入身份：写入该行向量时的模型与宽度。 */
+export interface EmbedIdentityPair {
+  model: string;
+  dim: number;
+}
+
+/** collection 的嵌入身份概览（一次往返取全）。 */
+export interface CollectionEmbedIdentity {
+  /** collection 里的总 chunk 数（含 legacy 行）。 */
+  total: number;
+  /** model 与 dim **都有**记录的行数——追踪引入前写入的 legacy 行（含只记了
+   *  model 没记 dim 的残缺行）不计入。 */
+  identified: number;
+  /** 已识别部分的去重 (model, dim) 组合。 */
+  pairs: EmbedIdentityPair[];
+}
+
+interface EmbedIdentityRow {
+  total: number;
+  identified: number;
+  pairs: EmbedIdentityPair[] | null;
+}
+
+/** 身份读取的 60s 进程内缓存。读路径（pin 的每次发送、rag_search 的每次调用）
+ *  都会用到，逐次往返 Neon（新加坡 ~50ms）没有必要。staleness 窗口：reindex
+ *  完成后最多 60s 内守卫可能仍看到旧模型——随后自愈，不值得为此加失效通知。 */
+const EMBED_IDENTITY_TTL_MS = 60_000;
+const embedIdentityCache = new Map<string, { at: number; value: CollectionEmbedIdentity }>();
+
+/** 读取 collection 的嵌入身份（`total` / `identified` / 去重 `pairs`），带 60s 缓存。
+ *  查询失败照常抛错——DB 不可用时后续的检索调用同样会失败，守卫不必吞错。 */
+export async function readCollectionEmbedIdentity(
+  connectionString: string,
+  collection: string,
+): Promise<CollectionEmbedIdentity> {
+  const key = `${connectionString}\u0000${collection}`;
+  const cached = embedIdentityCache.get(key);
+  if (cached && Date.now() - cached.at < EMBED_IDENTITY_TTL_MS) return cached.value;
+
+  const rows = await query<EmbedIdentityRow>(
+    connectionString,
+    `WITH ids AS (
+       SELECT DISTINCT metadata->>'embedModel' AS model,
+              (metadata->>'embedDim')::int AS dim
+         FROM rag_chunks
+        WHERE collection = $1
+          AND metadata->>'embedModel' IS NOT NULL
+          AND metadata->>'embedDim' IS NOT NULL
+     )
+     SELECT (SELECT count(*)::int FROM rag_chunks WHERE collection = $1) AS total,
+            (SELECT count(*) FILTER (WHERE metadata->>'embedModel' IS NOT NULL
+                                       AND metadata->>'embedDim' IS NOT NULL)::int
+               FROM rag_chunks WHERE collection = $1) AS identified,
+            COALESCE((SELECT json_agg(x) FROM ids x), '[]'::json) AS pairs`,
+    [collection],
+  );
+  const value: CollectionEmbedIdentity = {
+    total: rows[0]?.total ?? 0,
+    identified: rows[0]?.identified ?? 0,
+    pairs: rows[0]?.pairs ?? [],
+  };
+  embedIdentityCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** 纯比较：已识别 `pairs` 里有没有与当前 embedder 不兼容的组合。兼容返回
+ *  `null`；不兼容返回面向用户/LLM 的完整错误信息。legacy 行不在判断之内
+ *  （没有 model 记录，无从比对——由调用方按 `identified < total` 提示）。 */
+export function describeEmbedderMismatch(
+  pairs: EmbedIdentityPair[],
+  current: { model: string; dim: number },
+): string | null {
+  const bad = pairs.find((p) => p.model !== current.model || p.dim !== current.dim);
+  if (!bad) return null;
+  return (
+    `This collection was indexed with embedding model "${bad.model}" (dim=${bad.dim}), ` +
+    `but the current embedder is "${current.model}" (dim=${current.dim}). ` +
+    `Vectors from different models live in incompatible spaces, so searching it now would ` +
+    `return meaningless scores. Either re-index the collection with the current embedder, ` +
+    `or switch the embedder back in Settings → Knowledge.`
+  );
+}
+
+/** legacy 警告的去重集合——按 collection 只警告一次。模块级状态天然按 JS
+ *  context 隔离（sidepanel 与 background 各一份），互不影响。 */
+const legacyWarned = new Set<string>();
+
+/** 「存在无法验证 model 的行」的一次性警告。守卫不拦这种 collection（可能是
+ *  追踪引入前的老数据；「换了模型还没重索引」的更危险情形已被 mismatch 分支
+ *  拦下），但必须让用户知道要 re-index 才能保证检索质量可验证。 */
+export function warnLegacyEmbedRows(collection: string, legacyCount: number): void {
+  if (legacyWarned.has(collection)) return;
+  legacyWarned.add(collection);
+  console.warn(
+    `[RAG] collection "${collection}" has ${legacyCount} chunk(s) without embed-model metadata ` +
+      `(indexed before model tracking). Re-index it to make retrieval quality verifiable.`,
+  );
+}
+
 /** Format a `number[]` into the Postgres `vector` literal shape:
  *  `[0.1,0.2,...]`. Used at INSERT time. pgvector accepts the array
  *  literal directly when cast to `vector` in the SQL. */

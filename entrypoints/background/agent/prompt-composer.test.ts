@@ -290,6 +290,20 @@ describe('composeSystemPrompt', () => {
     expect(prompt).toContain('call `rag_search`');
     expect(prompt).toContain('For deeper lookups beyond the pre-injected chunks');
   });
+
+  it('全局开关关闭但 ragSearchUnlocked=true（ghim collection）→ prompt 仍注入 rag_search', async () => {
+    // Pin 解锁路径：effective flag = 全局开关 OR 本会话解锁。两个 placeholder
+    // 必须同时出现（与 tool 侧同一 flag，见 lib/tools/index.ts 的 push 条件）。
+    await ragSettings.setValue({ ragSearchEnabled: false } as never);
+    const unlocked = await composeSystemPrompt('s', false, undefined, undefined, true);
+    expect(unlocked).toMatch(/^\s*-\s+\*\*rag_search\*\*/m);
+    expect(unlocked).toContain('call `rag_search`');
+
+    // 对照：同一关闭状态下未解锁 → 两处都不出现（OFF byte-identical 承诺不变）。
+    const locked = await composeSystemPrompt('s', false, undefined, undefined, false);
+    expect(locked).not.toMatch(/^\s*-\s+\*\*rag_search\*\*/m);
+    expect(locked).not.toContain('call `rag_search`');
+  });
 });
 
 describe('composeUserMessage', () => {

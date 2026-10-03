@@ -49,7 +49,7 @@ import {
   projectEntries,
   type BranchEntryInfo,
 } from '@/lib/agent/session-projection';
-import { extractImages, type Attachment } from '@/lib/agent/attachments';
+import { extractImages, hasPinnedRagContext, textHasPinnedRagContext, type Attachment } from '@/lib/agent/attachments';
 import { createSessionTools, buildSessionToolArray } from '@/lib/tools';
 import { runSkillGate } from '@/lib/tools/run-skill';
 import type { SessionToolContext } from '@/lib/tools/session-context';
@@ -676,6 +676,14 @@ class SessionManager {
               // Telegram session（forceFast）恒 Fast——全局翻转不渗透
               workerTeamOn: teamOn && !agentSession.forceFast,
               getMainModel: () => agentSession.modelIdentity,
+              // 本会话的 rag_search pin 解锁证据从活转录的 user message 里重取：
+              // refresh 由 MCP / 搜索引擎 / Fast/Team 配置变更触发，可落在 pinned
+              // 会话的两次 send 之间——不带这个 flag 会把 rag_search 从 tool list
+              // 剥掉，而 system prompt（上次 send 用 unlocked=true 拼的）还在宣传
+              // 它，正 fell into「prompt 有 tool 无」的 desync。
+              ragSearchUnlocked: this.lastUserTextHasPinnedRag(
+                agentSession.agent.state.messages,
+              ),
             },
           );
           // 已有更新的重建在跑/已完成 → 本次结果过期，弃写（弃的是赋值，
@@ -1527,10 +1535,15 @@ class SessionManager {
     const personaIdentityValue = personaOn
       ? await personaIdentity.getValue()
       : { name: '', vibe: '', tone: '', emoji: '' };
+    // rag_search 的本会话 pin 解锁证据：本轮 attachment 里有 `pinned="true"` 的
+    // rag-context（= 用户 ghim 了 collection）。同一 snapshot 喂给 tool array
+    // 与 system prompt，两侧由同一 flag 驱动（与 workerTeamOn 同款）。
+    const ragSearchUnlocked = hasPinnedRagContext(attachments);
     const tools = await buildSessionToolArray(agentSession.toolCtx, {
       broadcast: (msg) => broadcastToViewers(sessionId, msg),
       workerTeamOn,
       getMainModel: () => agentSession.modelIdentity,
+      ragSearchUnlocked,
     });
     if (this.sessions.get(sessionId) !== agentSession) {
       this.releaseTrace(sessionId);
@@ -1555,7 +1568,13 @@ class SessionManager {
       return;
     }
 
-    const refreshedSystemPrompt = await composeSystemPrompt(sessionId, memoryEnabled, workerTeamOn, personaOn);
+    const refreshedSystemPrompt = await composeSystemPrompt(
+      sessionId,
+      memoryEnabled,
+      workerTeamOn,
+      personaOn,
+      ragSearchUnlocked,
+    );
     if (this.sessions.get(sessionId) !== agentSession) {
       this.releaseTrace(sessionId);
       return;
@@ -2512,13 +2531,23 @@ class SessionManager {
       const personaIdentityValue = personaOn
         ? await personaIdentity.getValue()
         : { name: '', vibe: '', tone: '', emoji: '' };
+      const ragSearchUnlocked = this.lastUserTextHasPinnedRag(truncated);
       const refreshedTools = await buildSessionToolArray(agentSession.toolCtx, {
         broadcast: (msg) => broadcastToViewers(sessionId, msg),
         workerTeamOn,
         getMainModel: () => agentSession.modelIdentity,
+        // retry/edit 的 pin 解锁证据：目标 user message 的文本里带 `pinned="true"`
+        // 的 rag-context envelope（回卷路径手里只有树上的消息文本）。
+        ragSearchUnlocked,
       });
       agentSession.agent.state.tools = refreshedTools;
-      const refreshedSystemPrompt = await composeSystemPrompt(sessionId, undefined, workerTeamOn, personaOn);
+      const refreshedSystemPrompt = await composeSystemPrompt(
+        sessionId,
+        undefined,
+        workerTeamOn,
+        personaOn,
+        ragSearchUnlocked,
+      );
       agentSession.agent.state.systemPrompt = refreshedSystemPrompt;
 
       // 同步最后一条 user message 的 reminder 块：用户原 turn 是用当时的 Team/Fast
@@ -3093,6 +3122,44 @@ class SessionManager {
     const out = truncated.slice();
     out[lastIdx] = next;
     return out;
+  }
+
+  /**
+   * retry/edit 路径的 rag_search pin 解锁证据：最后一条 user message 的文本
+   * （envelope 所在的首个 text 块——与 `rewriteUserMessageReminder` 同一提取
+   * 口径；`extractUserText` 会把 envelope strip 掉，不能用）里是否带
+   * `pinned="true"` 的 rag-context。
+   *
+   * **Invariant 前提（load-bearing，勿破坏）**：`agent.state.messages` 是
+   * append-only——compaction 只在尾部追加 compactionSummary marker，原始消息
+   * （含 envelope 文本）**永不删除**（`applyCompaction` 只做 `[...plan.messages,
+   * marker]`；LLM 视图由 `transformContext` 另行重建）。若将来有人把 compaction
+   * 改成「替换/删除旧消息」，本谓词会静默失去证据，pin-unlock 在 compaction 后
+   * 悄悄熄灭——正是「同维度换模型」级别的无声地雷。
+   *
+   * **已知局限（记录在案，暂不修）**：证据是 message-scoped，而 pin 是 UI 会话
+   * 级的——retry 一个**早于 ghim 时刻**的历史轮次时，truncated 里没有 envelope
+   * → 该轮没有 rag_search（pin 灯在 UI 仍亮）。这是自洽的：模型在该轮的视图里
+   * 本来就没有 pinned chunks，且下一次正常 send 即恢复。要修需让 sidebar 把当前
+   * pin 状态随 retry 消息捎给后台（新增 IPC 字段）——债务，本轮不做。
+   */
+  private lastUserTextHasPinnedRag(messages: AgentMessage[]): boolean {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role !== 'user') continue;
+      const content = m.content;
+      const text =
+        typeof content === 'string'
+          ? content
+          : Array.isArray(content)
+            ? (content.find(
+                (b): b is { type: 'text'; text: string } =>
+                  typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text',
+              )?.text ?? '')
+            : '';
+      return textHasPinnedRagContext(text);
+    }
+    return false;
   }
 
   /** Get current state for a session (for reconnecting clients).

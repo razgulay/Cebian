@@ -437,8 +437,61 @@ describe('commit*Cancel() race guards — silent exit if session was destroyed',
   });
 });
 
-describe('rewindAndResume — Worker Team snapshot sync', () => {
-  // Subtask 2: retry/edit 路径必须在 continue() 之前用同一份 `workerTeamOn`
+describe('refreshAllSessionTools — rag_search pin 解锁证据重取', () => {
+  // ST5 回归护栏：refresh 由 MCP / 搜索引擎 / Fast-Team 配置变更触发，可落在
+  // pinned 会话的两次 send 之间。若不从活转录重取 pin 证据，rag_search 会被
+  // 从 tool list 剥掉，而 system prompt 仍在宣传它——「prompt 有 tool 无」的
+  // desync。此处断言 flag 确实从最后一条 user message 的 envelope 重算。
+  beforeEach(() => {
+    mocks.workerTeamEnabled.getValue.mockResolvedValue(false);
+    mocks.buildSessionToolArray.mockResolvedValue([]);
+  });
+
+  function toolOpts(callIndex: number) {
+    return (mocks.buildSessionToolArray.mock.calls[callIndex] as unknown[])[1] as {
+      ragSearchUnlocked?: boolean;
+    };
+  }
+
+  it('pinned rag envelope 在转录里 → refresh 传 ragSearchUnlocked=true', async () => {
+    const s = makeSession({
+      sessionId: 'sess-refresh-pinned',
+      phase: 'idle',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: '<attached-rag-context pinned="true" collection="phaply" count="0" reason="empty">\n</attached-rag-context>\n\n<user-request>\nq\n</user-request>',
+            },
+          ],
+        },
+      ],
+    });
+    (sessionManager as any).sessions.set('sess-refresh-pinned', s);
+
+    await (sessionManager as any).refreshAllSessionTools();
+
+    expect(mocks.buildSessionToolArray).toHaveBeenCalledTimes(1);
+    expect(toolOpts(0).ragSearchUnlocked).toBe(true);
+  });
+
+  it('转录无 pinned envelope → refresh 传 ragSearchUnlocked=false', async () => {
+    const s = makeSession({
+      sessionId: 'sess-refresh-plain',
+      phase: 'idle',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '<user-request>\nq\n</user-request>' }] }],
+    });
+    (sessionManager as any).sessions.set('sess-refresh-plain', s);
+
+    await (sessionManager as any).refreshAllSessionTools();
+
+    expect(toolOpts(0).ragSearchUnlocked).toBe(false);
+  });
+});
+
+describe('rewindAndResume — Worker Team snapshot sync', () => {  // Subtask 2: retry/edit 路径必须在 continue() 之前用同一份 `workerTeamOn`
   // 喂给 tool array + system prompt，否则用户在 idle 时从 Team 切到 Fast 后立刻
   // 按 Retry，prompt 还在说「DEFAULT to delegate_task」但 tool list 已经没有。
 

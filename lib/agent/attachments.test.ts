@@ -1,12 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTextPrefix,
+  hasPinnedRagContext,
   isPdfFile,
   MAX_IMAGE_SIZE,
   MAX_TEXT_FILE_SIZE,
   planFileIntake,
+  textHasPinnedRagContext,
   type Attachment,
 } from './attachments';
+
+describe('hasPinnedRagContext / textHasPinnedRagContext', () => {
+  const pinnedRag: Attachment = {
+    type: 'rag-context',
+    collection: 'phaply',
+    query: 'q',
+    chunks: [],
+    pinned: true,
+  };
+  const unpinnedRag: Attachment = {
+    type: 'rag-context',
+    collection: 'docs',
+    query: 'q',
+    chunks: [],
+  };
+
+  it('structured: chỉ rag-context có pinned="true" mới tính là unlock', () => {
+    expect(hasPinnedRagContext([pinnedRag])).toBe(true);
+    expect(hasPinnedRagContext([unpinnedRag])).toBe(false);
+    expect(hasPinnedRagContext([unpinnedRag, pinnedRag])).toBe(true);
+    expect(hasPinnedRagContext(undefined)).toBe(false);
+    expect(hasPinnedRagContext([])).toBe(false);
+  });
+
+  it('text: nhận diện envelope rag-context có pinned="true", bỏ qua loại khác', () => {
+    expect(
+      textHasPinnedRagContext(
+        '<attached-rag-context pinned="true" collection="phaply" count="0" reason="empty">\nx\n</attached-rag-context>',
+      ),
+    ).toBe(true);
+    expect(
+      textHasPinnedRagContext('<attached-rag-context collection="docs" count="2">\n</attached-rag-context>'),
+    ).toBe(false);
+    // directory/file cũng dùng pinned="true" — tag khác, không được误命中。
+    expect(textHasPinnedRagContext('<attached-directory pinned="true" path="/x">…</attached-directory>')).toBe(false);
+    expect(textHasPinnedRagContext('plain text without envelope')).toBe(false);
+  });
+});
 
 
 describe('isPdfFile', () => {
@@ -143,7 +183,7 @@ describe('buildTextPrefix — pinned mention envelopes', () => {
       type: 'rag-context',
       collection: 'phaply',
       query: 'hello',
-      chunks: [{ sourcePath: 'a.md', chunkIndex: 0, content: 'hi', score: 0.9 }],
+      chunks: [{ sourcePath: 'a.md', chunkIndex: 0, content: 'hi' }],
       pinned: true,
     };
     const xml = buildTextPrefix([rag]);

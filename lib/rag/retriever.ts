@@ -141,9 +141,8 @@ export async function retrieve(opts: RetrieveOptions): Promise<RetrievedChunk[]>
         sourcePath: original.sourcePath,
         chunkIndex: original.chunkIndex,
         content: original.content,
-        // Surface the reranker's relevance score so the LLM sees the
-        // model's confidence ordering, not the noisy cosine / RRF
-        // number.
+        // 用 reranker 的 relevance 替掉 Lớp-1 的噪声数值。这个 score 仅内部
+        // 使用（绝不渲染给 LLM——envelope 只带顺序），为将来的过滤语义保留。
         score: r.relevanceScore,
         // Preserve the context prefix (if any) through the rerank
         // pass — the prefix doesn't change, only the order does.

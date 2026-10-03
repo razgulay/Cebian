@@ -17,7 +17,7 @@ import { fsListTool } from './fs-list';
 import { fsSearchTool } from './fs-search';
 import { fsSaveUrlTool } from './fs-save-url';
 import { ragInspectTool } from './rag-inspect';
-import { ragSearchTool } from './rag-search';
+import { createRagSearchTool } from './rag-search';
 import { createSessionRunSkillTool } from './run-skill';
 import { chromeApiTool } from './chrome-api-tool';
 import { createWebSearchTool } from './web-search';
@@ -40,18 +40,20 @@ interface SessionToolOptions {
   workerTeamOn?: boolean;
   /** 当前主会话模型，供 worker 未配置 per-role model 时继承。 */
   getMainModel?: () => ModelIdentity | null;
+  /** 本会话因 ghim 了 RAG collection 而解锁 `rag_search`（证据 = 本轮 send /
+   *  retry 的 attachment 里有 `pinned="true"` 的 rag-context）。与全局开关
+   *  「或」起来决定工具是否进列表；全局开关单独由 `ragSearchEnabled` 负责。 */
+  ragSearchUnlocked?: boolean;
 }
 
 /** Non-interactive tools shared by all sessions. `runSkillTool` is intentionally
  *  NOT here —— 每个 session 用 `createSessionRunSkillTool(sessionId)` 拿到
  *  绑定到该 session workspace 的实例，避免 vfs 写入丢失会话上下文。
  *
- *  `ragSearchTool` is intentionally NOT here either — see
- *  `buildSessionToolArray` which conditionally pushes it based on
- *  `settings.ragSearchEnabled`. Adding it to `sharedTools` would
- *  ship it unconditionally, which both slows down tool-selection
- *  cost AND lets the LLM hallucinate calls when the user has the
- *  toggle off. */
+ *  `createRagSearchTool` 也刻意不在这里 —— 它是 per-session 工厂，由
+ *  `buildSessionToolArray` 按 `settings.ragSearchEnabled`（及后续的 pin 解锁）
+ *  条件构造并推入。放进 `sharedTools` 就变成无条件携带：既拖慢工具选择成本，
+ *  又让用户关掉开关时 LLM 幻觉调用。 */
 const sharedTools: AgentTool<any>[] = [
   executeJsTool, readPageTool, interactTool, inspectTool, tabTool, screenshotTool, pdfTool,
   fsCreateFileTool, fsEditFileTool, fsMkdirTool, fsRenameTool, fsDeleteTool,
@@ -147,7 +149,7 @@ export async function buildSessionToolArray(
   const options: SessionToolOptions = typeof optionsOrBroadcast === 'function'
     ? { broadcast: optionsOrBroadcast }
     : optionsOrBroadcast ?? {};
-  const { broadcast, getMainModel } = options;
+  const { broadcast, getMainModel, ragSearchUnlocked } = options;
   const teamOn = options.workerTeamOn ?? (await workerTeamEnabled.getValue());
   // Cold-start profiling: MCP discovery and the lazy delegate_dom import are
   // the two async paths in this function. Log each so we can see which one
@@ -208,8 +210,13 @@ export async function buildSessionToolArray(
       durationMs: Date.now() - ragSettingsStart,
       enabled: currentRagSettings.ragSearchEnabled,
     }, ctx.sessionId));
-  if (currentRagSettings.ragSearchEnabled) {
-    base.push(ragSearchTool);
+  if (currentRagSettings.ragSearchEnabled || ragSearchUnlocked) {
+    // per-session 工厂。push 条件 = 全局开关 OR 本会话 pin 解锁；**第二个参数
+    // 只接收 pin-unlock**，绝不把全局开关喂给它——否则开关 BẬT 时构造出的工具
+    // unlocked 恒真，execute 侧的安全网（开关关到一半的 run 里残留工具调用必须
+    // throw）就死了。全局开关只由上面的 push 条件负责。pin 证据由调用方
+    // （session-manager 的 send / retry 路径）从本轮 attachment 提取后传入。
+    base.push(createRagSearchTool(ragSearchUnlocked === true));
   }
   // `web_search` — 按当前引擎配置构造，描述里列出启用的引擎；同 MCP /
   // RAG 一样每次 rebuild 重新读取，watchToolConfig 在引擎增删/启停时

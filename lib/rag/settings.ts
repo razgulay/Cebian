@@ -60,6 +60,14 @@ export function normalizeCollectionName(raw: string): string | null {
   return capped;
 }
 
+/** 本地已知的 collection 名（截断到 `limit`），只用于给 LLM 的**建议性**提示
+ *  （「known on this device」）。local meta 已被证明会漂移（以 Neon 为准），
+ *  因此绝不能参与存在性判断——判断一律走 Neon 的查询结果。 */
+export async function listKnownCollectionNames(limit = 10): Promise<string[]> {
+  const all = await ragCollections.getValue();
+  return all.map((c) => c.name).slice(0, limit);
+}
+
 /** Replace or insert a collection entry by name. Used by the indexer
  *  after a successful run. */
 export async function upsertCollection(entry: RagCollection): Promise<RagCollection[]> {

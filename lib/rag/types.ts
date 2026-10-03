@@ -133,10 +133,10 @@ export interface RagSettings {
   // When enabled, the main agent can call `rag_search` as a tool to
   // run its own hybrid queries during the conversation, beyond the
   // top-5 chunks pre-injected at send time. The tool itself lives in
-  // `lib/tools/rag-search.ts`; this flag controls two side effects:
-  //   • `lib/tools/index.ts` conditionally pushes `ragSearchTool`
-  //     into `sharedTools` (off → tool list doesn't include it, so
-  //     the LLM can't pick it).
+  // `lib/tools/rag-search.ts`（per-session 工厂 `createRagSearchTool`）；
+  // 此 flag 控制两个副作用：
+  //   • `lib/tools/index.ts` 构造并条件推入该工具（off → tool list 不含它，
+  //     LLM 无法选中）。
   //   • `entrypoints/background/agent/system-prompt.ts` injects the
   //     tool description into the RAG Workflow section (off → no
   //     mention in prompt, so the LLM won't hallucinate calls to a
@@ -194,8 +194,11 @@ export interface RetrievedChunk {
   sourcePath: string;
   chunkIndex: number;
   content: string;
-  /** Cosine similarity in [-1, 1]; for normalized embeddings, [0, 1].
-   *  Hybrid mode uses RRF score instead — roughly [0, 0.033] for k=60. */
+  /** 仅内部使用的相关度数值——vector 模式为 cosine similarity（[-1, 1]），
+   *  hybrid 模式为 RRF 分数（k=60 时约 [0, 0.033]），rerank 过一遍后则是
+   *  reranker 的 relevanceScore（又一把不同的标尺）。**绝不渲染给 LLM**：
+   *  envelope 只携带顺序，数字会诱导跨调用比较与自行设阈值（pinMinScore 的
+   *  教训）。保留此字段是为了（目前休眠的）`minScore` 过滤钩子。 */
   score: number;
   /** Subtask 3 — Contextual Retrieval prefix. LLM-generated at index
    *  time when CR was enabled; `null` for chunks indexed before CR or
