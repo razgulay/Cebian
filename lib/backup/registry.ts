@@ -46,6 +46,7 @@ import {
   chatFontFamily,
   lastOpenSessionId,
   composerPinnedContexts,
+  sessionPinnedContexts,
   workerModels,
   workerTeamEnabled,
   chatSkillAuto,
@@ -682,6 +683,7 @@ export const BACKUP_REGISTRY: BackupEntry<any>[] = [
     },
   }),
   entry({ item: canvasPanelOpen, storageClass: 'exclude' }),
+  entry({ item: sessionPinnedContexts, storageClass: 'exclude' }),
 ];
 
 /** BACKUP_REGISTRY 中所有已登记的 storage key 集合（供覆盖性测试比对）。 */

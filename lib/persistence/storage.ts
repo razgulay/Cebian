@@ -533,12 +533,41 @@ export type ComposerPinnedContext =
  *  the same item rides along on every chat (existing or new) until the
  *  user unpins it; unpinning removes it everywhere at once. Real-time
  *  sync across already-open sidepanels comes free via `useStorageItem`'s
- *  `watch` subscription. Folder / file / RAG pins are deliberately NOT
- *  stored here — they stay session-scoped React state in ChatInput
- *  (transient VFS paths would be a poor roaming preference). */
+ *  `watch` subscription. Folder / file / RAG pins live separately in
+ *  `session:composerPinnedSessionPins` below — persisted per conversation
+ *  (not here) because they are chat-scoped UI state, not a roaming
+ *  preference. */
 export const composerPinnedContexts = defineLoggedItem<ComposerPinnedContext[]>(
   'local:composerPinnedContexts',
   { fallback: [] },
+);
+
+/** Shape of a session-scoped pin persisted in `sessionPinnedContexts`. Same
+ *  inline-shape discipline as `ComposerPinnedContext` above: the persistence
+ *  layer must not import agent/UI unions, and the consumer-side (`PinnedMention`
+ *  in `lib/agent/mention-resolver.ts`) is structurally identical for these
+ *  three variants. */
+export type SessionPinnedContext =
+  | { kind: 'vfs-dir'; id: string; path: string; label: string }
+  | { kind: 'vfs-file'; id: string; path: string; label: string; size?: number }
+  | { kind: 'rag-collection'; id: string; collection: string };
+
+/** Per-conversation session pins (folder / file / RAG-collection chips),
+ *  keyed by chat sessionId. Lives in `session:` storage so pins survive
+ *  route unmount (opening Settings), switching chats away and back, and
+ *  sidepanel reopen — and auto-clear when the browser session ends. The
+ *  `''` key holds pins made on `/chat/new` before the chat exists; ChatInput
+ *  migrates that bucket into the real sessionId at first send.
+ *
+ *  One record for all chats (not a key per chat): WXT `watch` gives every
+ *  open sidepanel live updates for free, and the payload is a few hundred
+ *  bytes per chatting session. Two simultaneously-open panels write
+ *  last-write-wins on the whole record — same caveat class as
+ *  `canvasPanelOpen`. Device-local transient UI state, meaningless in
+ *  backups (exclude). */
+export const sessionPinnedContexts = defineLoggedItem<Record<string, SessionPinnedContext[]>>(
+  'session:composerPinnedSessionPins',
+  { fallback: {} },
 );
 
 /** Width of the file-tree panel inside FileWorkspace (Prompts / Skills sections). */

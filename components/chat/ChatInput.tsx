@@ -22,7 +22,7 @@ import {
 import { detectAtToken } from '@/components/chat/detect-at-token';
 import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator';
 import { useStorageItem } from '@/hooks/useStorageItem';
-import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
+import { providerCredentials, customProviders as customProvidersStorage, expandPromptsInline, composerPinnedContexts, sessionPinnedContexts, type ThinkingLevel, type ModelIdentity } from '@/lib/persistence/storage';
 import type { ContextUsage } from '@/lib/ipc/protocol';
 import { getSupportedThinkingLevels, clampThinkingLevel } from '@earendil-works/pi-ai';
 import { resolveModel } from '@/lib/providers/resolve-model';
@@ -1014,14 +1014,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   //   • **Global pins** (prompts / skills) live in `local:composerPinnedContexts`
   //     and are intentionally NOT cleared here — they ride along into every
   //     chat until the user unpins them.
-  //   • **Session pins** (folders / files / RAG) are React-local and DO clear
-  //     when the user leaves a chat. The rule is asymmetric so a first-send
-  //     birth (`null → realId`) does not wipe in-flight session pins:
-  //       - prev === null: never clear (first send of a brand-new chat, or
-  //         page load before any chat is open).
-  //       - prev !== null && prev !== next: clear session pins (covers both
-  //         "New Chat" prev→null and "switch to other chat" prev→otherId).
-  // Failure bookkeeping is always session-local and clears with session pins.
+  //   • **Session pins** (folders / files / RAG) live in
+  //     `session:composerPinnedSessionPins` keyed by chat sessionId. They are
+  //     NOT cleared on switch — each chat keeps its own bucket, so pins come
+  //     back when the user returns to that chat and never leak into another
+  //     one. The only write this effect makes is the new-chat migration:
+  //     pins made on `/chat/new` sit under the `''` key and move to the real
+  //     sessionId at `null → realId` (first send creates the chat).
+  // Failure bookkeeping is component-local and still resets on chat switch.
   const previousSessionIdRef = useRef<string | null>(sessionId ?? null);
   useEffect(() => {
     setHistoryIndex(null);
@@ -1035,11 +1035,37 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     const prev = previousSessionIdRef.current;
     const next = sessionId ?? null;
     if (prev !== null && prev !== next) {
-      // Genuine exit from a chat (either to null, or to a different
-      // chat id) — drop only the session-scoped pins. Global pins stay.
-      setPinnedSession([]);
+      // Genuine exit from a chat (either to null, or to a different chat
+      // id). Session pins are keyed per chat in storage, so there is
+      // nothing to drop here — they stay attached to the chat they belong
+      // to and come back when the user returns. Only the failure
+      // bookkeeping is component-local and resets.
       setFailedPins(new Set());
       pinFailCountsRef.current.clear();
+    }
+    if (prev === null && next !== null) {
+      // Pins made before a session existed (the '' bucket on /chat/new)
+      // carry over into the chat that the next navigation lands on. The
+      // trigger is broader than "first send created the chat" — it also
+      // covers sidebar-click and panel-reopen paths that jump null → id —
+      // so the merge is id-deduped and NEVER overwrites: the target chat's
+      // own pins always win, draft pins only fill the gaps.
+      // Written via the storage item directly — this effect is declared
+      // before the `useStorageItem` mirror further down, and the mirror
+      // updates through its own `watch` subscription anyway.
+      void (async () => {
+        const map = await sessionPinnedContexts.getValue();
+        const pending = map[''];
+        if (!pending || pending.length === 0) return;
+        const nextMap: Record<string, typeof pending> = { ...map };
+        delete nextMap[''];
+        const existing = nextMap[next] ?? [];
+        nextMap[next] = [
+          ...existing,
+          ...pending.filter((p) => !existing.some((e) => e.id === p.id)),
+        ];
+        await sessionPinnedContexts.setValue(nextMap);
+      })();
     }
     previousSessionIdRef.current = next;
     interimSuffixRef.current = '';
@@ -1246,13 +1272,22 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   //     via `useStorageItem`. Once pinned, every chat (existing or new) keeps
   //     it; once unpinned, every chat drops it; the change syncs in real
   //     time across open sidepanels (WXT `watch`).
-  //   • **Session-scoped** (folders / files / RAG collections): plain React
-  //     state, cleared by the session-reset effect below. Transient VFS
-  //     paths don't make sense as a roaming preference.
+  //   • **Session-scoped** (folders / files / RAG collections): persisted in
+  //     `session:composerPinnedSessionPins` keyed by chat sessionId, so pins
+  //     survive route unmount (opening Settings), switching chats away and
+  //     back, and sidepanel reopen — and auto-clear when the browser session
+  //     ends. Keyed per chat, so pins never leak into other conversations.
   // The merged `pinned` array (global-first) drives every existing render /
   // resolver call site — the split is invisible outside this block.
   const [pinnedGlobal, setPinnedGlobal] = useStorageItem(composerPinnedContexts, []);
-  const [pinnedSession, setPinnedSession] = useState<PinnedMention[]>([]);
+  const [pinnedSessionMap, setPinnedSessionMap] = useStorageItem(sessionPinnedContexts, {});
+  // `''` bucket = pins made on /chat/new before the chat exists; migrated to
+  // the real sessionId at first send (see the session-reset effect above).
+  const sessionPinKey = sessionId ?? '';
+  const pinnedSession = useMemo(
+    () => pinnedSessionMap[sessionPinKey] ?? [],
+    [pinnedSessionMap, sessionPinKey],
+  );
   const pinned = useMemo(
     () => [...pinnedGlobal, ...pinnedSession],
     [pinnedGlobal, pinnedSession],
@@ -1366,24 +1401,26 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
   // Toggle a pin: branches on the item kind to decide where it lives.
   //
-  //   prompt | skill  → `local:composerPinnedContexts` (global, cross-session)
-  //   other kinds     → session-scoped `pinnedSession` (cleared on chat switch)
+  //   prompt | skill            → `local:composerPinnedContexts` (global, cross-session)
+  //   vfs-dir | vfs-file | rag  → `session:composerPinnedSessionPins[chatId]` (per conversation)
   //
   // The popover stamps a stable id per source (`prompt-${fileName}`,
   // `builtin-${id}`, `skill-${filePath}`) so toggling stays well-defined.
   //
-  // The global branch re-reads `composerPinnedContexts` from storage before
-  // computing `next` rather than reading `pinnedGlobal` from this render's
-  // closure. Reason: `useStorageItem.setValue` takes the full next value
-  // (not an updater function), and two rapid clicks within one render
-  // cycle (e.g. user pressing Enter then clicking another pin in <16ms)
-  // share the same `pinnedGlobal` snapshot and would both compute `next`
-  // from the same baseline — silently dropping the second pin. Reading
-  // from storage resolves to the latest committed value (including any
-  // pending writes) so each click sees the result of the previous one.
-  // The session branch uses a functional updater and doesn't have this
-  // race (single source of truth in React state).
+  // BOTH branches re-read from storage before computing `next` rather than
+  // reading this render's closure. Reason: `useStorageItem.setValue` takes
+  // the full next value (not an updater function), and two rapid clicks
+  // within one render cycle (e.g. user pressing Enter then clicking another
+  // pin in <16ms) share the same snapshot and would both compute `next`
+  // from the same baseline — silently dropping the second pin. Reading from
+  // storage resolves to the latest committed value (including any pending
+  // writes) so each click sees the result of the previous one.
   const togglePin = useCallback(async (item: PinnedMention) => {
+    // worker-role chips are directive-only (injected by handleSend, never
+    // shown in the pin popover) — they are not pinnable. Guarding here lets
+    // the storage branches below keep the narrow persisted shapes instead of
+    // the full PinnedMention union.
+    if (item.kind === 'worker-role') return;
     const clearFailBookkeeping = () => {
       pinFailCountsRef.current.delete(item.id);
       setFailedPins((prevSet) => {
@@ -1414,19 +1451,26 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       return;
     }
 
-    setPinnedSession((prev) => {
-      const exists = prev.some((p) => p.id === item.id);
-      const next = exists ? prev.filter((p) => p.id !== item.id) : [...prev, item];
-      if (exists) clearFailBookkeeping();
-      debugLog.info('ui', 'pin:toggle', {
-        kind: item.kind,
-        label: pinLabel(item),
-        action: exists ? 'unpin' : 'pin',
-        total: next.length,
-      });
-      return next;
+    // Session-scoped branch — same freshest-read discipline: the pins now
+    // live in `session:` storage keyed by chat, so the closure's map
+    // snapshot can be stale under rapid clicks exactly like the global one.
+    const map = await sessionPinnedContexts.getValue();
+    const list = map[sessionPinKey] ?? [];
+    const exists = list.some((p) => p.id === item.id);
+    const next = exists ? list.filter((p) => p.id !== item.id) : [...list, item];
+    const nextMap: Record<string, typeof next> = { ...map, [sessionPinKey]: next };
+    // Empty bucket → drop the key so the record doesn't accumulate
+    // per-chat tombstones.
+    if (next.length === 0) delete nextMap[sessionPinKey];
+    await setPinnedSessionMap(nextMap);
+    if (exists) clearFailBookkeeping();
+    debugLog.info('ui', 'pin:toggle', {
+      kind: item.kind,
+      label: pinLabel(item),
+      action: exists ? 'unpin' : 'pin',
+      total: next.length,
     });
-  }, [setPinnedGlobal]);
+  }, [setPinnedGlobal, setPinnedSessionMap, sessionPinKey]);
 
   /** Cheap helper for the popover to know if an item is currently pinned.
    *  State-based (not ref-based) so the icon can re-render when pins
@@ -1931,7 +1975,6 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 p.kind === 'prompt' ? `/${p.name}` :
                 p.kind === 'vfs-dir' || p.kind === 'vfs-file' ? p.label :
                 p.kind === 'rag-collection' ? p.collection :
-                p.kind === 'worker-role' ? `@${p.role}` :
                 p.name;
               const failTooltip = isFailed
                 ? t('chat.composer.pinReadFailed', [label])

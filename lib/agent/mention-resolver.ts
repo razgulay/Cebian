@@ -74,8 +74,11 @@ export type AttachableMentionChip = Exclude<MentionChip, { kind: 'worker-role' }
  *  the chat. Pin lifetime depends on the chip kind:
  *    • prompt / skill → global (stored in `local:composerPinnedContexts`,
  *      survives chat switches / new chats, syncs across sidepanels).
- *    • vfs-dir / vfs-file / rag-collection → session-scoped React state in
- *      ChatInput (cleared on chat switch).
+ *    • vfs-dir / vfs-file / rag-collection → per-conversation, persisted in
+ *      `session:composerPinnedSessionPins` keyed by chat sessionId (survives
+ *      route navigation, chat switches away/back, and sidepanel reopen;
+ *      auto-clears when the browser session ends). Pins never leak into a
+ *      different chat — each chat has its own bucket.
  *  Defined as the same shape as `MentionChip` because the resolver path is
  *  identical — pin vs. mention is purely a UI lifetime concern (persistent
  *  across sends vs. dropped after send). */
